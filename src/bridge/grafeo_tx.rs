@@ -1,83 +1,104 @@
-//! Loro→Grafeo mutation translator. Pure-function-shaped per-variant
-//! dispatcher from `LoroOp` to grafeo `Session` mutation calls.
+//! Loro→Grafeo mutation translator + shared id-mapping state.
 //!
-//! This module exists (Devil MAJOR M7 / orchestrator Gap 3 APPROVED) so the
-//! batcher's flush path can call a single `apply_loro_op` entry point that
-//! owns the `loro_key → grafeo::NodeId` lookup-or-create dance. Per-variant
-//! bodies are `// TODO L3`.
+//! `BridgeMaps` (Devil MAJOR M7 / orchestrator Gap 3 APPROVED) owns the four
+//! lookup tables that translate between Loro-side string keys and grafeo
+//! `NodeId`/`EdgeId`s. grafeo 0.5.42 has no upsert-by-external-id, so the
+//! inbound path maintains the forward (`loro_key → grafeo id`) and inverse
+//! (`grafeo id → loro_key`) maps itself. The outbound CDC poller reads the
+//! inverse maps to translate `ChangeEvent.entity_id` back into Loro keys.
 
 use std::collections::HashMap;
 
 use parking_lot::RwLock;
 
-use crate::error::Result;
+use crate::error::{GrafeoLoroError, Result};
 use crate::types::events::LoroOp;
+use crate::types::values::gval_to_grafeo_value;
+
+/// Composite key identifying a Loro-side edge: `(src_loro_key, dst_loro_key, label)`.
+pub type EdgeKey = (String, String, String);
+
+/// Shared bridge id-mapping state. Forward maps are read+written by the
+/// inbound apply path; inverse maps are read by the outbound CDC poller.
+/// All four maps are kept in lock-step by the helper methods below.
+#[derive(Default)]
+pub struct BridgeMaps {
+    /// `loro_key → grafeo::NodeId` (inbound lookup-or-create).
+    pub node_id_map: RwLock<HashMap<String, grafeo::NodeId>>,
+    /// `grafeo::NodeId → loro_key` (outbound reverse lookup).
+    pub node_key_map: RwLock<HashMap<grafeo::NodeId, String>>,
+    /// `(src_key, dst_key, label) → grafeo::EdgeId` (inbound edge idempotency).
+    pub edge_id_map: RwLock<HashMap<EdgeKey, grafeo::EdgeId>>,
+    /// `grafeo::EdgeId → (src_key, dst_key, label)` (outbound reverse lookup).
+    pub edge_key_map: RwLock<HashMap<grafeo::EdgeId, EdgeKey>>,
+}
+
+impl BridgeMaps {
+    /// Construct fresh empty maps.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a `loro_key ↔ grafeo::NodeId` binding in both forward and
+    /// inverse maps. Overwrites any prior binding for either side.
+    pub fn insert_node(&self, loro_key: String, id: grafeo::NodeId) {
+        self.node_id_map.write().insert(loro_key.clone(), id);
+        self.node_key_map.write().insert(id, loro_key);
+    }
+
+    /// Remove a `loro_key ↔ grafeo::NodeId` binding from both maps. Returns
+    /// the grafeo id if the key was present (no-op otherwise).
+    pub fn remove_node(&self, loro_key: &str) -> Option<grafeo::NodeId> {
+        let id = self.node_id_map.write().remove(loro_key)?;
+        self.node_key_map.write().remove(&id);
+        Some(id)
+    }
+
+    /// Record an `EdgeKey ↔ grafeo::EdgeId` binding in both maps.
+    pub fn insert_edge(&self, key: EdgeKey, id: grafeo::EdgeId) {
+        self.edge_id_map.write().insert(key.clone(), id);
+        self.edge_key_map.write().insert(id, key);
+    }
+
+    /// Remove an edge binding by `EdgeKey`. Returns the grafeo id if present.
+    pub fn remove_edge(&self, key: &EdgeKey) -> Option<grafeo::EdgeId> {
+        let id = self.edge_id_map.write().remove(key)?;
+        self.edge_key_map.write().remove(&id);
+        Some(id)
+    }
+
+    /// Remove an edge binding by grafeo `EdgeId`. Returns the Loro-side key
+    /// tuple if present (used when translating a CDC `EdgeDelete` event).
+    pub fn remove_edge_by_id(&self, id: grafeo::EdgeId) -> Option<EdgeKey> {
+        let key = self.edge_key_map.write().remove(&id)?;
+        self.edge_id_map.write().remove(&key);
+        Some(key)
+    }
+}
 
 /// Apply a single `LoroOp` to a grafeo `Session` (already inside a
 /// `begin_transaction()` / `prepare_commit()` pair). Looks up `loro_key` in
-/// `node_id_map`; on hit, mutates the existing node; on miss, creates a new
-/// node and inserts the mapping. Edges and tree moves follow the same
-/// lookup-or-create pattern against `src_key` / `dst_key` / `node_key`.
-///
-/// # Arguments
-///
-/// - `session` — a `grafeo::Session` with an active transaction. Mutation
-///   methods on `Session` (`create_node_with_props`, `set_node_property`,
-///   `delete_node`, ...) take `&self`, so passing `&Session` is sufficient.
-/// - `op` — the translated Loro mutation.
-/// - `node_id_map` — shared `loro_key → grafeo::NodeId` mapping. Updated
-///   in-place when a new node is created.
-pub fn apply_loro_op(
-    session: &grafeo::Session,
-    op: &LoroOp,
-    node_id_map: &RwLock<HashMap<String, grafeo::NodeId>>,
-) -> Result<()> {
-    let _ = (session, op, node_id_map);
+/// the forward maps; on hit, mutates the existing entity; on miss, creates a
+/// new entity and inserts both forward and inverse bindings. Delete ops are
+/// idempotent (missing key = no-op). `TreeMove` is implemented as
+/// delete-old-CHILD-edge + insert-new-CHILD-edge per L3 mandate.
+pub fn apply_loro_op(session: &grafeo::Session, op: &LoroOp, maps: &BridgeMaps) -> Result<()> {
     match op {
         LoroOp::UpsertNode {
             loro_key,
             labels,
             properties,
-        } => {
-            // TODO L3:
-            //   let map_guard = node_id_map.read();
-            //   if let Some(&id) = map_guard.get(loro_key) {
-            //       // Existing node — set each property.
-            //       for (k, v) in properties {
-            //           session.set_node_property(id, k, graph_value_to_grafeo_value(v))?;
-            //       }
-            //   } else {
-            //       drop(map_guard);
-            //       // New node — create with labels + props, insert into map.
-            //       let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-            //       let props_iter = properties.iter().map(|(k, v)| (k.as_str(), graph_value_to_grafeo_value(v)));
-            //       let id = session.create_node_with_props(&label_refs, props_iter)?;
-            //       node_id_map.write().insert(loro_key.clone(), id);
-            //   }
-            let _ = (loro_key, labels, properties);
-            Ok(())
-        }
+        } => apply_upsert_node(session, loro_key, labels, properties, maps),
         LoroOp::UpsertEdge {
             src_key,
             dst_key,
             label,
             properties,
-        } => {
-            // TODO L3: look up src + dst NodeIds via node_id_map (both must
-            // exist — if either is missing, log + skip or error per L3
-            // policy), then `session.create_edge_with_props(src, dst, label,
-            // props)`. Edge `loro_key` mapping is not yet maintained; L3
-            // may extend the engine to keep a separate edge map.
-            let _ = (src_key, dst_key, label, properties);
-            Ok(())
-        }
+        } => apply_upsert_edge(session, src_key, dst_key, label, properties, maps),
         LoroOp::DeleteNode { loro_key } => {
-            // TODO L3:
-            //   let mut map_guard = node_id_map.write();
-            //   if let Some(id) = map_guard.remove(loro_key) {
-            //       session.delete_node(id);
-            //   }
-            let _ = loro_key;
+            if let Some(id) = maps.remove_node(loro_key) {
+                session.delete_node(id);
+            }
             Ok(())
         }
         LoroOp::DeleteEdge {
@@ -85,21 +106,98 @@ pub fn apply_loro_op(
             dst_key,
             label,
         } => {
-            // TODO L3: look up edge by (src, dst, label) — requires either
-            // a maintained edge map or a query. L3 decides.
-            let _ = (src_key, dst_key, label);
+            let key = (src_key.clone(), dst_key.clone(), label.clone());
+            if let Some(id) = maps.remove_edge(&key) {
+                session.delete_edge(id);
+            }
             Ok(())
         }
         LoroOp::TreeMove {
             node_key,
             old_parent_key,
             new_parent_key,
-        } => {
-            // TODO L3: translate to delete-old-CHILD-edge +
-            //   insert-new-CHILD-edge. See `schema::tree::sync_tree_move_to_grafeo`
-            //   for the legacy entry point (L3 may consolidate).
-            let _ = (node_key, old_parent_key, new_parent_key);
-            Ok(())
-        }
+        } => apply_tree_move(session, node_key, old_parent_key, new_parent_key, maps),
     }
+}
+
+fn apply_upsert_node(
+    session: &grafeo::Session,
+    loro_key: &str,
+    labels: &[String],
+    properties: &HashMap<String, crate::types::values::GraphValue>,
+    maps: &BridgeMaps,
+) -> Result<()> {
+    if let Some(&id) = maps.node_id_map.read().get(loro_key) {
+        for (k, v) in properties {
+            session.set_node_property(id, k.as_str(), gval_to_grafeo_value(v.clone()))?;
+        }
+        return Ok(());
+    }
+    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let props_iter = properties
+        .iter()
+        .map(|(k, v)| (k.as_str(), gval_to_grafeo_value(v.clone())));
+    let id = session.create_node_with_props(&label_refs, props_iter)?;
+    maps.insert_node(loro_key.to_string(), id);
+    Ok(())
+}
+
+fn apply_upsert_edge(
+    session: &grafeo::Session,
+    src_key: &str,
+    dst_key: &str,
+    label: &str,
+    properties: &HashMap<String, crate::types::values::GraphValue>,
+    maps: &BridgeMaps,
+) -> Result<()> {
+    let (src_id, dst_id) = match (maps.node_id_map.read().get(src_key), maps.node_id_map.read().get(dst_key)) {
+        (Some(&s), Some(&d)) => (s, d),
+        _ => {
+            return Err(GrafeoLoroError::Config(format!(
+                "unknown node key(s): src={src_key:?} dst={dst_key:?}"
+            )));
+        }
+    };
+    let key: EdgeKey = (src_key.to_string(), dst_key.to_string(), label.to_string());
+    if let Some(&eid) = maps.edge_id_map.read().get(&key) {
+        for (k, v) in properties {
+            session.set_edge_property(eid, k.as_str(), gval_to_grafeo_value(v.clone()))?;
+        }
+        return Ok(());
+    }
+    let props_iter = properties
+        .iter()
+        .map(|(k, v)| (k.as_str(), gval_to_grafeo_value(v.clone())));
+    let eid = session.create_edge_with_props(src_id, dst_id, label, props_iter)?;
+    maps.insert_edge(key, eid);
+    Ok(())
+}
+
+/// Phase 1 tree move = delete old `CHILD` edge + insert new `CHILD` edge.
+/// `old_parent_key`/`new_parent_key` may map to the same node (idempotent).
+fn apply_tree_move(
+    session: &grafeo::Session,
+    node_key: &str,
+    old_parent_key: &str,
+    new_parent_key: &str,
+    maps: &BridgeMaps,
+) -> Result<()> {
+    let node_id = match maps.node_id_map.read().get(node_key) {
+        Some(&n) => n,
+        None => return Ok(()),
+    };
+    let new_parent_id = match maps.node_id_map.read().get(new_parent_key) {
+        Some(&n) => n,
+        None => return Ok(()),
+    };
+    let old_key: EdgeKey = (node_key.to_string(), old_parent_key.to_string(), "CHILD".to_string());
+    if let Some(id) = maps.remove_edge(&old_key) {
+        session.delete_edge(id);
+    }
+    let new_key: EdgeKey = (node_key.to_string(), new_parent_key.to_string(), "CHILD".to_string());
+    if maps.edge_id_map.read().get(&new_key).is_none() {
+        let eid = session.create_edge(node_id, new_parent_id, "CHILD");
+        maps.insert_edge(new_key, eid);
+    }
+    Ok(())
 }

@@ -1,7 +1,5 @@
 //! Inbound mutation batcher: collects `LoroOp`s and flushes them as a single
-//! vectorized Grafeo transaction tagged with `ORIGIN_LORO_BRIDGE`. All
-//! algorithm bodies are `// TODO L3`; the wiring (struct fields, channel
-//! plumbing, run-loop shape) is real and compiles.
+//! vectorized Grafeo transaction tagged with `ORIGIN_LORO_BRIDGE`.
 //!
 //! ## Wiring summary (Devil MAJOR M13)
 //!
@@ -11,23 +9,32 @@
 //!   after each `recv()` in the `run` loop.
 //! - `run` takes `self: Arc<Self>` (interior mutability via
 //!   `parking_lot::Mutex<Vec<LoroOp>>`) plus `mpsc::Receiver<LoroOp>`.
-//! - `flush` skeleton uses the grafeo `Session` + `PreparedCommit` API and
-//!   records the commit epoch in `bridge_origin_epochs` for echo prevention.
+//! - `flush_inner` applies each op via `apply_loro_op(&session, op, &maps)`,
+//!   then `prepare_commit` → `set_metadata` (advisory only) → `commit()`,
+//!   recording the resulting `EpochId` in `bridge_origin_epochs` for echo
+//!   prevention. The full flush is wrapped in a `tokio::time::timeout` so a
+//!   stuck grafeo transaction cannot hang the inbound `JoinHandle` (L2 new
+//!   issue #6).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use grafeo::GrafeoDB;
 use grafeo_common::types::EpochId;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
+use parking_lot::RwLock;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
 
-#[allow(unused_imports)] // Call site is `// TODO L3` in `flush_inner`; L3 uncomments it.
-use crate::bridge::grafeo_tx::apply_loro_op;
+use crate::bridge::grafeo_tx::{apply_loro_op, BridgeMaps};
 use crate::constants::{DEFAULT_BATCH_MS, DEFAULT_BATCH_SIZE, ORIGIN_LORO_BRIDGE};
-use crate::error::Result;
+use crate::error::{GrafeoLoroError, Result};
 use crate::types::events::LoroOp;
+
+/// Max wall-clock seconds for a single flush. If a grafeo transaction hangs,
+/// the inbound worker logs an error and continues so its `JoinHandle` does
+/// not block indefinitely (L2 new issue #6).
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Time-and-count-based mutation batcher. Owns its `LoroOp` buffer behind a
 /// `parking_lot::Mutex` (interior mutability — `run` takes `Arc<Self>`). The
@@ -47,25 +54,23 @@ pub struct MutationBatcher {
     /// `prepared.commit()` returns the `EpochId`, the batcher inserts it
     /// here so the outbound CDC poller can filter same-epoch events.
     pub(crate) bridge_origin_epochs: Arc<RwLock<HashSet<EpochId>>>,
-    /// Shared `loro_key → grafeo::NodeId` map. Passed to `apply_loro_op` so
-    /// the apply step can look up or create+insert nodes per
-    /// `LoroOp::UpsertNode`.
-    pub(crate) node_id_map: Arc<RwLock<HashMap<String, grafeo::NodeId>>>,
+    /// Shared id-mapping state (`loro_key ↔ grafeo::NodeId`,
+    /// `EdgeKey ↔ grafeo::EdgeId`). Passed to `apply_loro_op`.
+    pub(crate) maps: Arc<BridgeMaps>,
     /// Shutdown broadcast — `run` subscribes and exits on `trigger()`.
     pub(crate) shutdown_tx: broadcast::Sender<()>,
 }
 
 impl MutationBatcher {
     /// Construct a batcher with explicit tuning. Shared `bridge_origin_epochs`
-    /// and `node_id_map` are owned by the parent `SyncEngine` and passed in
-    /// by `Arc` clone so both the batcher and the engine/poller see the same
-    /// state.
+    /// and `maps` are owned by the parent `SyncEngine` and passed in by `Arc`
+    /// clone so both the batcher and the engine/poller see the same state.
     pub fn new(
         grafeo_db: Arc<GrafeoDB>,
         batch_size: usize,
         batch_ms: u64,
         bridge_origin_epochs: Arc<RwLock<HashSet<EpochId>>>,
-        node_id_map: Arc<RwLock<HashMap<String, grafeo::NodeId>>>,
+        maps: Arc<BridgeMaps>,
         shutdown_tx: broadcast::Sender<()>,
     ) -> Self {
         Self {
@@ -74,7 +79,7 @@ impl MutationBatcher {
             batch_size,
             batch_ms,
             bridge_origin_epochs,
-            node_id_map,
+            maps,
             shutdown_tx,
         }
     }
@@ -83,7 +88,7 @@ impl MutationBatcher {
     pub fn with_defaults(
         grafeo_db: Arc<GrafeoDB>,
         bridge_origin_epochs: Arc<RwLock<HashSet<EpochId>>>,
-        node_id_map: Arc<RwLock<HashMap<String, grafeo::NodeId>>>,
+        maps: Arc<BridgeMaps>,
         shutdown_tx: broadcast::Sender<()>,
     ) -> Self {
         Self::new(
@@ -91,7 +96,7 @@ impl MutationBatcher {
             DEFAULT_BATCH_SIZE,
             DEFAULT_BATCH_MS,
             bridge_origin_epochs,
-            node_id_map,
+            maps,
             shutdown_tx,
         )
     }
@@ -109,7 +114,6 @@ impl MutationBatcher {
             tokio::select! {
                 biased;
                 _ = shutdown_rx.recv() => {
-                    // Drain remaining ops + final flush on shutdown.
                     let drained: Vec<LoroOp> = {
                         let mut b = self.buffer.lock();
                         std::mem::take(&mut *b)
@@ -127,7 +131,6 @@ impl MutationBatcher {
                             continue;
                         }
                     }
-                    // Size threshold hit — flush now.
                     self.flush().await?;
                 }
                 _ = ticker.tick() => {
@@ -154,27 +157,42 @@ impl MutationBatcher {
 
     /// Inner flush: takes a pre-drained buffer and applies it as a single
     /// Grafeo transaction. Split out so `run`'s shutdown path can drain +
-    /// flush without re-acquiring the buffer lock twice.
+    /// flush without re-acquiring the buffer lock twice. Wrapped in
+    /// `tokio::time::timeout(FLUSH_TIMEOUT)` so a stuck grafeo commit cannot
+    /// hang the inbound `JoinHandle` (L2 new issue #6).
     async fn flush_inner(&self, ops: Vec<LoroOp>) -> Result<()> {
-        // TODO L3: implement actual flush body. Wiring below is real and
-        // compiles; L3 uncomments the apply_loro_op call after the apply
-        // function is filled in.
-        let mut session = self.grafeo_db.session_with_cdc(true);
-        session.begin_transaction()?;
-        for op in &ops {
-            // TODO L3: apply_loro_op(&session, op, &self.node_id_map)?;
-            let _ = (op, &self.node_id_map);
+        let grafeo_db = self.grafeo_db.clone();
+        let maps = self.maps.clone();
+        let epochs = self.bridge_origin_epochs.clone();
+        let op_count = ops.len();
+        let flush = async move {
+            let mut session = grafeo_db.session_with_cdc(true);
+            session.begin_transaction()?;
+            for op in &ops {
+                apply_loro_op(&session, op, &maps)?;
+            }
+            let mut prepared = session.prepare_commit()?;
+            // Note (Devil BLOCKER B2): `set_metadata` is dropped on `commit()`
+            // — it never reaches `ChangeEvent`. Kept for advisory logging only;
+            // the epoch side-channel is the real echo-prevention mechanism.
+            prepared.set_metadata("origin", ORIGIN_LORO_BRIDGE);
+            let epoch: EpochId = prepared.commit()?;
+            epochs.write().insert(epoch);
+            Ok(())
+        };
+        match tokio::time::timeout(FLUSH_TIMEOUT, flush).await {
+            Ok(res) => res,
+            Err(_) => {
+                tracing::error!(
+                    "inbound flush exceeded {:?} timeout; {} ops dropped",
+                    FLUSH_TIMEOUT,
+                    op_count
+                );
+                Err(GrafeoLoroError::Config(format!(
+                    "inbound flush timeout after {:?}",
+                    FLUSH_TIMEOUT
+                )))
+            }
         }
-        let mut prepared = session.prepare_commit()?;
-        // Note (Devil BLOCKER B2): `set_metadata` is dropped on `commit()`
-        // — it never reaches `ChangeEvent`. Kept for advisory logging only;
-        // the epoch side-channel is the real echo-prevention mechanism.
-        prepared.set_metadata("origin", ORIGIN_LORO_BRIDGE);
-        let epoch: EpochId = prepared.commit()?;
-        {
-            let mut set = self.bridge_origin_epochs.write();
-            set.insert(epoch);
-        }
-        Ok(())
     }
 }

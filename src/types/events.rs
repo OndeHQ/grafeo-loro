@@ -61,3 +61,11 @@ pub struct CdcEventWrapper {
     /// The underlying Grafeo CDC change event.
     pub payload: grafeo::cdc::ChangeEvent,
 }
+
+impl CdcEventWrapper {
+    /// Construct a wrapper from its epoch and payload (L2 new issue #2 —
+    /// ergonomic constructor for the type-alias `OutboundMsg = CdcEventWrapper`).
+    pub fn new(epoch: EpochId, payload: grafeo::cdc::ChangeEvent) -> Self {
+        Self { epoch, payload }
+    }
+}

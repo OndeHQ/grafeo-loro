@@ -2,9 +2,7 @@
 //!
 //! Owns the MPSC channels, the Loro subscriber, the inbound batcher, and the
 //! three async worker loops (inbound = Loro→Grafeo, outbound = Grafeo→Loro,
-//! CDC poller = Grafeo CDC source). All algorithm bodies are `// TODO L3`;
-//! the wiring (struct fields, channel plumbing, worker spawn signatures,
-//! control-flow shape) is real and compiles.
+//! CDC poller = Grafeo CDC source). All algorithm bodies are real per L3.
 //!
 //! ## Loro concurrency model
 //!
@@ -35,8 +33,21 @@
 //! poller filters any `ChangeEvent` whose `epoch` is in that set. The set is
 //! pruned each poll cycle to keep only epochs newer than `last_polled_epoch
 //! - EPOCH_RETENTION`.
+//!
+//! ## Backpressure policy (L2 new issue #3)
+//!
+//! - **Loro subscriber** (sync handler): `try_send` — non-blocking because
+//!   the subscriber is invoked synchronously by `LoroDoc::commit`, which may
+//!   itself run inside an async runtime (the outbound worker holds the Loro
+//!   write lock across `set_next_commit_origin + commit`). `blocking_send`
+//!   would panic in that case. On `Full`/`Closed`, log warn and drop the op.
+//! - **CDC poller** (async): `send().await` — awaits space on the outbound
+//!   channel. If `send` returns `Err` (channel closed), log warn and break
+//!   the poll loop (workers are shutting down).
+//! - **Inbound forwarder** (async): `batch_tx.send().await` — awaits space
+//!   on the batcher channel. Same shutdown semantics.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use grafeo::GrafeoDB;
@@ -47,18 +58,16 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::bridge::batcher::MutationBatcher;
-use crate::constants::{ORIGIN_GRAFEO_BRIDGE, OUTBOUND_POLL_MS};
+use crate::bridge::grafeo_tx::{BridgeMaps, EdgeKey};
+use crate::constants::{
+    ORIGIN_GRAFEO_BRIDGE, OUTBOUND_POLL_MS, ROOT_EDGES, ROOT_VERTICES,
+};
 use crate::error::Result;
 use crate::types::events::{CdcEventWrapper, LoroOp};
-// `EPOCH_RETENTION` is referenced in TODO comments inside `spawn_cdc_poller`;
-// the L3 implementer will import it from `crate::constants` when filling in
-// the prune step.
+use crate::types::values::{grafeo_value_to_lval, lval_to_gval};
+use crate::constants::EPOCH_RETENTION;
 
 /// Inbound channel payload: a Loro subscriber event translated to a graph op.
-///
-/// Single variant at L2; the wrapping enum gives L3 room to add a `RawDiff`
-/// variant if it wants to push translation work into the worker instead of
-/// the subscriber callback.
 pub enum InboundMsg {
     /// A single translated graph mutation op destined for Grafeo.
     Op(LoroOp),
@@ -72,16 +81,16 @@ pub type OutboundMsg = CdcEventWrapper;
 
 /// Channel capacity for both inbound and outbound MPSC channels.
 ///
-/// 1024 matches the architecture doc §10 example. Backpressure: if the
-/// inbound worker stalls, the Loro subscriber's `blocking_send` will block
-/// on the Loro commit thread — acceptable for L2; L3 may switch to
-/// `try_send` with drop-policy.
+/// 1024 matches the architecture doc §10 example. See module doc for
+/// backpressure policy (subscriber uses `try_send` to avoid blocking the
+/// Loro commit thread inside an async runtime).
 const CHANNEL_CAPACITY: usize = 1024;
 
 /// Bidirectional sync engine. Holds shared handles to both stores, the two
 /// MPSC channels (senders only — receivers are returned from [`Self::new`]
 /// and passed back into the spawn_*_worker methods), the inbound batcher,
-/// the Loro subscription handle, and the epoch side-channel set.
+/// the Loro subscription handle, the epoch side-channel set, and the shared
+/// `BridgeMaps` (forward + inverse id lookups).
 pub struct SyncEngine {
     /// Grafeo execution-layer handle (internally thread-safe).
     pub(crate) grafeo_db: Arc<GrafeoDB>,
@@ -99,10 +108,9 @@ pub struct SyncEngine {
     /// every inbound flush inserts its commit `EpochId` here; the outbound
     /// CDC poller filters any `ChangeEvent` whose `epoch` is in this set.
     pub(crate) bridge_origin_epochs: Arc<RwLock<HashSet<EpochId>>>,
-    /// `loro_key → grafeo::NodeId` mapping (Devil MAJOR M7 / orchestrator
-    /// Gap 3 APPROVED). grafeo 0.5.42 has no upsert-by-external-id, so we
-    /// look up on each `LoroOp::UpsertNode` and create+insert on miss.
-    pub(crate) node_id_map: Arc<RwLock<HashMap<String, grafeo::NodeId>>>,
+    /// Shared `loro_key ↔ grafeo::NodeId` and `EdgeKey ↔ grafeo::EdgeId`
+    /// maps (Devil MAJOR M7 / orchestrator Gap 3 APPROVED + L3 inverse maps).
+    pub(crate) maps: Arc<BridgeMaps>,
     /// Inbound mutation batcher. Owned by the engine so the inbound worker
     /// can spawn its `run` loop and forward `LoroOp`s into it.
     pub(crate) batcher: Arc<MutationBatcher>,
@@ -129,14 +137,14 @@ impl SyncEngine {
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let bridge_origin_epochs = Arc::new(RwLock::new(HashSet::new()));
-        let node_id_map = Arc::new(RwLock::new(HashMap::new()));
+        let maps = Arc::new(BridgeMaps::new());
 
         let batcher = Arc::new(MutationBatcher::new(
             grafeo_db.clone(),
             crate::constants::DEFAULT_BATCH_SIZE,
             crate::constants::DEFAULT_BATCH_MS,
             bridge_origin_epochs.clone(),
-            node_id_map.clone(),
+            maps.clone(),
             shutdown_tx.clone(),
         ));
 
@@ -147,17 +155,31 @@ impl SyncEngine {
             outbound_tx,
             loro_sub: parking_lot::Mutex::new(None),
             bridge_origin_epochs,
-            node_id_map,
+            maps,
             batcher,
             shutdown_tx,
         };
         (engine, inbound_rx, outbound_rx)
     }
 
+    /// Accessor for the shared id-mapping state (L2 new issue #1 —
+    /// `node_id_map` was previously unread on `SyncEngine`; bundling into
+    /// `BridgeMaps` and exposing via accessor resolves the warning and gives
+    /// tests a hook to inspect state).
+    pub fn maps(&self) -> &Arc<BridgeMaps> {
+        &self.maps
+    }
+
     /// Wire `loro_doc.subscribe_root` → origin filter → translate to `LoroOp`
-    /// → `inbound_tx.blocking_send(InboundMsg::Op(...))`. Stores the returned
+    /// → `inbound_tx.try_send(InboundMsg::Op(...))`. Stores the returned
     /// [`loro::Subscription`] in `self.loro_sub` so it lives as long as the
     /// engine (Devil BLOCKER B3 — without this, the sub drops on return).
+    ///
+    /// Backpressure (L2 new issue #3): the subscriber callback is invoked
+    /// synchronously by `LoroDoc::commit`, which may itself run inside an
+    /// async runtime (e.g. when the outbound worker commits a Loro write).
+    /// `blocking_send` would panic in that case, so we use `try_send`: if
+    /// the channel is full or closed, we log a warning and drop the op.
     pub fn init_loro_subscriber(&self) -> Result<()> {
         let inbound_tx = self.inbound_tx.clone();
         // `subscribe_root(&self, Subscriber)` — read guard suffices.
@@ -168,14 +190,13 @@ impl SyncEngine {
             if event.origin == ORIGIN_GRAFEO_BRIDGE {
                 return;
             }
-            // TODO L3: translate `event` (DiffEvent) → Vec<LoroOp>.
-            // For now, the translation is a no-op — L3 will walk
-            // `event.events: Vec<ContainerDiff>` and project root-container
-            // diffs into `LoroOp::UpsertNode { loro_key, labels, properties }`
-            // etc.
-            let _ops: Vec<LoroOp> = Vec::new();
-            // TODO L3: for op in ops { let _ = inbound_tx.blocking_send(InboundMsg::Op(op)); }
-            let _ = &inbound_tx;
+            let ops = translate_diff_event(&event);
+            for op in ops {
+                if let Err(e) = inbound_tx.try_send(InboundMsg::Op(op)) {
+                    tracing::warn!(error = %e, "inbound channel full or closed; dropping LoroOp");
+                    return;
+                }
+            }
         });
 
         let sub = doc.subscribe_root(handler);
@@ -208,12 +229,6 @@ impl SyncEngine {
                         let Some(msg) = msg else { break };
                         match msg {
                             InboundMsg::Op(op) => {
-                                // TODO L3: backpressure policy — currently
-                                // `await` on full channel, which blocks the
-                                // forwarder but does NOT block the Loro
-                                // subscriber (which uses `blocking_send` on
-                                // `inbound_tx`). L3 may switch to `try_send`
-                                // with drop-on-full.
                                 if batch_tx.send(op).await.is_err() {
                                     break;
                                 }
@@ -239,6 +254,7 @@ impl SyncEngine {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let loro_doc = self.loro_doc.clone();
         let bridge_epochs = self.bridge_origin_epochs.clone();
+        let maps = self.maps.clone();
 
         tokio::spawn(async move {
             loop {
@@ -250,24 +266,20 @@ impl SyncEngine {
                         // Defensive double-check: poller already filters, but
                         // an epoch could in principle have been pruned between
                         // poll and apply. Skip if still in the set.
-                        {
-                            let epochs = bridge_epochs.read();
-                            if epochs.contains(&msg.epoch) {
-                                continue;
-                            }
+                        if bridge_epochs.read().contains(&msg.epoch) {
+                            continue;
                         }
-
-                        // TODO L3: translate `msg.payload: grafeo::cdc::ChangeEvent`
-                        // into Loro mutations. Hold the Loro write lock
-                        // across `set_next_commit_origin + commit` so the
-                        // origin tag lands on OUR commit, not a peer's.
+                        let outcome = {
+                            let doc = loro_doc.write();
+                            apply_change_event_to_loro(&doc, &msg.payload, &maps)
+                        };
+                        if let Err(e) = outcome {
+                            tracing::warn!(error = %e, "outbound translation skipped event");
+                            continue;
+                        }
                         {
                             let doc = loro_doc.write();
                             doc.set_next_commit_origin(ORIGIN_GRAFEO_BRIDGE);
-                            // TODO L3: project ChangeEvent → LoroMap/LoroList
-                            // mutations on the appropriate root container
-                            // (ROOT_VERTICES / ROOT_EDGES / ROOT_TREE).
-                            let _ = &doc;
                             doc.commit();
                         }
                     }
@@ -287,11 +299,9 @@ impl SyncEngine {
         let bridge_epochs = self.bridge_origin_epochs.clone();
 
         tokio::spawn(async move {
-            // TODO L3: read initial epoch from grafeo (e.g.
-            // `grafeo_db.current_epoch()`). For L2 wiring we start at 0 so
-            // the poll loop shape compiles; L3 will set this to the actual
-            // last-polled epoch (possibly persisted across restarts).
-            let mut last_epoch = grafeo_common::types::EpochId::new(0);
+            // L2 new issue #4: init from current_epoch so a restarted engine
+            // does not re-replay the entire CDC history from epoch 0.
+            let mut last_epoch = grafeo_db.current_epoch();
             let poll_interval = std::time::Duration::from_millis(OUTBOUND_POLL_MS);
 
             loop {
@@ -299,31 +309,39 @@ impl SyncEngine {
                     biased;
                     _ = shutdown_rx.recv() => break,
                     _ = tokio::time::sleep(poll_interval) => {
-                        // TODO L3: actual poll body:
-                        //   let session = grafeo_db.session_with_cdc(true);
-                        //   let current = grafeo_db.current_epoch();
-                        //   if current <= last_epoch { continue; }
-                        //   let events = session.changes_between(last_epoch, current)?;
-                        //   let epochs_guard = bridge_epochs.read();
-                        //   for ev in events {
-                        //       if epochs_guard.contains(&ev.epoch) { continue; }
-                        //       let wrapped = OutboundMsg {
-                        //           epoch: ev.epoch,
-                        //           payload: ev,
-                        //       };
-                        //       if outbound_tx.send(wrapped).await.is_err() { break; }
-                        //   }
-                        //   drop(epochs_guard);
-                        //   // Prune: keep only epochs > last_epoch - EPOCH_RETENTION.
-                        //   {
-                        //       let mut set = bridge_epochs.write();
-                        //       let cutoff = grafeo_common::types::EpochId::new(
-                        //           last_epoch.as_u64().saturating_sub(EPOCH_RETENTION),
-                        //       );
-                        //       set.retain(|e| *e > cutoff);
-                        //   }
-                        //   last_epoch = current;
-                        let _ = (&mut last_epoch, &grafeo_db, &outbound_tx, &bridge_epochs);
+                        let session = grafeo_db.session_with_cdc(true);
+                        let current = grafeo_db.current_epoch();
+                        if current <= last_epoch {
+                            continue;
+                        }
+                        let events = match session.changes_between(last_epoch, current) {
+                            Ok(ev) => ev,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "cdc changes_between failed");
+                                continue;
+                            }
+                        };
+                        for ev in events {
+                            if bridge_epochs.read().contains(&ev.epoch) {
+                                continue;
+                            }
+                            let wrapped = OutboundMsg::new(ev.epoch, ev);
+                            if outbound_tx.send(wrapped).await.is_err() {
+                                tracing::warn!(
+                                    "outbound channel closed; stopping CDC poller"
+                                );
+                                return;
+                            }
+                        }
+                        // Prune: keep only epochs > last_epoch - EPOCH_RETENTION.
+                        {
+                            let mut set = bridge_epochs.write();
+                            let cutoff = EpochId::new(
+                                last_epoch.as_u64().saturating_sub(EPOCH_RETENTION),
+                            );
+                            set.retain(|e| *e > cutoff);
+                        }
+                        last_epoch = current;
                     }
                 }
             }
@@ -365,5 +383,297 @@ impl SyncEngine {
     /// `OutboundMsg`s directly without a real CDC poller.
     pub fn outbound_sender(&self) -> mpsc::Sender<OutboundMsg> {
         self.outbound_tx.clone()
+    }
+}
+
+/// Pure projection from a Loro `DiffEvent` to a Vec of `LoroOp`s. Walks
+/// `event.events: Vec<ContainerDiff>` and inspects each container diff. Root
+/// map containers `V` (vertices) and `E` (edges) are projected to
+/// `UpsertNode`/`DeleteNode` and `UpsertEdge`/`DeleteEdge` respectively.
+/// Other diffs (Tree, Text, List, Counter, Unknown) are logged and skipped.
+fn translate_diff_event(event: &loro::event::DiffEvent<'_>) -> Vec<LoroOp> {
+    let mut ops = Vec::new();
+    for cd in &event.events {
+        let name = match cd.target {
+            loro::ContainerID::Root { name, .. } => name.as_ref(),
+            _ => continue,
+        };
+        match name {
+            ROOT_VERTICES => {
+                if let loro::event::Diff::Map(map_delta) = &cd.diff {
+                    for (key, val) in map_delta.updated.iter() {
+                        match val {
+                            Some(loro::ValueOrContainer::Value(lv)) => match lv {
+                                loro::LoroValue::Map(m) => {
+                                    let mut props = std::collections::HashMap::new();
+                                    let mut ok = true;
+                                    for (k, v) in m.iter() {
+                                        match lval_to_gval(v.clone()) {
+                                            Ok(gv) => {
+                                                props.insert(k.clone(), gv);
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    key = %k,
+                                                    "skipping unsupported vertex property"
+                                                );
+                                                ok = false;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if ok {
+                                        ops.push(LoroOp::UpsertNode {
+                                            loro_key: key.to_string(),
+                                            labels: Vec::new(),
+                                            properties: props,
+                                        });
+                                    }
+                                }
+                                other => {
+                                    tracing::warn!(
+                                        key = %key,
+                                        "vertex value is not a LoroValue::Map (got {:?}); skipping",
+                                        std::mem::discriminant(other)
+                                    );
+                                }
+                            },
+                            None => ops.push(LoroOp::DeleteNode {
+                                loro_key: key.to_string(),
+                            }),
+                            Some(loro::ValueOrContainer::Container(_)) => {
+                                tracing::warn!(
+                                    key = %key,
+                                    "vertex value is a container ref; skipping"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            ROOT_EDGES => {
+                if let loro::event::Diff::Map(map_delta) = &cd.diff {
+                    for (key, val) in map_delta.updated.iter() {
+                        let parsed = parse_edge_key(key);
+                        let Some((src_key, dst_key, label)) = parsed else {
+                            tracing::warn!(key = %key, "unparseable edge key; skipping");
+                            continue;
+                        };
+                        match val {
+                            Some(loro::ValueOrContainer::Value(loro::LoroValue::Map(m))) => {
+                                let mut props = std::collections::HashMap::new();
+                                let mut ok = true;
+                                for (k, v) in m.iter() {
+                                    match lval_to_gval(v.clone()) {
+                                        Ok(gv) => {
+                                            props.insert(k.clone(), gv);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                key = %k,
+                                                "skipping unsupported edge property"
+                                            );
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if ok {
+                                    ops.push(LoroOp::UpsertEdge {
+                                        src_key,
+                                        dst_key,
+                                        label,
+                                        properties: props,
+                                    });
+                                }
+                            }
+                            None => ops.push(LoroOp::DeleteEdge {
+                                src_key,
+                                dst_key,
+                                label,
+                            }),
+                            Some(_other) => {
+                                tracing::warn!(
+                                    key = %key,
+                                    "edge value is not a LoroValue::Map; skipping"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                tracing::trace!(container = %name, "non V/E root container diff; skipping");
+            }
+        }
+    }
+    ops
+}
+
+/// Parse an edge Loro-map key `"src_key|dst_key|label"` into its tuple. Returns
+/// `None` if the format is wrong (fewer than 2 `|` separators).
+fn parse_edge_key(s: &str) -> Option<EdgeKey> {
+    let mut parts = s.splitn(3, '|');
+    let src = parts.next()?.to_string();
+    let dst = parts.next()?.to_string();
+    let label = parts.next()?.to_string();
+    if label.is_empty() {
+        return None;
+    }
+    Some((src, dst, label))
+}
+
+/// Encode an `EdgeKey` tuple back to `"src_key|dst_key|label"` for Loro map keys.
+fn encode_edge_key(key: &EdgeKey) -> String {
+    format!("{}|{}|{}", key.0, key.1, key.2)
+}
+
+/// Pure projection from a grafeo `ChangeEvent` to Loro mutations on the
+/// appropriate root container (`V` for nodes, `E` for edges). Triple events
+/// and unmapped entity ids are skipped with a warn log (no echo, no panic).
+fn apply_change_event_to_loro(
+    doc: &LoroDoc,
+    event: &grafeo::cdc::ChangeEvent,
+    maps: &BridgeMaps,
+) -> Result<()> {
+    use grafeo::cdc::{ChangeKind, EntityId};
+    match (event.entity_id, event.kind.clone()) {
+        (EntityId::Node(node_id), ChangeKind::Create | ChangeKind::Update) => {
+            let node_key = match maps.node_key_map.read().get(&node_id) {
+                Some(k) => k.clone(),
+                None => {
+                    tracing::warn!(
+                        node_id = node_id.as_u64(),
+                        "outbound node event skipped: no loro_key mapping (node not created via bridge)"
+                    );
+                    return Ok(());
+                }
+            };
+            let v_map = doc.get_map(ROOT_VERTICES);
+            // Read-modify-write: grafeo's CDC `after` for an Update is just
+            // the changed keys (not the full property set). Merge into the
+            // existing LoroMap value to avoid clobbering untouched props.
+            let mut current = match v_map.get(&node_key) {
+                Some(loro::ValueOrContainer::Value(loro::LoroValue::Map(m))) => {
+                    m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                }
+                _ => std::collections::HashMap::new(),
+            };
+            for (k, v) in event.after.clone().unwrap_or_default() {
+                current.insert(k, grafeo_value_to_lval(&v));
+            }
+            v_map.insert(&node_key, loro::LoroValue::Map(current.into()))?;
+        }
+        (EntityId::Node(node_id), ChangeKind::Delete) => {
+            let node_key = match maps.node_key_map.read().get(&node_id) {
+                Some(k) => k.clone(),
+                None => {
+                    tracing::warn!(
+                        node_id = node_id.as_u64(),
+                        "outbound node-delete event skipped: no loro_key mapping"
+                    );
+                    return Ok(());
+                }
+            };
+            let v_map = doc.get_map(ROOT_VERTICES);
+            let _ = v_map.delete(&node_key);
+            // Best-effort map cleanup: the grafeo node is gone, so any stale
+            // forward/inverse entry in our maps is now unreachable.
+            maps.remove_node(&node_key);
+        }
+        (EntityId::Edge(edge_id), ChangeKind::Create | ChangeKind::Update) => {
+            let (src_key, dst_key, label) = match lookup_edge_endpoints(event, &maps) {
+                Some(t) => t,
+                None => return Ok(()),
+            };
+            let key: EdgeKey = (src_key, dst_key, label);
+            let e_map = doc.get_map(ROOT_EDGES);
+            let loro_key = encode_edge_key(&key);
+            let mut current = match e_map.get(&loro_key) {
+                Some(loro::ValueOrContainer::Value(loro::LoroValue::Map(m))) => {
+                    m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                }
+                _ => std::collections::HashMap::new(),
+            };
+            for (k, v) in event.after.clone().unwrap_or_default() {
+                current.insert(k, grafeo_value_to_lval(&v));
+            }
+            e_map.insert(&loro_key, loro::LoroValue::Map(current.into()))?;
+            // Record the grafeo EdgeId ↔ EdgeKey binding so a subsequent
+            // EdgeDelete event can be reverse-translated.
+            maps.insert_edge(key, edge_id);
+        }
+        (EntityId::Edge(edge_id), ChangeKind::Delete) => {
+            let key = match maps.remove_edge_by_id(edge_id) {
+                Some(k) => k,
+                None => {
+                    tracing::warn!(
+                        edge_id = edge_id.as_u64(),
+                        "outbound edge-delete event skipped: no EdgeKey mapping"
+                    );
+                    return Ok(());
+                }
+            };
+            let e_map = doc.get_map(ROOT_EDGES);
+            let _ = e_map.delete(&encode_edge_key(&key));
+        }
+        (EntityId::Triple(_), _) => {
+            tracing::trace!("triple CDC events are not translated in Phase 1");
+        }
+        // `EntityId` and `ChangeKind` are both `#[non_exhaustive]`; future
+        // variants are logged and skipped rather than panicking.
+        _ => {
+            tracing::warn!(
+                entity_id = ?event.entity_id,
+                kind = ?event.kind,
+                "unmapped CDC event; skipping"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a `ChangeEvent`'s `src_id`/`dst_id`/`edge_type` into Loro-side
+/// `(src_key, dst_key, label)` via `node_key_map`. Returns `None` if either
+/// endpoint lacks an inverse mapping (the node was not created via the bridge).
+fn lookup_edge_endpoints(
+    event: &grafeo::cdc::ChangeEvent,
+    maps: &BridgeMaps,
+) -> Option<EdgeKey> {
+    let src_id = event.src_id?;
+    let dst_id = event.dst_id?;
+    let label = event.edge_type.clone()?;
+    let src_key = maps
+        .node_key_map
+        .read()
+        .get(&grafeo::NodeId::new(src_id))
+        .cloned()?;
+    let dst_key = maps
+        .node_key_map
+        .read()
+        .get(&grafeo::NodeId::new(dst_id))
+        .cloned()?;
+    Some((src_key, dst_key, label))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edge_key_roundtrip() {
+        let key: EdgeKey = ("a".to_string(), "b".to_string(), "KNOWS".to_string());
+        let encoded = encode_edge_key(&key);
+        assert_eq!(encoded, "a|b|KNOWS");
+        let parsed = parse_edge_key(&encoded).unwrap();
+        assert_eq!(parsed, key);
+    }
+
+    #[test]
+    fn edge_key_parse_rejects_missing_separator() {
+        assert!(parse_edge_key("only-one-segment").is_none());
+        assert!(parse_edge_key("a|b|").is_none());
     }
 }
