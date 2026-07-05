@@ -12,9 +12,14 @@
 //! - `flush_inner` applies each op via `apply_loro_op(&session, op, &maps)`,
 //!   then `prepare_commit` → `set_metadata` (advisory only) → `commit()`,
 //!   recording the resulting `EpochId` in `bridge_origin_epochs` for echo
-//!   prevention. The full flush is wrapped in a `tokio::time::timeout` so a
-//!   stuck grafeo transaction cannot hang the inbound `JoinHandle` (L2 new
-//!   issue #6).
+//!   prevention. The grafeo session calls run inside a
+//!   `tokio::task::spawn_blocking` closure; the resulting `JoinHandle` is
+//!   wrapped in `tokio::time::timeout(FLUSH_TIMEOUT)` so a stuck grafeo
+//!   transaction cannot hang the inbound `JoinHandle` (Hunter MAJOR 1 —
+//!   previously the timeout wrapped a zero-`.await` async block and could
+//!   never fire). On timeout the blocking task keeps running in the
+//!   background; if it eventually commits, its epoch lands in the side
+//!   channel and is filtered by the outbound poller.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -157,15 +162,28 @@ impl MutationBatcher {
 
     /// Inner flush: takes a pre-drained buffer and applies it as a single
     /// Grafeo transaction. Split out so `run`'s shutdown path can drain +
-    /// flush without re-acquiring the buffer lock twice. Wrapped in
-    /// `tokio::time::timeout(FLUSH_TIMEOUT)` so a stuck grafeo commit cannot
-    /// hang the inbound `JoinHandle` (L2 new issue #6).
+    /// flush without re-acquiring the buffer lock twice.
+    ///
+    /// The grafeo session calls (`begin_transaction`/`apply_loro_op`/
+    /// `prepare_commit`/`commit`) are synchronous and may block on disk IO
+    /// or grafeo-internal locks. Running them on the async worker would
+    /// starve the runtime; running them inside an async block with no
+    /// `.await` points makes `tokio::time::timeout` a no-op (Hunter MAJOR 1).
+    /// The fix: `spawn_blocking` runs the entire grafeo transaction on a
+    /// dedicated blocking-pool thread, and `tokio::time::timeout` is applied
+    /// to the resulting `JoinHandle`. If the timeout elapses, the worker
+    /// reports a `GrafeoLoroError::Bridge(...)` and moves on; the orphaned
+    /// blocking task continues to completion in the background — if it
+    /// eventually commits, the resulting `EpochId` lands in the side-channel
+    /// so the outbound poller still filters the corresponding CDC events.
+    /// If it panics, the `JoinError` is mapped to `Bridge(...)` as well.
     async fn flush_inner(&self, ops: Vec<LoroOp>) -> Result<()> {
         let grafeo_db = self.grafeo_db.clone();
         let maps = self.maps.clone();
         let epochs = self.bridge_origin_epochs.clone();
         let op_count = ops.len();
-        let flush = async move {
+
+        let blocking = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut session = grafeo_db.session_with_cdc(true);
             session.begin_transaction()?;
             for op in &ops {
@@ -179,16 +197,27 @@ impl MutationBatcher {
             let epoch: EpochId = prepared.commit()?;
             epochs.write().insert(epoch);
             Ok(())
-        };
-        match tokio::time::timeout(FLUSH_TIMEOUT, flush).await {
-            Ok(res) => res,
+        });
+
+        match tokio::time::timeout(FLUSH_TIMEOUT, blocking).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(join_err)) => {
+                tracing::error!(
+                    error = %join_err,
+                    "inbound flush blocking task panicked; {} ops in limbo",
+                    op_count
+                );
+                Err(GrafeoLoroError::Bridge(format!(
+                    "inbound flush blocking task panicked: {join_err}"
+                )))
+            }
             Err(_) => {
                 tracing::error!(
-                    "inbound flush exceeded {:?} timeout; {} ops dropped",
+                    "inbound flush exceeded {:?} timeout; {} ops dropped (task continues in background)",
                     FLUSH_TIMEOUT,
                     op_count
                 );
-                Err(GrafeoLoroError::Config(format!(
+                Err(GrafeoLoroError::Bridge(format!(
                     "inbound flush timeout after {:?}",
                     FLUSH_TIMEOUT
                 )))

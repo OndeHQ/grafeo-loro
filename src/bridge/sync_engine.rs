@@ -48,6 +48,7 @@
 //!   on the batcher channel. Same shutdown semantics.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use grafeo::GrafeoDB;
@@ -114,6 +115,13 @@ pub struct SyncEngine {
     /// Inbound mutation batcher. Owned by the engine so the inbound worker
     /// can spawn its `run` loop and forward `LoroOp`s into it.
     pub(crate) batcher: Arc<MutationBatcher>,
+    /// Counter incremented by the Loro subscriber handler every time an op
+    /// is successfully `try_send`-ed into the inbound channel (i.e. every
+    /// non-echo event that survives the origin filter). Tests inspect this
+    /// to deterministically assert no echo occurs during a settle window —
+    /// the previous snapshot-comparison approach was timing-dependent
+    /// (Hunter MAJOR 3).
+    pub(crate) inbound_event_count: Arc<AtomicU64>,
     /// Shutdown broadcast — workers subscribe and exit on `trigger()`
     /// (replaces `tokio_util::CancellationToken`, Devil NIT N16).
     pub(crate) shutdown_tx: broadcast::Sender<()>,
@@ -138,6 +146,7 @@ impl SyncEngine {
 
         let bridge_origin_epochs = Arc::new(RwLock::new(HashSet::new()));
         let maps = Arc::new(BridgeMaps::new());
+        let inbound_event_count = Arc::new(AtomicU64::new(0));
 
         let batcher = Arc::new(MutationBatcher::new(
             grafeo_db.clone(),
@@ -157,6 +166,7 @@ impl SyncEngine {
             bridge_origin_epochs,
             maps,
             batcher,
+            inbound_event_count,
             shutdown_tx,
         };
         (engine, inbound_rx, outbound_rx)
@@ -182,6 +192,7 @@ impl SyncEngine {
     /// the channel is full or closed, we log a warning and drop the op.
     pub fn init_loro_subscriber(&self) -> Result<()> {
         let inbound_tx = self.inbound_tx.clone();
+        let inbound_event_count = self.inbound_event_count.clone();
         // `subscribe_root(&self, Subscriber)` — read guard suffices.
         let doc = self.loro_doc.read();
 
@@ -196,6 +207,9 @@ impl SyncEngine {
                     tracing::warn!(error = %e, "inbound channel full or closed; dropping LoroOp");
                     return;
                 }
+                // Count successful sends — gives tests a deterministic hook to
+                // assert no echo occurred during a settle window (Hunter MAJOR 3).
+                inbound_event_count.fetch_add(1, Ordering::Relaxed);
             }
         });
 
@@ -383,6 +397,17 @@ impl SyncEngine {
     /// `OutboundMsg`s directly without a real CDC poller.
     pub fn outbound_sender(&self) -> mpsc::Sender<OutboundMsg> {
         self.outbound_tx.clone()
+    }
+
+    /// Number of ops the Loro subscriber has successfully pushed into the
+    /// inbound channel since engine construction. Each successful `try_send`
+    /// increments this counter; events filtered by the origin check (echoes)
+    /// and ops dropped on a full/closed channel do NOT increment it. Tests
+    /// use this to deterministically assert no echo occurred during a settle
+    /// window (Hunter MAJOR 3 — replacing the timing-dependent Loro
+    /// snapshot-comparison check).
+    pub fn inbound_event_count(&self) -> u64 {
+        self.inbound_event_count.load(Ordering::Relaxed)
     }
 }
 
@@ -583,7 +608,9 @@ fn apply_change_event_to_loro(
             // forward/inverse entry in our maps is now unreachable.
             maps.remove_node(&node_key);
         }
-        (EntityId::Edge(edge_id), ChangeKind::Create | ChangeKind::Update) => {
+        (EntityId::Edge(edge_id), ChangeKind::Create) => {
+            // Create events populate src_id/dst_id/edge_type — use
+            // `lookup_edge_endpoints` to translate them to Loro keys.
             let (src_key, dst_key, label) = match lookup_edge_endpoints(event, &maps) {
                 Some(t) => t,
                 None => return Ok(()),
@@ -602,8 +629,41 @@ fn apply_change_event_to_loro(
             }
             e_map.insert(&loro_key, loro::LoroValue::Map(current.into()))?;
             // Record the grafeo EdgeId ↔ EdgeKey binding so a subsequent
-            // EdgeDelete event can be reverse-translated.
+            // EdgeDelete event (and EdgeUpdate events — see below) can be
+            // reverse-translated.
             maps.insert_edge(key, edge_id);
+        }
+        (EntityId::Edge(edge_id), ChangeKind::Update) => {
+            // Hunter MAJOR 2: grafeo's `record_update` sets `src_id`,
+            // `dst_id`, and `edge_type` to `None` for ALL Update events
+            // (verified in grafeo-engine-0.5.42/src/cdc.rs:~432). Calling
+            // `lookup_edge_endpoints` here would always return `None` and
+            // edge property updates from Grafeo→Loro would be silently
+            // dropped. Instead, look up the EdgeKey via the binding recorded
+            // at Create time. If the edge was created before the bridge
+            // started (no binding), log + skip.
+            let key = match maps.edge_key_map.read().get(&edge_id).cloned() {
+                Some(k) => k,
+                None => {
+                    tracing::warn!(
+                        edge_id = edge_id.as_u64(),
+                        "outbound edge-update event skipped: no EdgeKey mapping (edge not created via bridge)"
+                    );
+                    return Ok(());
+                }
+            };
+            let e_map = doc.get_map(ROOT_EDGES);
+            let loro_key = encode_edge_key(&key);
+            let mut current = match e_map.get(&loro_key) {
+                Some(loro::ValueOrContainer::Value(loro::LoroValue::Map(m))) => {
+                    m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                }
+                _ => std::collections::HashMap::new(),
+            };
+            for (k, v) in event.after.clone().unwrap_or_default() {
+                current.insert(k, grafeo_value_to_lval(&v));
+            }
+            e_map.insert(&loro_key, loro::LoroValue::Map(current.into()))?;
         }
         (EntityId::Edge(edge_id), ChangeKind::Delete) => {
             let key = match maps.remove_edge_by_id(edge_id) {

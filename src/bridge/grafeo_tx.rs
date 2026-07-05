@@ -153,7 +153,7 @@ fn apply_upsert_edge(
     let (src_id, dst_id) = match (maps.node_id_map.read().get(src_key), maps.node_id_map.read().get(dst_key)) {
         (Some(&s), Some(&d)) => (s, d),
         _ => {
-            return Err(GrafeoLoroError::Config(format!(
+            return Err(GrafeoLoroError::Bridge(format!(
                 "unknown node key(s): src={src_key:?} dst={dst_key:?}"
             )));
         }
@@ -175,6 +175,13 @@ fn apply_upsert_edge(
 
 /// Phase 1 tree move = delete old `CHILD` edge + insert new `CHILD` edge.
 /// `old_parent_key`/`new_parent_key` may map to the same node (idempotent).
+///
+/// Phase 2: tree container support — handler exists because `LoroOp::TreeMove`
+/// is part of the L1 contract, but no production caller exists in Phase 1
+/// (the inbound subscriber only translates `ROOT_VERTICES`/`ROOT_EDGES`
+/// diffs; `ROOT_TREE` was deleted as YAGNI per Hunter NIT 11). The variant
+/// and this handler are retained so Phase 2 can wire tree-container diffs
+/// without re-shaping the enum. Hunter MINOR 8 flagged this as a dead path.
 fn apply_tree_move(
     session: &grafeo::Session,
     node_key: &str,

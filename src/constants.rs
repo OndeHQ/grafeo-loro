@@ -5,7 +5,9 @@ pub const ORIGIN_LORO_BRIDGE: &str = "loro-bridge";
 // Root LoroDoc container keys
 pub const ROOT_VERTICES: &str = "V";
 pub const ROOT_EDGES: &str = "E";
-pub const ROOT_TREE: &str = "T_CHILD";
+// Phase 2: tree container support — `ROOT_TREE: &str = "T_CHILD"` was deleted
+// as YAGNI per Hunter NIT 11 (declared but never read in Phase 1). Re-add when
+// the inbound subscriber grows a tree-container diff arm.
 
 // Ephemeral presence magic bytes
 pub const EPH_MAGIC: &[u8; 4] = b"%EPH";

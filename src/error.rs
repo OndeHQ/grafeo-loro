@@ -23,6 +23,12 @@ pub enum GrafeoLoroError {
     /// LoroValue variant has no GraphValue mapping (e.g. Binary, Container).
     #[error("Unsupported LoroValue type: {0}")]
     UnsupportedLoroType(String),
+
+    /// Runtime bridge error: unknown id-mapping keys, flush timeouts, blocking
+    /// pool panics — anything that surfaces from the live bridge machinery
+    /// (Hunter NIT 12: previously misrouted to `Config`).
+    #[error("Bridge error: {0}")]
+    Bridge(String),
 }
 
 pub type Result<T> = std::result::Result<T, GrafeoLoroError>;

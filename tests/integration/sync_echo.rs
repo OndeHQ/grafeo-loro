@@ -16,7 +16,9 @@ use loro::{LoroDoc, LoroValue, ToJson};
 use parking_lot::RwLock;
 
 use grafeo_loro::bridge::SyncEngine;
+use grafeo_loro::bridge::sync_engine::InboundMsg;
 use grafeo_loro::constants::{DEFAULT_BATCH_MS, OUTBOUND_POLL_MS};
+use grafeo_loro::types::LoroOp;
 
 /// Build a fresh `LoroValue::Map` from string-keyed scalars.
 fn lmap(pairs: impl IntoIterator<Item = (&'static str, LoroValue)>) -> LoroValue {
@@ -135,19 +137,47 @@ async fn echo_loop_prevention() {
     // `ORIGIN_GRAFEO_BRIDGE`, so the Loro subscriber filters it out. After
     // another settle window, the Loro state must be unchanged (no second
     // grafeo mutation propagating back).
+    //
+    // Hunter MAJOR 3: the snapshot-comparison below is timing-dependent
+    // (an echo slower than the settle window could slip past it). The
+    // deterministic check is the `inbound_event_count` counter — it
+    // increments on every op that survives the origin filter. If the
+    // filter is broken, the echoed Loro write would translate to a
+    // LoroOp::UpsertNode and increment the counter. We snapshot the
+    // counter BEFORE the settle window and assert it does not move.
+    // The grafeo-side assertion (n.age still == 42) is defense-in-depth:
+    // a grafeo echo would mutate the node, and even though the value
+    // is idempotent for this specific test, the property must still be
+    // present after the settle window.
+    let count_before = engine.inbound_event_count();
     let snapshot_before = {
         let doc = loro_doc.read();
         doc.get_deep_value().to_json_value()
     };
     settle_outbound().await;
+    let count_after = engine.inbound_event_count();
     let snapshot_after = {
         let doc = loro_doc.read();
         doc.get_deep_value().to_json_value()
     };
     assert_eq!(
+        count_before, count_after,
+        "inbound_event_count must not increase after the outbound update settled (no echo survived the origin filter)"
+    );
+    assert_eq!(
         snapshot_before, snapshot_after,
         "Loro state must not change after the outbound update settled (no echo)"
     );
+    // Defense-in-depth (Hunter MAJOR 3): grafeo-side assertion.
+    {
+        let session = grafeo_db.session();
+        let age = session.get_node_property(node_id, "age");
+        assert_eq!(
+            age,
+            Some(grafeo::Value::Int64(42)),
+            "grafeo node age must still be 42 after the settle window (no echo mutated it)"
+        );
+    }
 
     engine.shutdown();
     for h in handles {
@@ -258,6 +288,223 @@ async fn bidirectional_sync_with_delay() {
         snapshot_before, snapshot_after,
         "no echo after bidirectional convergence"
     );
+
+    engine.shutdown();
+    for h in handles {
+        let _ = h.await;
+    }
+}
+
+/// Hunter MAJOR 2: edge `Update` events from Grafeo→Loro were silently
+/// dropped because `lookup_edge_endpoints` reads `event.src_id`/`dst_id`/
+/// `edge_type`, all of which grafeo's `record_update` sets to `None` for
+/// every Update event (verified in grafeo-engine-0.5.42/src/cdc.rs:~432).
+/// The fix splits the edge Create vs Update arms: Update now looks up the
+/// EdgeKey via `maps.edge_key_map` (populated at Create time). This test
+/// drives the full Create→Update cycle and asserts the Update lands in Loro.
+#[tokio::test]
+async fn edge_update_propagates() {
+    let grafeo_db = Arc::new(GrafeoDB::new_in_memory());
+    let loro_doc = Arc::new(RwLock::new(LoroDoc::new()));
+    let (engine, inbound_rx, outbound_rx) = SyncEngine::new(grafeo_db.clone(), loro_doc.clone());
+    let engine = Arc::new(engine);
+    let handles = engine.clone().spawn_all(inbound_rx, outbound_rx).await;
+
+    // --- Setup: insert vertices "a" and "b" via Loro ---
+    {
+        let doc = loro_doc.read();
+        loro_insert_vertex(&doc, "a", lmap([("name", LoroValue::String("Alice".into()))]));
+        loro_insert_vertex(&doc, "b", lmap([("name", LoroValue::String("Bob".into()))]));
+    }
+    settle_inbound().await;
+
+    // --- Setup: insert edge a|b|KNOWS via Loro (creates grafeo edge + binding) ---
+    {
+        let doc = loro_doc.read();
+        let e_map = doc.get_map("E");
+        e_map
+            .insert(
+                "a|b|KNOWS",
+                lmap([("since", LoroValue::I64(2020))]),
+            )
+            .expect("loro edge insert");
+        doc.commit();
+    }
+    settle_inbound().await;
+
+    // Verify the edge binding was recorded by the inbound apply path.
+    let edge_id = engine
+        .maps()
+        .edge_id_map
+        .read()
+        .get(&("a".to_string(), "b".to_string(), "KNOWS".to_string()))
+        .copied()
+        .expect("bridge should have mapped (a, b, KNOWS) → grafeo EdgeId");
+
+    // --- Grafeo → Loro: SET r.weight = 5 on the bridge-created edge ---
+    // This produces a CDC Update event whose `src_id`/`dst_id`/`edge_type`
+    // are all `None` (per grafeo's `record_update`). The fix must use the
+    // `edge_key_map` reverse lookup to find the Loro-side EdgeKey.
+    {
+        let mut session = grafeo_db.session_with_cdc(true);
+        session.begin_transaction().expect("begin tx");
+        session
+            .execute("MATCH (n {name: 'Alice'})-[r:KNOWS]->(m {name: 'Bob'}) SET r.weight = 5")
+            .expect("MATCH SET on edge");
+        session.commit().expect("commit");
+    }
+    settle_outbound().await;
+
+    // Assert: Loro E["a|b|KNOWS"] now carries {since: 2020, weight: 5}.
+    {
+        let doc = loro_doc.read();
+        let e_map = doc.get_map("E");
+        use loro::ValueOrContainer;
+        let edge_val = e_map.get("a|b|KNOWS").expect("E[a|b|KNOWS] should exist");
+        let props = match edge_val {
+            ValueOrContainer::Value(LoroValue::Map(m)) => {
+                Some(m.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<HashMap<_, _>>())
+            }
+            _ => None,
+        };
+        let props = props.expect("edge value should be a LoroValue::Map");
+        assert_eq!(
+            props.get("since"),
+            Some(&LoroValue::I64(2020)),
+            "original edge property should survive the merge"
+        );
+        assert_eq!(
+            props.get("weight"),
+            Some(&LoroValue::I64(5)),
+            "edge Update from grafeo should land in Loro (Hunter MAJOR 2)"
+        );
+    }
+    // Sanity: grafeo edge itself should also carry weight=5.
+    {
+        let session = grafeo_db.session();
+        let edge = session.get_edge(edge_id).expect("grafeo edge should exist");
+        assert_eq!(
+            edge.get_property("weight"),
+            Some(&grafeo::Value::Int64(5)),
+            "grafeo edge should carry the SET property"
+        );
+    }
+
+    engine.shutdown();
+    for h in handles {
+        let _ = h.await;
+    }
+}
+
+/// Hunter MINOR 7: delete paths were completely untested. This test
+/// exercises both directions:
+/// (a) **Inbound delete**: push `LoroOp::DeleteNode` via `inbound_sender()`,
+///     assert grafeo `get_node` returns `None` and the loro_key mapping is
+///     cleared.
+/// (b) **Outbound delete**: `MATCH (n {name: 'Alice'}) DELETE n` in grafeo,
+///     assert Loro `V["k1"]` is absent after `settle_outbound`.
+#[tokio::test]
+async fn node_delete_round_trip() {
+    let grafeo_db = Arc::new(GrafeoDB::new_in_memory());
+    let loro_doc = Arc::new(RwLock::new(LoroDoc::new()));
+    let (engine, inbound_rx, outbound_rx) = SyncEngine::new(grafeo_db.clone(), loro_doc.clone());
+    let engine = Arc::new(engine);
+    let handles = engine.clone().spawn_all(inbound_rx, outbound_rx).await;
+
+    // Pre-populate: Loro → Grafeo insert "k1" {name: Alice}.
+    {
+        let doc = loro_doc.read();
+        loro_insert_vertex(&doc, "k1", lmap([("name", LoroValue::String("Alice".into()))]));
+    }
+    settle_inbound().await;
+    let node_id = engine
+        .maps()
+        .node_id_map
+        .read()
+        .get("k1")
+        .copied()
+        .expect("k1 mapped after Loro→Grafeo flush");
+    assert!(
+        grafeo_db.session().get_node(node_id).is_some(),
+        "precondition: grafeo has node k1"
+    );
+
+    // --- (a) Inbound delete: push LoroOp::DeleteNode via inbound_sender ---
+    engine
+        .inbound_sender()
+        .send(InboundMsg::Op(LoroOp::DeleteNode {
+            loro_key: "k1".to_string(),
+        }))
+        .await
+        .expect("inbound send");
+    settle_inbound().await;
+    assert!(
+        grafeo_db.session().get_node(node_id).is_none(),
+        "inbound delete should remove grafeo node"
+    );
+    assert!(
+        engine
+            .maps()
+            .node_id_map
+            .read()
+            .get("k1")
+            .is_none(),
+        "inbound delete should clear the loro_key → NodeId mapping"
+    );
+
+    // --- Re-create k1 for the outbound delete half ---
+    // LoroMap::insert is a no-op when the value is unchanged, so re-inserting
+    // the same `{name: Alice}` via LoroDoc would not produce a subscriber
+    // diff. Instead, push the UpsertNode op directly via inbound_sender —
+    // this exercises the same apply path (lookup-or-create + insert mapping)
+    // without depending on Loro diff semantics.
+    let mut props = HashMap::new();
+    props.insert(
+        "name".to_string(),
+        grafeo_loro::types::GraphValue::String("Alice".to_string()),
+    );
+    engine
+        .inbound_sender()
+        .send(InboundMsg::Op(LoroOp::UpsertNode {
+            loro_key: "k1".to_string(),
+            labels: Vec::new(),
+            properties: props,
+        }))
+        .await
+        .expect("inbound send (re-create)");
+    settle_inbound().await;
+    let node_id = engine
+        .maps()
+        .node_id_map
+        .read()
+        .get("k1")
+        .copied()
+        .expect("k1 re-mapped after second Loro→Grafeo flush");
+    assert!(
+        grafeo_db.session().get_node(node_id).is_some(),
+        "precondition: grafeo has node k1 again"
+    );
+
+    // --- (b) Outbound delete: MATCH (n {name: 'Alice'}) DELETE n ---
+    {
+        let mut session = grafeo_db.session_with_cdc(true);
+        session.begin_transaction().expect("begin tx");
+        session
+            .execute("MATCH (n {name: 'Alice'}) DELETE n")
+            .expect("MATCH DELETE");
+        session.commit().expect("commit");
+    }
+    settle_outbound().await;
+
+    // Assert: Loro V[k1] is absent.
+    {
+        let doc = loro_doc.read();
+        let v_map = doc.get_map("V");
+        assert!(
+            v_map.get("k1").is_none(),
+            "outbound delete should remove Loro V[k1]"
+        );
+    }
 
     engine.shutdown();
     for h in handles {

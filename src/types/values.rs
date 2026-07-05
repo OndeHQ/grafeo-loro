@@ -157,8 +157,18 @@ pub fn grafeo_value_to_lval(val: &grafeo::Value) -> loro::LoroValue {
             let list: Vec<loro::LoroValue> = v.iter().map(|f| LV::Double(f64::from(*f))).collect();
             LV::List(list.into())
         }
-        // Exotic types collapse to Null for Phase 1 (YAGNI: no test exercises them).
-        _ => LV::Null,
+        // Exotic grafeo types (Timestamp/Date/Time/Duration/ZonedDatetime/Path/
+        // GCounter/Bytes) collapse to Null for Phase 1 (YAGNI: no test
+        // exercises them, no LoroValue equivalent exists for most). The
+        // collapse is intentional — flagged by Hunter MINOR 9 — but a warn
+        // log gives observability so silent data loss is at least visible.
+        exotic => {
+            tracing::warn!(
+                grafeo_ty = ?exotic,
+                "exotic grafeo type collapses to LoroValue::Null for Phase 1"
+            );
+            LV::Null
+        }
     }
 }
 
@@ -213,12 +223,71 @@ mod tests {
             lval_to_gval(bin),
             Err(GrafeoLoroError::UnsupportedLoroType(_))
         ));
+
+        // Hunter MINOR 6: the test name promises Container coverage but the
+        // original body only exercised Binary. Construct a root-Map container
+        // id (the cheapest ContainerID variant) and verify the same rejection.
+        let cid = loro::ContainerID::Root {
+            name: "test_container".into(),
+            container_type: loro::ContainerType::Map,
+        };
+        let ctr = loro::LoroValue::Container(cid);
+        assert!(matches!(
+            lval_to_gval(ctr),
+            Err(GrafeoLoroError::UnsupportedLoroType(_))
+        ));
     }
 
     #[test]
-    fn gval_to_grafeo_roundtrip() {
-        let gv = GraphValue::Integer(7);
-        let grafeo_v = gval_to_grafeo_value(gv);
-        assert_eq!(grafeo_v, grafeo::Value::Int64(7));
+    fn gval_to_grafeo_maps_all_variants() {
+        // Hunter MINOR 5: the original `gval_to_grafeo_roundtrip` test was
+        // misnamed (it tested a 1-way mapping, not a roundtrip) and only
+        // exercised 1 of 8 GraphValue variants. Renamed and expanded.
+        assert_eq!(
+            gval_to_grafeo_value(GraphValue::Null),
+            grafeo::Value::Null
+        );
+        assert_eq!(
+            gval_to_grafeo_value(GraphValue::Bool(true)),
+            grafeo::Value::Bool(true)
+        );
+        assert_eq!(
+            gval_to_grafeo_value(GraphValue::Integer(7)),
+            grafeo::Value::Int64(7)
+        );
+        assert_eq!(
+            gval_to_grafeo_value(GraphValue::Float(3.14)),
+            grafeo::Value::Float64(3.14)
+        );
+        assert_eq!(
+            gval_to_grafeo_value(GraphValue::String("hi".to_string())),
+            grafeo::Value::String("hi".into())
+        );
+        let vec: std::sync::Arc<[f32]> = vec![1.0, 2.5, 3.75].into();
+        assert_eq!(
+            gval_to_grafeo_value(GraphValue::Vector(vec.clone())),
+            grafeo::Value::Vector(vec)
+        );
+        // Nested list (recursive): GraphValue::List([Bool, Integer]) →
+        // grafeo::Value::List([Bool, Int64]).
+        let list_in = GraphValue::List(vec![
+            GraphValue::Bool(false),
+            GraphValue::Integer(11),
+        ]);
+        let list_out = grafeo::Value::List(
+            vec![grafeo::Value::Bool(false), grafeo::Value::Int64(11)].into(),
+        );
+        assert_eq!(gval_to_grafeo_value(list_in), list_out);
+        // Nested map (recursive): {"k": Bool} → grafeo::Value::Map{"k": Bool}.
+        let mut map_in = HashMap::new();
+        map_in.insert("k".to_string(), GraphValue::Bool(true));
+        let map_out = gval_to_grafeo_value(GraphValue::Map(map_in));
+        let expected = grafeo::Value::Map(std::sync::Arc::new({
+            let mut bt: BTreeMap<grafeo_common::types::PropertyKey, grafeo::Value> =
+                BTreeMap::new();
+            bt.insert("k".into(), grafeo::Value::Bool(true));
+            bt
+        }));
+        assert_eq!(map_out, expected);
     }
 }
