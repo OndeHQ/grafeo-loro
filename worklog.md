@@ -249,3 +249,31 @@ Stage Summary:
   4. **`spawn_cdc_poller` initial epoch is hardcoded to `EpochId::new(0)`** — for a long-running process restarted after a crash, this would re-replay all CDC history from epoch 0 (potentially huge). L3 should persist `last_polled_epoch` across restarts (e.g., via the storage backend) OR initialize from `grafeo_db.current_epoch()` on first start to skip historical events.
   5. **`grafto-engine` is not a direct dep** — the L2 wiring uses type inference for `PreparedCommit` (never names it explicitly) and `grafeo-common` for `EpochId`. If L3 wants to name `PreparedCommit` in a signature (e.g., for a helper that returns it), it will need to add `grafeo-engine = "0.5"` as a direct dep OR use `grafeo::session::Session::prepare_commit`'s return-type inference. Currently no L2 code names `PreparedCommit` — flagged for L3 awareness.
   6. **`spawn_inbound_worker` spawns `MutationBatcher::run` as a child task and joins on exit** — the JoinHandle returned by `spawn_inbound_worker` resolves when BOTH the forwarder and the batcher have exited. This is the intended shape, but means a stuck batcher (e.g., a grafeo transaction that never commits) will hang the inbound JoinHandle indefinitely. L3 should add a flush timeout or rely on the grafeo transaction's own timeout.
+
+---
+Task ID: L3
+Agent: L3 Deep Implementation
+Task: Fill all // TODO L3 sites; zero stubs remaining
+
+Work Log:
+- Read worklog.md (L1 + DEVIL + orchestrator + L2) and inspected grafeo 0.5.42 / loro 1.13.6 APIs via grep of ~/.cargo/registry.
+- lval_to_gval: implemented recursive LoroValue→GraphValue mapping. Null/Bool/I64/Double/String → direct mapping. Map → GraphValue::Map (recursive). List → GraphValue::List (recursive). Binary/Container → Err(UnsupportedLoroType). Added 3 unit tests (scalars, recursive, rejects_binary_and_container).
+- gval_to_grafeo_value: added inverse helper for grafeo_tx. GraphValue↔grafeo::Value 1:1 shape match (both have Null/Bool/Int64/Float64/String/Vector/Map/List). 1 unit test (roundtrip).
+- init_loro_subscriber: DiffEvent→Vec<LoroOp> translation. Filters events where origin == ORIGIN_GRAFEO_BRIDGE (echo). Walks event.events: Vec<ContainerDiff>, projects root-container diffs (V/E/T_CHILD) into LoroOp variants. Uses blocking_send (sync handler) with channel-closed warning log on failure.
+- spawn_outbound_worker: ChangeEvent→Loro mutations. Reverse-looks-up grafeo NodeId → loro_key via inverse map (node_key_map: Arc<RwLock<HashMap<NodeId, String>>>). Read-modify-write merge into LoroDoc V[k1] map (preserves existing properties). Sets origin ORIGIN_GRAFEO_BRIDGE before commit.
+- spawn_cdc_poller: real poll loop. Initializes last_epoch from session.current_epoch() (not hardcoded 0 — per L2 new-issue #4). Polls changes_between(last, current). Filters via bridge_origin_epochs set. Sends survivors to outbound_tx. Prunes set to > last - EPOCH_RETENTION on each cycle.
+- apply_loro_op: per-variant grafeo Session dispatch. UpsertNode: lookup-or-create + insert into both node_id_map and inverse node_key_map. UpsertEdge: lookup src/dst, create edge. DeleteNode/DeleteEdge: idempotent no-op on missing keys (anti-plenger #9). TreeMove: delete old parent edge + insert new parent edge in single tx.
+- flush_inner: wired apply_loro_op into batcher flush. Session lifecycle: begin_transaction → for each op apply_loro_op → prepare_commit → set_metadata(origin) → commit → push epoch to bridge_origin_epochs.
+- echo_loop_prevention test: drives Loro→Grafeo insert (k1:{name:Alice}), asserts grafeo has node + node_id_map has k1. Drives Grafeo→Loro SET (n.age=42), asserts Loro V[k1] has both name and age. Asserts no echo after settle window. PASSES.
+- bidirectional_sync_with_delay test: 4-step convergence dance. Step 1 Loro→Grafeo (city:Lyon). Step 2 Grafeo→Loro (country:France). Step 3 Loro→Grafeo (pop:500000). Step 4 no-echo assertion. PASSES.
+- L2 new issues addressed: #1 (node_id_map accessor added via maps() method on SyncEngine); #2 (CdcEventWrapper::new constructor); #3 (blocking_send at subscriber, await at forwarder — documented); #4 (initial epoch from current_epoch()); #5 (no direct grafeo-engine dep needed); #6 (no flush timeout added — grafeo transactions are short, deferred to Plenger hunter verification).
+- Zero // TODO, zero unimplemented!(), zero todo!() in production code.
+- cargo check --all-targets: 0 errors, 5 warnings (all dead_code in non-Phase-1 modules: app.rs builder fields, hydration/vector.rs, presence/socket.rs, telemetry/health.rs — out of Phase 1 scope).
+- cargo test --all: 8/8 PASS (6 unit + 2 integration, 0 ignored).
+
+Stage Summary:
+- TODO count filled: 7+ sites (lval_to_gval, gval_to_grafeo_value, init_loro_subscriber, spawn_outbound_worker, spawn_cdc_poller, apply_loro_op per-variant, flush_inner, both test bodies).
+- cargo check: PASS (0 errors, 5 warnings in non-Phase-1 modules).
+- cargo test: 8/8 PASS (6 unit + 2 integration).
+- L2 new issues addressed: 5/6 (#6 deferred).
+- New issues for Plenger hunter: see L2's list + verify (a) the inverse node_key_map stays in sync with node_id_map on all code paths; (b) the epoch side-channel pruning doesn't drop epochs still in flight; (c) the blocking_send at subscriber can't deadlock under backpressure; (d) the read-modify-write merge in outbound worker is correct under concurrent Grafeo mutations on the same node.
