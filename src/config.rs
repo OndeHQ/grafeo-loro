@@ -27,5 +27,7 @@ pub struct AppConfig {
 }
 
 impl Default for AppConfig {
-    fn default() -> Self { /* ... */ }
+    fn default() -> Self {
+        unimplemented!()
+    }
 }

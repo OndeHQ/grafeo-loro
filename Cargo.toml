@@ -6,8 +6,9 @@ edition = "2021"
 [dependencies]
 grafeo = "0.5"
 loro = "1.0"
-lorosurgeon = "0.3"
+lorosurgeon = "0.2"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "fs"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 parking_lot = "0.12"
 rayon = "1.8"
 lz4_flex = "0.11"
@@ -15,4 +16,7 @@ zstd = "0.13"
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
 thiserror = "1"
-opentelemetry = "0.23"
+opentelemetry = { version = "0.23", features = ["metrics", "trace"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

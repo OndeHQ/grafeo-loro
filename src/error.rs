@@ -19,6 +19,10 @@ pub enum GrafeoLoroError {
 
     #[error("Configuration invalid: {0}")]
     Config(String),
+
+    /// LoroValue variant has no GraphValue mapping (e.g. Binary, Container).
+    #[error("Unsupported LoroValue type: {0}")]
+    UnsupportedLoroType(String),
 }
 
 pub type Result<T> = std::result::Result<T, GrafeoLoroError>;

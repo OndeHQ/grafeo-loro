@@ -17,8 +17,11 @@ pub struct TreeNode {
 
 /// Translates Loro tree moves to Grafeo acyclic mutations.
 pub fn sync_tree_move_to_grafeo(
-    db: &GrafeoDB, 
-    node_id: NodeId, 
-    old_parent: NodeId, 
-    new_parent: NodeId
-) -> crate::error::Result<()>;
+    db: &GrafeoDB,
+    node_id: NodeId,
+    old_parent: NodeId,
+    new_parent: NodeId,
+) -> crate::error::Result<()> {
+    let _ = (db, node_id, old_parent, new_parent);
+    unimplemented!()
+}
