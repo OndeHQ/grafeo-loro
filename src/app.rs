@@ -77,37 +77,37 @@ impl GrafeoLoroApp {
 
 impl GrafeoLoroAppBuilder {
     /// Provide a storage backend implementation (filesystem, S3, IPFS, ...).
-    pub fn storage(mut self, storage: Arc<dyn StorageBackend>) -> Self {
+    pub fn storage(self, storage: Arc<dyn StorageBackend>) -> Self {
         let _ = storage;
         unimplemented!()
     }
 
     /// Select Loro or Grafeo as the source of truth.
-    pub fn ssot_mode(mut self, mode: SsotMode) -> Self {
+    pub fn ssot_mode(self, mode: SsotMode) -> Self {
         let _ = mode;
         unimplemented!()
     }
 
     /// Compression strategy for cold snapshots.
-    pub fn compression(mut self, comp: CompressionType) -> Self {
+    pub fn compression(self, comp: CompressionType) -> Self {
         let _ = comp;
         unimplemented!()
     }
 
     /// Compression strategy for hot sync packets.
-    pub fn sync_compression(mut self, comp: CompressionType) -> Self {
+    pub fn sync_compression(self, comp: CompressionType) -> Self {
         let _ = comp;
         unimplemented!()
     }
 
     /// Batcher flush interval in milliseconds.
-    pub fn batch_interval_ms(mut self, ms: u64) -> Self {
+    pub fn batch_interval_ms(self, ms: u64) -> Self {
         let _ = ms;
         unimplemented!()
     }
 
     /// Batcher max ops per flush.
-    pub fn batch_max_size(mut self, size: usize) -> Self {
+    pub fn batch_max_size(self, size: usize) -> Self {
         let _ = size;
         unimplemented!()
     }

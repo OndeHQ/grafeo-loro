@@ -15,3 +15,14 @@ pub const DEFAULT_BATCH_MS: u64 = 100;
 pub const DEFAULT_BATCH_SIZE: usize = 256;
 pub const DEFAULT_CHUNK_SIZE: usize = 256;
 pub const DEFAULT_STALENESS_MS: u64 = 5000;
+
+// Outbound CDC poller cadence (Grafeo→Loro path). Grafeo 0.5.42 CDC is
+// poll-based: the outbound worker calls `session.changes_between(start, end)`
+// on this interval. 50 ms ≈ 20 polls/sec — low latency without burning CPU.
+pub const OUTBOUND_POLL_MS: u64 = 50;
+
+// Epoch side-channel retention window. The `bridge_origin_epochs` set keeps
+// epochs produced by Loro→Grafeo bridge writes so the outbound poller can
+// filter them out (echo prevention). Pruning keeps only epochs newer than
+// `last_polled_epoch - EPOCH_RETENTION` so the set does not grow unbounded.
+pub const EPOCH_RETENTION: u64 = 10_000;

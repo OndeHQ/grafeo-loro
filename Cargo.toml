@@ -5,10 +5,13 @@ edition = "2021"
 
 [dependencies]
 grafeo = "0.5"
+# Direct dep for `grafeo_common::types::EpochId` (used by the epoch side-channel
+# echo-prevention set). Already loaded transitively by grafeo, so this adds no
+# new code to the build graph.
+grafeo-common = "0.5"
 loro = "1.0"
 lorosurgeon = "0.2"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "fs"] }
-tokio-util = { version = "0.7", features = ["rt"] }
 parking_lot = "0.12"
 rayon = "1.8"
 lz4_flex = "0.11"

@@ -127,8 +127,8 @@ pub enum SsotMode {
 ### Step B: Offline Mutation
 1.  User modifies graph offline (e.g., adds node, changes property).
 2.  Grafeo local database applies change instantly (<1ms). UI redraws.
-3.  Grafeo emits `CdcEvent`.
-4.  `LoroGrafeoBridge` consumes `CdcEvent`, locks `LoroDoc`, and applies equivalent mutation within `LoroDoc::transact_mut()`.
+3.  Grafeo emits `CdcEvent` (polled by the bridge's CDC poller worker — grafeo 0.5.42 CDC is poll-based, not push-based).
+4.  `LoroGrafeoBridge` consumes the `CdcEvent`, takes the `LoroDoc` write lock, calls `set_next_commit_origin("grafeo-bridge")`, applies the equivalent mutation, and calls `commit()`. (Loro 1.x is auto-commit — there is no `transact_mut()`.)
 5.  Updates stored in local Loro oplog.
 
 ### Step C: Reconciliation (Online Sync)
@@ -294,14 +294,22 @@ Bidirectional sync creates feedback loops where an update echoed back replicates
 Loro Update ──> Bridge ──> Grafeo Write ──> Grafeo CDC ──> Bridge ──> Loro Write (Loop!)
 ```
 
-### Solution: Origin Tracking
+### Solution: Origin Tracking + Epoch Side-Channel
 
-1.  **Loro-to-Grafeo Skip**:
+1.  **Loro-to-Grafeo Skip** (origin tag on Loro commit, visible in subscriber):
     *   Set Loro transaction origin during bridge mutations using `doc.set_next_commit_origin("grafeo-bridge")`.
     *   In the Loro subscription handler, inspect `event.origin`. If it equals `"grafeo-bridge"`, discard the event.
-2.  **Grafeo-to-Loro Skip**:
-    *   When the bridge executes queries in Grafeo, attach transaction metadata: `tx.set_metadata("origin", "loro-bridge")`.
-    *   In the Grafeo CDC listener loop, inspect the transaction origin. If it equals `"loro-bridge"`, ignore the event.
+2.  **Grafeo-to-Loro Skip** (epoch side-channel — see Known Limitation below):
+    *   When the bridge commits a Grafeo transaction, `prepared.commit()` returns the `EpochId`.
+    *   The bridge records that `EpochId` in an in-memory `HashSet<EpochId>` (`SyncEngine::bridge_origin_epochs`).
+    *   The outbound CDC poller calls `session.changes_between(start, end)`, filters out any `ChangeEvent` whose `.epoch` is in the set, and forwards survivors to the outbound worker.
+    *   The set is pruned each poll cycle to keep only epochs newer than `last_polled_epoch - EPOCH_RETENTION` (default 10_000).
+
+### Known Limitation: Grafeo CDC has no origin field (Devil BLOCKER B2)
+
+Grafeo 0.5.42's `ChangeEvent` carries `entity_id / kind / epoch / timestamp / before / after / labels / edge_type / src_id / dst_id / triple_*` — **no `origin` field**. `PreparedCommit::set_metadata(k, v)` is dropped on `commit()` (verified in grafeo-engine source: `commit()` calls `session.commit()` and never propagates `metadata` to `CdcLog`). The architecture's original design ("inspect the transaction origin in the CDC listener") therefore cannot be implemented as written.
+
+**Workaround (orchestrator-approved)**: the epoch side-channel above. An upstream grafeo patch adding an `origin: Option<String>` field to `ChangeEvent` (and propagating `PreparedCommit::metadata` through the commit path) would let us delete the side-channel and return to the simpler origin-tag design. Out of scope for this loop.
 
 ---
 
@@ -309,18 +317,30 @@ Loro Update ──> Bridge ──> Grafeo Write ──> Grafeo CDC ──> Bridg
 
 Below is the concrete, thread-safe Rust synchronization engine.
 
+> **Note (Devil BLOCKER B1/B2)**: The pseudocode below is **illustrative** —
+> it shows the intended control flow, not literal grafeo 0.5.42 / loro 1.13.6
+> API calls. The actual implementation in `src/bridge/sync_engine.rs` uses the
+> grafeo `Session` + `PreparedCommit` API (`db.session_with_cdc(true)` →
+> `session.begin_transaction()` → `session.create_node_with_props(...)` /
+> `session.set_node_property(...)` / `session.delete_node(...)` →
+> `session.prepare_commit()` → `prepared.set_metadata(...)` (advisory only —
+> dropped on commit) → `prepared.commit() -> Result<EpochId>`), and the loro
+> auto-commit model (`set_next_commit_origin` + `commit` — there is no
+> `transact_mut()`). Echo prevention on the Grafeo→Loro path uses the epoch
+> side-channel (§9) because grafeo's `ChangeEvent` has no `origin` field.
+
 ```rust
 use std::sync::Arc;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use loro::{LoroDoc, LoroValue};
-use grafeo::{GrafeoDB, cdc::CdcEvent};
+use grafeo::{GrafeoDB, cdc::ChangeEvent};
 
 pub struct SyncEngine {
     db: Arc<GrafeoDB>,
     doc: Arc<RwLock<LoroDoc>>,
     // Bridge-internal worker channel
-    inbound_tx: mpsc::Sender<loro::event::Event>,
+    inbound_tx: mpsc::Sender<loro::event::DiffEvent<'static>>, // illustrative
 }
 
 impl SyncEngine {
@@ -343,7 +363,7 @@ impl SyncEngine {
     /// 1. Synchronous Loro event handler. Converts events to async channel updates.
     fn init_loro_subscriber(self: &Arc<Self>) {
         let tx = self.inbound_tx.clone();
-        let mut doc = self.doc.write();
+        let doc = self.doc.read(); // subscribe_root takes &self
 
         let _sub = doc.subscribe_root(Arc::new(move |event| {
             // Drop events generated by our own bridge mutations
@@ -356,52 +376,71 @@ impl SyncEngine {
     }
 
     /// 2. Inbound Worker (Loro -> Grafeo)
-    fn spawn_inbound_worker(self: &Arc<Self>, mut rx: mpsc::Receiver<loro::event::Event>) {
+    fn spawn_inbound_worker(self: &Arc<Self>, mut rx: mpsc::Receiver<DiffEvent>) {
         let db = self.db.clone();
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                // Begin high-speed Grafeo transaction
-                let mut db_tx = db.begin_write_tx();
+                // Begin a Grafeo Session transaction (Session API, not begin_write_tx).
+                let mut session = db.session_with_cdc(true);
+                session.begin_transaction().unwrap();
 
-                // Set origin metadata to prevent echo loops
-                db_tx.set_metadata("origin", "loro-bridge");
+                // Set origin metadata (advisory only — dropped on commit;
+                // the epoch side-channel is the real echo prevention).
+                // session.set_metadata(...) lives on PreparedCommit, below.
 
                 for diff in &event.events {
-                    // Extract diff target container and map values
-                    // db_tx.upsert_node(...) / db_tx.delete_node(...)
+                    // session.create_node_with_props(labels, props_iter)
+                    // session.set_node_property(id, key, value)
+                    // session.delete_node(id)
                 }
 
-                db_tx.commit().unwrap();
+                let mut prepared = session.prepare_commit().unwrap();
+                prepared.set_metadata("origin", "loro-bridge"); // advisory
+                let _epoch = prepared.commit().unwrap(); // -> EpochId
+                // TODO: insert epoch into bridge_origin_epochs set.
             }
         });
     }
 
     /// 3. Outbound Worker (Grafeo -> Loro)
-    pub fn spawn_outbound_worker(self: &Arc<Self>, mut cdc_rx: mpsc::Receiver<CdcEvent>) {
+    pub fn spawn_outbound_worker(self: &Arc<Self>, mut cdc_rx: mpsc::Receiver<ChangeEvent>) {
         let doc_lock = self.doc.clone();
         tokio::spawn(async move {
             while let Some(event) = cdc_rx.recv().await {
-                // Drop CDC events originating from our own inbound worker
-                if event.transaction_metadata.get("origin").map(|s| s.as_str()) == Some("loro-bridge") {
-                    continue;
-                }
+                // Filter via epoch side-channel (done at poll time in
+                // spawn_cdc_poller; defensive double-check here).
+                // if bridge_origin_epochs.contains(&event.epoch) { continue; }
 
-                let mut doc = doc_lock.write();
+                let doc = doc_lock.write();
 
                 // Identify origin to prevent echo
                 doc.set_next_commit_origin("grafeo-bridge");
-                let mut txn = doc.transact_mut();
+                // Apply equivalent mutation to Loro (auto-commit model:
+                // no transact_mut — call container mutators directly).
+                // ...doc.get_map("V").insert(...)...;
+                doc.commit();
+            }
+        });
+    }
 
-                match event {
-                    CdcEvent::NodeInserted { id, label, properties } => {
-                        let v_root = doc.get_map("V");
-                        if let Ok(node_map) = v_root.insert_map(&mut txn, id.to_string()) {
-                            // Map values into transaction
-                        }
-                    }
-                    _ => {}
+    /// 4. CDC Poller (Grafeo CDC is poll-based in 0.5.42, not push-based).
+    pub fn spawn_cdc_poller(self: &Arc<Self>) {
+        let db = self.db.clone();
+        let tx = self.outbound_tx.clone();
+        tokio::spawn(async move {
+            let mut last_epoch = db.current_epoch();
+            loop {
+                tokio::time::sleep(Duration::from_millis(OUTBOUND_POLL_MS)).await;
+                let current = db.current_epoch();
+                if current <= last_epoch { continue; }
+                let session = db.session_with_cdc(true);
+                let events = session.changes_between(last_epoch, current).unwrap();
+                for ev in events {
+                    if bridge_origin_epochs.read().contains(&ev.epoch) { continue; }
+                    let _ = tx.send(OutboundMsg { epoch: ev.epoch, payload: ev }).await;
                 }
-                txn.commit().unwrap();
+                // Prune: keep only epochs > last_epoch - EPOCH_RETENTION.
+                last_epoch = current;
             }
         });
     }
@@ -624,6 +663,12 @@ When `LoroDoc` imports a compressed snapshot from storage, the local `GrafeoDB` 
 
 Use `rayon` to chunk Loro map collections and parallelize Grafeo transaction insertions.
 
+> **Note (Devil BLOCKER B1)**: The pseudocode below is illustrative. The
+> actual grafeo 0.5.42 API is `Session`-based: `db.session_with_cdc(true)` →
+> `session.begin_transaction()` → `session.create_node_with_props(labels,
+> props_iter)` → `session.prepare_commit()` → `prepared.commit()`. There is
+> no `db.begin_write_tx()` or `db_tx.upsert_node(...)`.
+
 ```rust
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -639,8 +684,9 @@ pub fn parallel_hydrate_grafeo(db: &Arc<GrafeoDB>, doc: &LoroDoc) {
 
     // Execute in parallel chunks via Rayon
     node_ids.par_chunks(256).for_each(|chunk| {
-        let mut db_tx = db.begin_write_tx();
-        db_tx.set_metadata("origin", "loro-bridge"); // Prevent echo loops
+        // Grafeo Session API (illustrative — actual call shape may differ).
+        let mut session = db.session_with_cdc(true);
+        session.begin_transaction().unwrap();
 
         for id_str in chunk {
             let node_id: u64 = id_str.parse().unwrap();
@@ -660,12 +706,19 @@ pub fn parallel_hydrate_grafeo(db: &Arc<GrafeoDB>, doc: &LoroDoc) {
                     properties.insert("description".to_string(), GValue::String(desc.to_string()));
                 }
 
-                db_tx.upsert_node(node_id, properties);
+                // Session has no upsert_node; use create_node_with_props +
+                // (later) set_node_property for updates. The bridge's
+                // `loro_key → grafeo::NodeId` map (see §20) handles identity.
+                let labels: [&str; 0] = [];
+                let props_iter = properties.iter().map(|(k, v)| (k.as_str(), v.clone()));
+                let _ = session.create_node_with_props(&labels, props_iter);
             }
         }
 
         // Block-STM parallel transaction execution
-        db_tx.commit().unwrap();
+        let mut prepared = session.prepare_commit().unwrap();
+        prepared.set_metadata("origin", "loro-bridge"); // advisory only
+        let _epoch = prepared.commit().unwrap();
     });
 }
 ```
@@ -699,14 +752,18 @@ impl VectorOffloadManager {
         let embedding_vector: Vec<f32> = generate_local_embedding(text).await;
 
         // 2. Insert directly into Grafeo column and update HNSW index
-        let mut tx = self.db.begin_write_tx();
-        tx.set_metadata("origin", "loro-bridge");
-
-        let mut props = std::collections::HashMap::new();
-        props.insert("embedding".to_string(), GValue::Vector(Arc::from(embedding_vector)));
-
-        tx.update_node_properties(node_id, props);
-        tx.commit().unwrap(); // Grafeo rebuilds local HNSW index incrementally
+        // (Illustrative — actual grafeo 0.5.42 API uses Session + PreparedCommit.)
+        let mut session = self.db.session_with_cdc(true);
+        session.begin_transaction().unwrap();
+        session.set_node_property(
+            grafeo::NodeId(node_id),
+            "embedding",
+            GValue::Vector(Arc::from(embedding_vector)),
+        ).unwrap();
+        let mut prepared = session.prepare_commit().unwrap();
+        prepared.set_metadata("origin", "loro-bridge"); // advisory only
+        let _epoch = prepared.commit().unwrap();
+        // Grafeo rebuilds local HNSW index incrementally on commit.
     }
 }
 
@@ -762,6 +819,14 @@ Applying every single keystroke or cursor move as a persistent Grafeo write tran
 
 `LoroGrafeoBridge` uses a **time-and-count-based batcher** to collect incoming Loro changes, committing them in optimized, vectorized blocks.
 
+> **Note (Devil BLOCKER B1, MAJOR M7)**: The pseudocode below is
+> illustrative. The actual grafeo 0.5.42 API is `Session`-based (no
+> `begin_write_tx()`), and `LoroOp::UpsertNode` carries a Loro-side string
+> key (`loro_key`) rather than a numeric `id` because grafeo has no
+> upsert-by-external-id. The bridge maintains a `loro_key → grafeo::NodeId`
+> map in `SyncEngine` and translates at apply time via
+> `bridge::grafeo_tx::apply_loro_op`.
+
 ```rust
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -797,28 +862,39 @@ impl MutationBatcher {
     }
 
     fn flush_batch(&self, buffer: &mut Vec<LoroOp>) {
-        let mut tx = self.db.begin_write_tx();
-        tx.set_metadata("origin", "loro-bridge");
+        // Session + PreparedCommit API (illustrative).
+        let mut session = self.db.session_with_cdc(true);
+        session.begin_transaction().unwrap();
 
-        // Execute batch vectorized insertion
+        // Execute batch vectorized insertion via apply_loro_op, which
+        // consults the loro_key → grafeo::NodeId map for identity.
         for op in buffer.drain(..) {
             match op {
-                LoroOp::UpsertNode { id, properties } => {
-                    tx.upsert_node(id, properties);
+                LoroOp::UpsertNode { loro_key, labels, properties } => {
+                    // apply_loro_op(&session, &op, &node_id_map)
+                    //   → if loro_key in map: set_node_property for each prop
+                    //   → else: create_node_with_props + insert into map
                 }
-                LoroOp::DeleteNode { id } => {
-                    tx.delete_node(id);
+                LoroOp::DeleteNode { loro_key } => {
+                    // apply_loro_op → look up NodeId, session.delete_node(id)
                 }
             }
         }
 
-        tx.commit().unwrap(); // Advances Grafeo epoch in atomic transaction
+        let mut prepared = session.prepare_commit().unwrap();
+        prepared.set_metadata("origin", "loro-bridge"); // advisory only
+        let epoch = prepared.commit().unwrap(); // -> EpochId
+        // Insert `epoch` into bridge_origin_epochs (echo prevention).
     }
 }
 
 pub enum LoroOp {
-    UpsertNode { id: u64, properties: std::collections::HashMap<String, grafeo::Value> },
-    DeleteNode { id: u64 },
+    UpsertNode {
+        loro_key: String,
+        labels: Vec<String>,
+        properties: std::collections::HashMap<String, grafeo::Value>,
+    },
+    DeleteNode { loro_key: String },
 }
 ```
 
