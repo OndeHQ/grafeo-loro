@@ -9,10 +9,10 @@ pub const ROOT_EDGES: &str = "E";
 // as YAGNI per Hunter NIT 11 (declared but never read in Phase 1). Re-add when
 // the inbound subscriber grows a tree-container diff arm.
 
-// Tree parent-child edge label. Existing `apply_tree_move`
-// (`src/bridge/grafeo_tx.rs:200-206`) hardcodes `"CHILD"` and uses
-// child→parent direction (src=child, dst=parent) — this constant is the SSOT
-// for the label literal; direction is enforced at call sites.
+// Tree parent-child edge label. Direction is parent→child (src=parent,
+// dst=child) per architecture §7 line 265 (`(p)-[:CHILD]->(c)`) and
+// `sync_tree_move_to_grafeo`'s doc-comment (P2T2-DEVIL R1). This constant is
+// the SSOT for the label literal; direction is enforced at call sites.
 pub const TREE_EDGE_LABEL: &str = "CHILD";
 
 // Ephemeral presence magic bytes

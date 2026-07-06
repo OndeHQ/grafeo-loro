@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use parking_lot::RwLock;
 
+use crate::constants::TREE_EDGE_LABEL;
 use crate::error::{GrafeoLoroError, Result};
 use crate::types::events::LoroOp;
 use crate::types::values::gval_to_grafeo_value;
@@ -176,6 +177,10 @@ fn apply_upsert_edge(
 /// Phase 1 tree move = delete old `CHILD` edge + insert new `CHILD` edge.
 /// `old_parent_key`/`new_parent_key` may map to the same node (idempotent).
 ///
+/// Edge direction is parent→child (src=parent, dst=child) per architecture
+/// §7 line 265 (`(p)-[:CHILD]->(c)`) — P2T2-DEVIL R1; the pre-existing
+/// child→parent direction was a Phase 1 bug, fixed in P2T2-L2.
+///
 /// Phase 2: tree container support — handler exists because `LoroOp::TreeMove`
 /// is part of the L1 contract, but no production caller exists in Phase 1
 /// (the inbound subscriber only translates `ROOT_VERTICES`/`ROOT_EDGES`
@@ -197,13 +202,15 @@ fn apply_tree_move(
         Some(&n) => n,
         None => return Ok(()),
     };
-    let old_key: EdgeKey = (node_key.to_string(), old_parent_key.to_string(), "CHILD".to_string());
+    // parent→child: EdgeKey = (parent, child, label) — P2T2-DEVIL R1.
+    let old_key: EdgeKey = (old_parent_key.to_string(), node_key.to_string(), TREE_EDGE_LABEL.to_string());
     if let Some(id) = maps.remove_edge(&old_key) {
         session.delete_edge(id);
     }
-    let new_key: EdgeKey = (node_key.to_string(), new_parent_key.to_string(), "CHILD".to_string());
+    let new_key: EdgeKey = (new_parent_key.to_string(), node_key.to_string(), TREE_EDGE_LABEL.to_string());
     if maps.edge_id_map.read().get(&new_key).is_none() {
-        let eid = session.create_edge(node_id, new_parent_id, "CHILD");
+        // parent→child: create_edge(parent, child, label) — P2T2-DEVIL R1.
+        let eid = session.create_edge(new_parent_id, node_id, TREE_EDGE_LABEL);
         maps.insert_edge(new_key, eid);
     }
     Ok(())
