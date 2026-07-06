@@ -3871,3 +3871,130 @@ Stage Summary:
 - L1's signature refinement (`async fn(...) -> Vec<f32>` → `pub fn(...) -> Result<Vec<f32>>`) is SOUND on all 3 axes (sync vs async, fallible vs infallible, pub vs private). API citations verified at file:line — only off-by-one drift on 2 lines (NIT 3). Baseline preserved (47 PASS / 5 IGNORED / 0 FAIL; 4 warnings DOWN from 5). The 2 MAJORs are doc/rustdoc fixes (arch §17 staleness + `app.rs:117` orphan annotation) — NO code-contract changes needed. L2 is mostly DOC + RUSTDOC edits; the L1 contract itself stands.
 - Key findings: (1) §17 has 5 stale points matching the §15/§16 precedent — L2 must sweep it. (2) `app::GrafeoLoroApp::generate_embedding` orphan at app.rs:117 has a "Phase 3 scope" annotation that conflicts with the implementation-plan task boundaries — L2 must clarify. (3) Spec-literal warning message `"ONNX not integrated"` vs L1's expanded `"ONNX not integrated; returning deterministic dummy embedding"` is an SSOT conflict — L2 must pick one. (4) The 33-line rustdoc over-prescribes L3's PRNG algorithm — trim to contract-only. (5) Test-capture strategy: Option B (hand-rolled `Subscriber`, no dep) + `--test-threads=1` constraint OR Option C (skip) fallback.
 - No code changes — DEVIL is read-only. Worklog entry appended ONLY.
+
+---
+Task ID: P3T3-L2
+Agent: Fixer (L2 — Skeleton & Flow Wiring)
+Task: Wire generate_local_embedding skeleton; fix DEVIL M1 (arch §17) + M2 (app.rs orphan) + MINORs
+
+Work Log:
+- Confirmed branch `p3-vector-embedding`, HEAD `8fbdee4` (P3T3-L1 worklog commit). Working tree had uncommitted P3T3-DEVIL worklog entry (DEVIL is read-only — does not commit). Baseline: `cargo check --all-targets` = 0 errors / 4 pre-existing warnings; `cargo test --all` = 47 PASS / 5 IGNORED / 0 FAIL.
+- Read mandatory framework files in order: `sub-agents-traits.md`, `klemer-agents.md` (L2 = "Define the internal state. Wire the entire execution path. Leave all complex algorithms as // TODO"), `anti-plenger.md` (14 decisions), `plenger-traits.md` (8 anti-patterns), `repomix.md` usage guide.
+- Read worklog most-recent 3 entries in full: `ORCH-P3T3-SETUP` (worklog:3641-3678), `P3T3-L1` (worklog:3680-3772), `P3T3-DEVIL` (worklog:3775-3873). Confirmed DEVIL verdict = PROCEED TO L2 (0 CRITICAL, 2 MAJOR, 4 MINOR, 3 NIT — all MAJORs are doc/rustdoc fixes, NO code-contract changes). Confirmed scope = `generate_local_embedding` stub ONLY (Task 4 owns `new` + `handle_text_update`).
+- Read existing code: `src/hydration/vector.rs` (78 lines, L1 contracts — 33-line rustdoc + `unimplemented!()` body), `src/lib.rs` (24 lines — has `pub use compression::{...}` + `pub use hydration::parallel_hydrate_grafeo;` precedent), `src/app.rs:117` (orphan `GrafeoLoroApp::generate_embedding` with `"Phase 3 scope"` annotation), `src/constants.rs:44` (`DEFAULT_EMBEDDING_DIM: usize = 384`), `src/error.rs` (53 lines — `Result<T>` type alias), `tests/unit/vector_embedding.rs` (108 lines, 4 `#[ignore]`'d scaffolds + cheat-sheet), `tests/unit/main.rs` (16 lines — `mod vector_embedding;` registered), `Cargo.toml` (`tracing = "0.1"` at line 32; `[dev-dependencies]` has only `tokio` test-util).
+- Re-verified grafeo-engine 0.5.42 embedding API line numbers (P3T3-DEVIL NIT 3 off-by-one correction): `pub trait EmbeddingModel: Send + Sync` at `mod.rs:39` ✓; `fn embed` at `mod.rs:47` (L1 said :46 — corrected); `fn dimensions` at `mod.rs:50` ✓; `fn name` at `mod.rs:53` ✓; `MockEmbeddingModel` struct at `mod.rs:62`, impl at `mod.rs:73-92` (DEVIL said 60-93 — close enough).
+- Re-verified `tracing-subscriber` availability via `cargo add --dry-run --dev tracing-subscriber` → resolves to `v0.3.23` with default features (`alloc`, `ansi`, `fmt`, `nu-ansi-term`, `registry`, `sharded-slab`, `smallvec`, `std`, `thread_local`, `tracing-log`). Network access confirmed (registry index updated successfully).
+
+### Step 1 — Fix M1 (arch doc §17, 5 stale points):
+- Rewrote `docs/grafeo-loro.architecture.md:775-836` §17 code block + added new "### ONNX Stub Contract (Phase 3 Task 3)" subsection. Concrete fixes:
+  * Line 785: `pub async fn handle_text_update(&self, node_id: u64, text: &str)` → `pub async fn handle_text_update(&self, node_id: NodeId, text: &str) -> Result<()>` (3 deltas fixed: `u64`→`NodeId`, added `-> Result<()>`, illustrative body uses `?` instead of `.unwrap()`).
+  * Line 787: `let embedding_vector: Vec<f32> = generate_local_embedding(text).await;` → `let embedding_vector: Vec<f32> = generate_local_embedding(text)?;` (sync, no `.await`, `?` for fallible `Result`).
+  * Line 805: `async fn generate_local_embedding(_text: &str) -> Vec<f32>` → `pub fn generate_local_embedding(text: &str) -> Result<Vec<f32>>` (3 deltas fixed: `async` removed, `pub` added, return type changed).
+  * Line 807: `vec![0.15, 0.72, -0.05, 0.33]` (4 dims fixed placeholder) → `DEFAULT_EMBEDDING_DIM`-length deterministic-per-input via fold-seed-SplitMix64 (described in `// TODO(L3)` comment + ONNX Stub Contract subsection).
+  * Added "### ONNX Stub Contract (Phase 3 Task 3)" subsection with 6 bullet points covering: Dimension SSOT (`DEFAULT_EMBEDDING_DIM = 384` citing `config.rs:18`), Determinism (fold-seed-SplitMix64), Warning log (`tracing::warn!` + `std::sync::Once` once-per-process), Sync/fallible (`pub fn(&str) -> Result<Vec<f32>>`), Empty input (`""` → valid vector), Re-export (`pub use` at `src/lib.rs`).
+  * Added final paragraph citing `grafeo_engine::embedding::{EmbeddingModel, OnnxEmbeddingModel}` with correct line numbers (`mod.rs:39` trait, `mod.rs:47` embed — NIT 3 correction, `mod.rs:50` dimensions) + `MockEmbeddingModel` at `mod.rs:62-93` (P3T3-DEVIL MINOR 4).
+
+### Step 2 — Fix M2 (app.rs:117 orphan stub):
+- **DECISION: REANNOTATE** (not DELETE). Rationale: `GrafeoLoroApp::generate_embedding(&self, node_id: NodeId, field: &str)` is a HIGHER-LEVEL app-facade wrapper that takes `field: &str` (not `text: &str`), reads text from Loro first, then delegates to `VectorOffloadManager::handle_text_update` (Task 4) → `generate_local_embedding` (Task 3). It is a SEPARATE concern from Task 3's leaf `generate_local_embedding` — NOT superseded. It is NOT Task 3 scope (Task 3 = `generate_local_embedding` only). It is NOT Task 4 scope (Task 4 = `VectorOffloadManager::handle_text_update` + `new`). It depends on Task 4, so it's Phase 4+ scope. Deleting it (anti-plenger #11) would lose the layered architecture documentation; reannotating preserves the contract while clarifying ownership.
+- Updated `src/app.rs:116-126`: expanded rustdoc to explain the layering (app wrapper → Task 4 → Task 3) + changed `unimplemented!("generate_embedding is Phase 3 scope")` → `unimplemented!("generate_embedding is Phase 4+ scope (depends on Task 4's VectorOffloadManager::handle_text_update)")`.
+
+### Step 3 — Wire `src/hydration/vector.rs` skeleton (Once + warn! + TODO(L3)):
+- Added imports: `use std::sync::Once;` + `use tracing::warn;`.
+- Added module-top `static ONNX_WARN_ONCE: Once = Once::new();` (DEVIL NIT 1: L3 may move into function body — both compile identically; module-top is grep-findable).
+- Replaced `generate_local_embedding` body: `let _ = (text, DEFAULT_EMBEDDING_DIM); unimplemented!()` → `ONNX_WARN_ONCE.call_once(|| warn!("ONNX not integrated; returning deterministic dummy embedding"));` + 13-line `// TODO(L3)` comment block describing the algorithm (fold-seed-SplitMix64, references, MockEmbeddingModel precedent, verification) + `let _ = (text, DEFAULT_EMBEDDING_DIM); todo!("L3: deterministic dummy embedding via fold-seed-SplitMix64")`.
+- `VectorOffloadManager::new` + `handle_text_update` UNCHANGED (`unimplemented!()` — Task 4 scope, untouched per hard constraint).
+
+### Step 4 — Fix m1 (trim rustdoc to contract-only):
+- Trimmed the 33-line `# Contract (L3 implements)` rustdoc block (L1 lines 42-73) → 11-line contract-only rustdoc. Removed: SplitMix64/ChaCha8 algorithm prescription, fold-function literal, sample-range formula, anti-plenger rule citations. Kept: signature, determinism guarantee, empty-input behavior, warning message + Once, real-ONNX pointer, `# Errors` section. Algorithm details moved to `// TODO(L3):` comments inside the body (where L3 will implement).
+- Resolves P3T3-DEVIL MINOR 2 ("Rustdoc over-prescribes L3 algorithm — anti-plenger #13 'oneline doc first'") + resolves L1 open question 5 internal inconsistency (rustdoc prescribed SplitMix64 while open Q5 asked DEVIL to rule on PRNG choice).
+
+### Step 5 — Fix m2 (lib.rs re-export):
+- Added `pub use hydration::vector::generate_local_embedding;` to `src/lib.rs:27` with 2-line comment citing P3T1-L1 m3 + P3T2-L2 m1 precedent. Matches the existing `pub use hydration::parallel_hydrate_grafeo;` pattern.
+
+### Step 6 — Fix m3 (empty input doc):
+- Added to rustdoc: "empty `\"\"` → valid vector" (inline in the contract sentence). The `# Edge cases` section in `tests/unit/vector_embedding.rs` cheat-sheet already covered this; the rustdoc now also covers it.
+
+### Step 7 — Fix m4 (test-capture infrastructure):
+- **DECISION: Option A** (add `tracing-subscriber` to `[dev-dependencies]` + use `Layer` trait). Rationale:
+  * `tracing-subscriber` is the canonical companion to `tracing` — adding it as a dev-dep is idiomatic, NOT YAGNI. Every non-trivial Rust project using `tracing` for testing has `tracing-subscriber` in dev-deps.
+  * `Layer` trait impl is ~15 LOC vs ~50 LOC for direct `Subscriber` impl (Option B) — anti-plenger #10 Fewest LOC.
+  * Option B (hand-rolled `Subscriber`) reinvents what `tracing_subscriber::Layer` already provides — anti-plenger #5 Bloat.
+  * Option C (skip the warning-count test; manual `--nocapture` smoke) loses automated test coverage — anti-plenger #8 Observability.
+  * DEVIL's "no dep" stance was based on the assumption that hand-rolled `Subscriber` is ~30 LOC; in reality it's ~50 LOC (must implement `enabled`, `new_span`, `event`, `enter`, `exit`, `record_*` — even with default impls, the boilerplate is significant). `tracing-subscriber`'s `Layer` trait composes on top of a `Subscriber` and is much simpler.
+  * Network access confirmed (`cargo add --dry-run` succeeded; resolves to `v0.3.23`).
+- Added `tracing-subscriber = "0.3"` to `Cargo.toml:36-40` `[dev-dependencies]` with 4-line comment explaining the decision.
+- Added `mod test_capture` to `tests/unit/vector_embedding.rs:51-90` with:
+  * `pub struct WarnCounter { count: AtomicUsize }` + `new()` + `get()` methods.
+  * `impl<S> Layer<S> for WarnCounter where S: Subscriber` with `on_event` filtering `Level::WARN` events + `fetch_add(1, SeqCst)`.
+  * Module docstring (~15 lines) documenting the Once-global-state constraint: L3 MUST run with `--test-threads=1` AND ensure the warning test is first to call `generate_local_embedding` in the process, OR move to its own integration-test binary.
+- Referenced `test_capture::WarnCounter::new().get()` in `generate_local_embedding_logs_onnx_warning` scaffold body to suppress dead-code warning at L2 (L3 will use it for the actual assertion).
+
+### Step 8 — Update test scaffolds:
+- Added `// TODO(L3): remove the silencer above when filling test bodies` comment after `#![allow(unused_imports)]` (P3T3-DEVIL NIT 1).
+- Added MINOR 4 cheat-sheet note: "grafeo-engine ships a `MockEmbeddingModel` at `grafeo-engine-0.5.42/src/embedding/mod.rs:62-93` (`#[cfg(test)]`-private) with algorithm `t.bytes().map(|b| b as f32).sum::<f32>()` → seed → `((seed + i as f32) * 0.01).sin()` per dim — almost identical shape to L3's fold-seed-PRNG algorithm. Algorithm reference only, NOT reusable from grafeo-loro."
+- Fixed off-by-one citation in cheat-sheet: `mod.rs:46` → `mod.rs:47` (P3T3-DEVIL NIT 3 correction). Added note: "(NOT `:46` — P3T3-DEVIL NIT 3 off-by-one correction)".
+- Updated `generate_local_embedding_logs_onnx_warning` rustdoc to reflect Option A decision (replaces L1's 3-option "L3 to choose" with "Option A decided at L2" + Once-global-state constraint cross-reference to `mod test_capture` docstring).
+- All 4 test scaffolds remain `#[ignore = "P3T3-L1 scaffold: L3 implements the body"]` with `todo!()` bodies — L3 owns un-ignoring + body implementation.
+
+### Step 9 — Verify:
+- `cargo check --all-targets` → **EXIT 0; 0 errors; 4 warnings (ALL pre-existing — 0 new)**. Warnings: (1) `app.rs:47` builder fields; (2) `hydration/vector.rs:12` `db` field (Task 4 will read it); (3) `presence/socket.rs:6` `room_id`; (4) `telemetry/health.rs:9` `doc/db/last_sync_ts`. Adding `tracing-subscriber = "0.3"` dev-dep introduced ZERO new warnings.
+- `cargo test --all --no-run` → **EXIT 0; 3 test binaries emitted** (`unittests`, `integration-…`, `unit-…`).
+- `cargo test --all` → **47 PASS + 5 IGNORED + 0 FAIL** (6 lib + 5 integration + 36 unit pass; 5 ignored = 4 P3T3-L1 scaffolds + 1 P3T2 benchmark). Baseline preserved.
+- `grep -n "TODO(L3)" src/hydration/vector.rs` → **1 marker** (line 57: fold-seed-SplitMix64 algorithm prescription).
+- `grep -nE "unimplemented!|todo!" src/hydration/vector.rs` → **3 matches**: `unimplemented!()` at line 23 (`new` — Task 4 scope), `unimplemented!()` at line 32 (`handle_text_update` — Task 4 scope), `todo!("L3: ...")` at line 72 (`generate_local_embedding` — L3 scope).
+- `grep -n "TODO(L3)" tests/unit/vector_embedding.rs` → **1 marker** (line 54: NIT 1 silencer removal reminder).
+
+### Step 10 — Commit + push:
+- Push-protection guard: `grep -E "ghp_[a-zA-Z0-9]{20,}" worklog.md` → NO_PAT_MATCHES. `grep -rnE "ghp_[a-zA-Z0-9]{20,}" src/ tests/` → NO_PAT_IN_SRC_TESTS. `.git/config` verified clean (remote URL is plain `https://github.com/OndeHQ/grafeo-loro.git`).
+- `git add -A && git commit -m "P3T3-L2: wire generate_local_embedding skeleton + fix DEVIL M1 (arch §17) + M2 (app.rs orphan) + MINORs"` → commit `a2269f1` (8 files changed, 284 insertions, 70 deletions). Commit includes the pre-existing uncommitted P3T3-DEVIL worklog entry (DEVIL is read-only; L2 commits it as part of the wiring step).
+- `git push https://ghp_***@github.com/OndeHQ/grafeo-loro.git p3-vector-embedding` → **SUCCESS** (`8fbdee4..a2269f1`). Token never persisted to `.git/config` (verified post-push).
+
+### DEVIL findings addressed
+- **M1** (arch doc §17, 5 stale points): **FIXED** — all 5 deltas corrected (handle_text_update signature, sync generate_local_embedding call, pub fn signature, 384-dim deterministic-per-input, added ONNX Stub Contract subsection with tracing::warn! + Once + DEFAULT_EMBEDDING_DIM SSOT).
+- **M2** (app.rs orphan stub): **REANNOTATED** (not deleted) — `GrafeoLoroApp::generate_embedding` is a separate app-facade wrapper that composes Task 4 + Task 3; NOT superseded by Task 3's leaf `generate_local_embedding`. Reannotated to "Phase 4+ scope (depends on Task 4's VectorOffloadManager::handle_text_update)".
+- **m1** (trim rustdoc): **FIXED** — trimmed from 33 lines (L1 lines 42-73) to 11 lines (contract-only). Algorithm prescription moved to `// TODO(L3):` body comments.
+- **m2** (lib.rs re-export): **FIXED** — added `pub use hydration::vector::generate_local_embedding;` to `src/lib.rs:27`.
+- **m3** (empty input doc): **FIXED** — added "empty `\"\"` → valid vector" to rustdoc.
+- **m4** (test-capture): **Option A decided** — added `tracing-subscriber = "0.3"` dev-dep + wired `mod test_capture::WarnCounter` with `Layer` impl (~15 LOC). Rejected Option B (hand-rolled `Subscriber` ~50 LOC — anti-plenger #5 Bloat) and Option C (skip — anti-plenger #8 Observability).
+- **n1** (Once placement): **DEFERRED to L3** — L2 wired module-top `static ONNX_WARN_ONCE: Once = Once::new();` (grep-findable, idiomatic) but documented in comment that L3 may move into function body. Both compile identically.
+- **n2** (PRNG choice): **DEFERRED to L3** — L2 did NOT prescribe; `// TODO(L3):` comment mentions SplitMix64 as a hint with reference URL + MockEmbeddingModel precedent, but L3 picks the final PRNG.
+- **n3** (`db` field dead-code warning): **ACCEPTED** — pre-existing; goes away in Task 4 when `handle_text_update` reads `self.db`. Adding `#[allow(dead_code)]` would be a band-aid (anti-plenger #4) that has to be removed in Task 4.
+- **NIT 1** (test silencer TODO comment): **FIXED** — added `// TODO(L3): remove the silencer above when filling test bodies` comment.
+- **NIT 3** (off-by-one citation): **FIXED** — `mod.rs:46` → `mod.rs:47` in `tests/unit/vector_embedding.rs` cheat-sheet.
+- **MINOR 4** (MockEmbeddingModel precedent): **FIXED** — added cheat-sheet note in `tests/unit/vector_embedding.rs` + `// TODO(L3)` body comment in `src/hydration/vector.rs` + arch doc §17 final paragraph.
+
+### Wiring decisions
+- **Once placement**: module-top (`static ONNX_WARN_ONCE: Once = Once::new();` at `src/hydration/vector.rs:35`) — grep-findable, idiomatic for module-global init guards. L3 may move into function body if preferred (documented in comment).
+- **Warning message**: `"ONNX not integrated; returning deterministic dummy embedding"` (matches L1's expanded wording — more actionable than spec's bare `"ONNX not integrated"`; P3T3-DEVIL MINOR 1 lean was (b) update spec/arch to L1's expanded wording; L2 did this by referencing the expanded message in arch §17).
+- **Deterministic algorithm**: prescribed in `// TODO(L3):` body comments — fold `text.bytes()` → u64 seed via `wrapping_mul(31).wrapping_add(b as u64)` → hand-rolled SplitMix64 PRNG (~10 LOC, no `rand` dep) → `DEFAULT_EMBEDDING_DIM` f32 samples in `[0.0, 1.0)` via `(next_u64() >> 11) as f32 / (1u64 << 53) as f32`. References: https://prng.di.unimi.it/splitmix64.c + grafeo-engine `MockEmbeddingModel` at `mod.rs:62-93`.
+- **Test-capture**: Option A (`tracing-subscriber` dev-dep + `Layer` trait). `WarnCounter` struct + `Layer<S>` impl in `mod test_capture`. L3 installs via `tracing_subscriber::registry().with(WarnCounter::new()).set_default(|| ...)`.
+
+### Files touched
+1. `docs/grafeo-loro.architecture.md` — §17 rewritten (5 stale points fixed + ONNX Stub Contract subsection added + final paragraph citing grafeo-engine API).
+2. `src/app.rs` — `GrafeoLoroApp::generate_embedding` rustdoc expanded + `unimplemented!` message reannotated (M2).
+3. `src/hydration/vector.rs` — wired `Once` + `tracing::warn!` skeleton; trimmed rustdoc (m1); `// TODO(L3):` algorithm comments; body `todo!("L3: ...")`.
+4. `src/lib.rs` — added `pub use hydration::vector::generate_local_embedding;` (m2).
+5. `tests/unit/vector_embedding.rs` — added `mod test_capture` with `WarnCounter` + `Layer` impl (m4); added NIT 1 silencer TODO; added MINOR 4 MockEmbeddingModel cheat-sheet note; fixed NIT 3 off-by-one citation; updated `generate_local_embedding_logs_onnx_warning` rustdoc (Option A decided).
+6. `Cargo.toml` — added `tracing-subscriber = "0.3"` to `[dev-dependencies]` (m4 Option A).
+7. `Cargo.lock` — auto-updated (tracing-subscriber + transitive deps).
+8. `worklog.md` — P3T3-DEVIL entry (was uncommitted) + this P3T3-L2 entry.
+
+### Verification
+- `cargo check --all-targets` → exit 0, 0 errors, 4 warnings (0 new — all pre-existing Phase 1/2 dead-code).
+- `cargo test --all --no-run` → exit 0 (3 test binaries emitted).
+- `cargo test --all` → 47 PASS + 5 IGNORED + 0 FAIL (baseline preserved).
+- `grep -rn "TODO(L3)" src/hydration/vector.rs` → 1 marker (line 57).
+- `grep -rn "TODO(L3)" tests/unit/vector_embedding.rs` → 1 marker (line 54).
+- `grep -rnE "unimplemented!|todo!" src/hydration/vector.rs` → 3 matches: `unimplemented!()` × 2 (Task 4 scope: `new` + `handle_text_update`) + `todo!("L3: ...")` × 1 (`generate_local_embedding`).
+
+Stage Summary:
+- Commit: `a2269f1` — "P3T3-L2: wire generate_local_embedding skeleton + fix DEVIL M1 (arch §17) + M2 (app.rs orphan) + MINORs".
+- Push: **SUCCESS** — `p3-vector-embedding` pushed to `origin` via inline-token URL (`8fbdee4..a2269f1`). Token never persisted to `.git/config`; `.git/config` verified clean of `ghp_` strings; remote URL is plain `https://github.com/OndeHQ/grafeo-loro.git`.
+- Ready for L3: **YES** — all wiring in place; `generate_local_embedding` body is `todo!("L3: ...")` with `// TODO(L3):` algorithm comments; 4 test scaffolds `#[ignore]`'d with `todo!()` bodies; `mod test_capture::WarnCounter` infrastructure wired; arch doc §17 + app.rs orphan + rustdoc all fixed.
+- Open questions for L3:
+  1. **PRNG choice**: L2 hinted SplitMix64 (no dep) in `// TODO(L3):` comments with reference URL + MockEmbeddingModel precedent. L3 may pick a different PRNG (e.g., xoshiro256**) if preferred — the contract is "deterministic + input-sensitive + no `rand` dep".
+  2. **Once placement**: L2 wired module-top `static ONNX_WARN_ONCE: Once = Once::new();`. L3 may move into function body if co-location is preferred (both compile identically — minor style call).
+  3. **Test-capture execution mode**: L3 MUST run `generate_local_embedding_logs_onnx_warning` with `--test-threads=1` AND ensure it's the first test to call `generate_local_embedding` in the process, OR move it to its own integration-test binary. The `Once` is process-global — parallel test threads will race.
+  4. **Sample range**: L2 hinted `[0.0, 1.0)` via `(next_u64() >> 11) as f32 / (1u64 << 53) as f32`. L3 may use `[-1.0, 1.0)` or any other range — the contract is just "deterministic + input-sensitive"; downstream Grafeo HNSW accepts any `f32` vector.
+  5. **`GrafeoLoroApp::generate_embedding` (Phase 4+)**: L2 reannotated the orphan stub. L3 for Task 3 does NOT touch it. Task 4 / Phase 4 L1 will own wiring `app::generate_embedding → VectorOffloadManager::handle_text_update`.
+  6. **NIT 1 silencer removal**: L3 MUST remove `#![allow(unused_imports)]` from `tests/unit/vector_embedding.rs` when filling test bodies (matches P3T1-L1 → P3T1-L3 trajectory).
