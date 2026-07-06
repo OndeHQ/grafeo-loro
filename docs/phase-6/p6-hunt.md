@@ -94,3 +94,34 @@
   - Line 818: `apply_loro_op(...)` with explicit comment "we log via `let _ =` and continue" — deliberate error-path testing.
 - No bare `.unwrap()` in the harness; all fallible ops use `expect("I<n>: ...")` or `let _ =`.
 
+## Anti-Pattern #8: Goodhart's Law in Action — HIGHEST RISK
+
+**Hunt**: Read all 16 `check_iN_*` fn bodies (lines 235-775) + call sites (lines 891-972) + seed corpus.
+
+**Per-fn verdict (16 total)**:
+- **I1** (line 235): REAL — `assert_eq!(bridge_keys, loro_keys)` (set equality, two distinct HashSets).
+- **I2** (line 250): WEAK — `assert_eq!(bridge_edges.len(), loro_edges.len())` (length only, NOT set equality like I1). Could miss same-count-different-keys drift. **MINOR**.
+- **I3a** (line 270): REAL — `assert_eq!(state.op_count, requested_ops)` (concrete count comparison).
+- **I3b** (line 283): REAL — `assert!(result.is_ok())` on `JoinHandle::await` (JoinError = panic detected; meaningful).
+- **I3c** (line 338): REAL — `assert!(result.is_ok())` + `assert_eq!(fresh_db.node_count(), state.live_node_keys.len())` (1:1 hydration materialization).
+- **I4** (line 363): REAL — `assert!(epoch_count <= max)` (concrete upper bound).
+- **I5** (line 378): REAL — `assert_eq!(filtered_after, filtered_before + 1)` + `assert_eq!(events_after, events_before)` (concrete counter deltas).
+- **I6** (line 438): REAL — `assert_eq!(prop, expected)` (write/read value equality).
+- **I7** (line 475): REAL — `assert_eq!(wire1, wire2)` (byte-vector equality, two compression runs).
+- **I8** (line 498): REAL — `assert_eq!(decompressed, sample)` (round-trip byte equality, all 3 strategies).
+- **I9** (line 537): REAL-with-documented-limitation — `assert_eq!(db1.node_count(), db2.node_count())` + edge_count + BridgeMaps len. Doc-comment (line 535-536) explicitly notes "Full byte-identical comparison of GrafeoDB is not exposed by the public API". Honest limitation, NOT Goodhart.
+- **I10** (line 575): REAL — `assert!(embedding.is_some())` + `assert!(matches!(embedding, Some(grafeo::Value::Vector(_))))` (presence + type check).
+- **I11** (line 629): REAL — bijectivity: forward/inverse map length equality + per-entry `node_key_map.get(v).is_some_and(|inv| inv == k)` for BOTH node and edge maps.
+- **I12** (line 672): NO-OP (empty body) — honestly deferred per Phase 6 T1 user exclusion. Doc-comment (lines 665-671) explicitly says "Intentionally empty — see doc-comment. NOT a stub; the check genuinely cannot be implemented until Phase 6 T1 fills `GrafeoLoroApp::query`." Acceptable known gap, NOT Goodhart (not pretending to verify).
+- **I13** (line 682): **NO-OP / TAUTOLOGY — MAJOR GOODHART**. The fn body `assert!(batcher_buffer_is_empty, ...)` is fed a HARDCODED `true` at the call site (line 909): `check_i13_batcher_count(true, op_count);`. The call-site comment (lines 901-908) honestly admits "We can't access the batcher's private `buffer` field from here, so we pass `true`". This makes I13 a tautology — `assert!(true)` — exactly the Goodhart pattern. The honest comment saves it from being malicious, but the invariant is unverified. **MAJOR** (not blocker: I3b indirectly verifies the batcher drains via JoinHandle success, so the underlying behavior IS tested elsewhere; the I13 fn itself is dead weight that should either be removed or refactored to expose a real `buffer_is_empty()` accessor on `MutationBatcher`).
+- **I14** (line 697): REAL — BFS cycle detection from every node, `panic!` on revisit. Concrete structural check.
+- **I15** (line 728): REAL — magic-prefix `assert_eq!` + 5 per-field `assert_eq!` round-trip checks + negative test (`bad_bytes` rejection).
+
+**Seed corpus** (`fuzz/corpus/consistency/`):
+- 5 files, all different sizes (12B, 76B, 192B, 141B, 12446B) — good.
+- `empty.bin` (12 bytes): `2a 00 00 00 00 00 00 00 01 64 00 00` — structured FuzzInput encoding (seed=0x2a=42, op_count=1, peer_count=0x64, bail=0x0000), NOT zero bytes. Valid empty-ops scenario.
+- `single_upsert.bin` (76 bytes): contains real LoroKey `V/alice` + label `Person` + property `name=Alice` + `age=30` — genuinely different scenario.
+- All 5 seeds encode distinct op batches (not duplicates).
+
+**Summary**: 13/16 REAL; 1 WEAK (I2, MINOR); 1 honest NO-OP (I12, acceptable); 1 TAUTOLOGY (I13, MAJOR Goodhart).
+
