@@ -1,6 +1,6 @@
 //! Phase 3 Task 2 tests: `hydration::parallel::parallel_hydrate_grafeo`.
 //!
-//! All 7 tests are `#[ignore]`'d L1 scaffolds — L3 implements the bodies.
+//! All 8 tests are `#[ignore]`'d L1/L2 scaffolds — L3 implements the bodies.
 //! The benchmark test (`parallel_hydrate_10k_nodes_under_500ms`) is the spec
 //! validation gate for Phase 3 Task 2 per `docs/implementation-plan.md:78`.
 //!
@@ -13,6 +13,11 @@
 //! - `LoroMap::get(&str) -> Option<ValueOrContainer>` — read each vertex
 //!   sub-map; unwrap via `ValueOrContainer::Container(Container::Map(map))`
 //!   (`loro-1.13.6/src/lib.rs:2150`, `:3813`).
+//! - `VertexEntity::hydrate_map(&LoroMap) -> Result<VertexEntity, HydrateError>` —
+//!   SSOT read path (`lorosurgeon-0.2.1/src/hydrate.rs:127`). L3 should call
+//!   `voc.into_container().and_then(|c| c.into_map()).ok_or_else(...)?` then
+//!   `VertexEntity::hydrate_map(&vertex_submap)?` — DO NOT re-implement field
+//!   extraction (DEVIL M2 DRY).
 //! - `GrafeoDB::session_with_cdc(false) -> Session` — per-chunk session
 //!   (CDC off → no outbound echo — same pattern as `VertexBuilder::commit`).
 //! - `Session::begin_transaction -> Result<()>`,
@@ -22,6 +27,10 @@
 //!   `PreparedCommit::set_metadata(k, v)`,
 //!   `PreparedCommit::commit(self) -> Result<EpochId>` — all verified at
 //!   `src/hydration/parallel.rs` module-level doc.
+//! - `apply_loro_op(&Session, &LoroOp, &BridgeMaps) -> Result<()>` — SSOT
+//!   "lookup-or-create + insert binding" (`src/bridge/grafeo_tx.rs:86`).
+//!   Hydration builds `LoroOp::UpsertNode` per vertex and reuses this — DO NOT
+//!   call `create_node_with_props` directly (DEVIL M2 / Q5 DRY).
 //! - `lval_to_gval(LoroValue) -> Result<GraphValue>` — pure recursive
 //!   converter, rejects `Binary`/`Container` (`src/types/values.rs:146`).
 //! - `gval_to_grafeo_value(GraphValue) -> grafeo::Value` — pure converter
@@ -36,6 +45,8 @@
 //! - Vertex with `LoroValue::Binary` property → `Err(UnsupportedLoroType)`.
 //! - 300 vertices with `DEFAULT_CHUNK_SIZE = 256` → 2 chunks (256 + 44); all
 //!   300 must commit (no chunk lost on Rayon split).
+//! - `VertexEntity::description` is Loro-only (`src/app.rs:201`) — MUST NOT
+//!   appear in Grafeo properties post-hydrate (DEVIL M4).
 
 #![allow(unused_imports)]
 
@@ -120,11 +131,40 @@ fn parallel_hydrate_tags_origin_loro_bridge() {
 
 /// Spec validation gate (`docs/implementation-plan.md:78`): hydrating 10,000
 /// vertices into Grafeo completes in <500 ms wall-clock on an 8-core machine.
-/// Marked `#[ignore]` so it doesn't run in CI by default — run manually with
-/// `cargo test --release -- --ignored parallel_hydrate_10k_nodes_under_500ms`.
-/// L3 should use `std::time::Instant` (NOT `tokio::time` — hydration is sync).
+///
+/// # Test shape (anti-Goodhart — L3 MUST follow this, NOT short-circuit)
+///
+/// 1. **Generate 10,000 vertices in a fresh `LoroDoc`** via a builder loop
+///    that calls `lorosurgeon::RootReconciler::new(doc.get_map("V"))` (or
+///    `VertexBuilder::commit` — the SSOT write path at `src/app.rs:372-505`)
+///    for each `VertexEntity` with **2 labels + 3 properties of mixed types**
+///    (e.g. `Bool`, `I64`, `String`). DO NOT write via `LoroMap::insert`
+///    directly — that produces a `LoroValue::Map` snapshot, exercising the
+///    wrong unwrap path (cold-boot read uses `Container::Map`, not
+///    `LoroValue::Map` — DEVIL M5).
+/// 2. Call `parallel_hydrate_grafeo(&db, &doc, &maps)`.
+/// 3. Assert `elapsed < 500ms` (use `std::time::Instant` — NOT `tokio::time`;
+///    hydration is sync per L1 decision 2).
+/// 4. Assert `db` has exactly 10,000 nodes (Grafeo node-count read API —
+///    L3 verifies the API path).
+///
+/// Marked `#[ignore]` so it doesn't run in CI by default — benchmark: run
+/// manually with `--release --ignored parallel_hydrate_10k_nodes_under_500ms`.
 #[test]
-#[ignore = "P3T2-L1 scaffold: L3 implements the body (benchmark; run with --release --ignored)"]
+#[ignore = "benchmark: run manually with `--release --ignored parallel_hydrate_10k_nodes_under_500ms`"]
 fn parallel_hydrate_10k_nodes_under_500ms() {
+    todo!()
+}
+
+/// Anti-happy-path: a `VertexEntity` with `properties: HashMap::new()` (empty)
+/// hydrates into a Grafeo node with 0 properties. L3 reconciles one vertex
+/// with empty `properties`, calls `parallel_hydrate_grafeo`, and asserts (a)
+/// exactly 1 Grafeo node exists, (b) the node has 0 properties, (c) `BridgeMaps`
+/// contains the `loro_key → NodeId` binding. Pins the empty-props edge case
+/// (DEVIL m2) so L3 cannot trivially pass by always using a vertex with ≥1
+/// property.
+#[test]
+#[ignore = "P3T2-L2 scaffold: L3 implements the body (DEVIL m2 — empty-props edge case)"]
+fn parallel_hydrate_vertex_with_no_properties() {
     todo!()
 }

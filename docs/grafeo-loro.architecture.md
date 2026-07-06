@@ -659,67 +659,96 @@ When `LoroDoc` imports a compressed snapshot from storage, the local `GrafeoDB` 
 
 ### Chunked Parallel Processing (Rust)
 
-Use `rayon` to chunk Loro map collections and parallelize Grafeo transaction insertions.
+Use `rayon` to chunk Loro map collections and parallelize Grafeo transaction insertions. Constants (`DEFAULT_CHUNK_SIZE`, `ORIGIN_LORO_BRIDGE`, `ROOT_VERTICES`) are sourced from `crate::constants` (SSOT — no literals). Error type is `GrafeoLoroError` (see `src/error.rs`); per-vertex unwrap failures route via `Bridge(String)` (vertex missing or not a `Container::Map`), and `VertexEntity::hydrate_map` errors route via `Bridge(String)` (vertex shape mismatch). The read-path SSOT is `VertexEntity::hydrate_map(&LoroMap)` (`lorosurgeon-0.2.1/src/hydrate.rs:127`) — DO NOT manually iterate the vertex sub-map's fields. `VertexEntity::description` (`LoroText`) is Loro-only (`src/app.rs:201`) and is naturally isolated from `properties` by the SSOT read path — hydration skips it.
 
-> **Note (Devil BLOCKER B1)**: The pseudocode below is illustrative. The
-> actual grafeo 0.5.42 API is `Session`-based: `db.session_with_cdc(true)` →
-> `session.begin_transaction()` → `session.create_node_with_props(labels,
-> props_iter)` → `session.prepare_commit()` → `prepared.commit()`. There is
-> no `db.begin_write_tx()` or `db_tx.upsert_node(...)`.
+> **Preconditions** (DEVIL M3): hydration MUST run BEFORE `bridge::sync_engine`'s Loro subscriber starts (or Phase 4 must tag the storage-import commit with `ORIGIN_LORO_BRIDGE` and rely on the B1 filter). `session_with_cdc(false)` only suppresses the outbound Grafeo→Loro echo; it does NOT suppress the inbound Loro→Grafeo echo from the live subscriber. See §9 echo prevention.
 
 ```rust
-use rayon::prelude::*;
 use std::sync::Arc;
-use loro::{LoroDoc, LoroValue};
-use grafeo::{GrafeoDB, Value as GValue};
+use loro::LoroDoc;
+use grafeo::GrafeoDB;
+use rayon::prelude::*;
+use lorosurgeon::Hydrate; // VertexEntity::hydrate_map SSOT (lorosurgeon-0.2.1/src/hydrate.rs:127)
 
-pub fn parallel_hydrate_grafeo(db: &Arc<GrafeoDB>, doc: &LoroDoc) {
-    let v_root = doc.get_map("V");
-    let txn = doc.transact();
+use grafeo_loro::bridge::{apply_loro_op, BridgeMaps};
+use grafeo_loro::constants::{DEFAULT_CHUNK_SIZE, ORIGIN_LORO_BRIDGE, ROOT_VERTICES};
+use grafeo_loro::error::{GrafeoLoroError, Result};
+use grafeo_loro::schema::vertex::VertexEntity;
+use grafeo_loro::types::events::LoroOp;
+use grafeo_loro::types::values::GraphValue;
 
-    // Extract raw keys (Node IDs)
-    let node_ids: Vec<String> = v_root.keys(&txn).collect();
+/// Rebuilds Grafeo indexes from Loro state using Rayon chunks of
+/// `DEFAULT_CHUNK_SIZE`. Each chunk runs in its own Grafeo `Session`
+/// transaction tagged with `ORIGIN_LORO_BRIDGE`; the `loro_key ↔ NodeId`
+/// mapping is recorded in `maps`. Fail-fast: first chunk error aborts the
+/// whole call (anti-plenger #9 Absolute Idempotency).
+pub fn parallel_hydrate_grafeo(
+    db: &Arc<GrafeoDB>,
+    doc: &LoroDoc,
+    maps: &BridgeMaps,
+) -> Result<()> {
+    // 1. Extract vertex keys from Loro root map "V".
+    //    LoroDoc::get_map verified at loro-1.13.6/src/lib.rs:489 (no `txn` arg —
+    //    LoroDoc uses interior mutability, NOT `doc.transact()` which does NOT exist).
+    //    LoroMap::keys verified at lib.rs:2315 → impl Iterator<Item = InternalString>;
+    //    InternalString→String via Display (loro-common-1.13.1/src/internal_string.rs:194).
+    let v_root = doc.get_map(ROOT_VERTICES);
+    let keys: Vec<String> = v_root.keys().map(|s| s.to_string()).collect();
 
-    // Execute in parallel chunks via Rayon
-    node_ids.par_chunks(256).for_each(|chunk| {
-        // Grafeo Session API (illustrative — actual call shape may differ).
-        let mut session = db.session_with_cdc(true);
-        session.begin_transaction().unwrap();
+    // 2. Parallel chunk processing — Session is single-threaded
+    //    (grafeo-engine-0.5.42/src/session/mod.rs) so each chunk owns its own.
+    keys.par_chunks(DEFAULT_CHUNK_SIZE).try_for_each(|chunk| -> Result<()> {
+        // cdc=false suppresses outbound Grafeo→Loro echoes (matches app.rs:437).
+        let mut session = db.session_with_cdc(false); // verified at database/mod.rs:1728
+        session.begin_transaction()?; // verified at session/mod.rs:3883
 
-        for id_str in chunk {
-            let node_id: u64 = id_str.parse().unwrap();
+        // 3. Per-vertex hydration via SSOT (DEVIL M2 — DO NOT manually iterate).
+        for key in chunk {
+            let voc = v_root.get(key) // verified at lib.rs:2150 → Option<ValueOrContainer>
+                .ok_or_else(|| GrafeoLoroError::Bridge(format!("vertex {key} missing")))?;
+            let vertex_map = voc.into_container() // lib.rs:3813 (EnumAsInner)
+                .and_then(|c| c.into_map()) // lib.rs:3636 (EnumAsInner on Container)
+                .ok_or_else(|| GrafeoLoroError::Bridge(format!("vertex {key} not a Container::Map")))?;
+            let entity: VertexEntity = VertexEntity::hydrate_map(&vertex_map) // SSOT
+                .map_err(|e| GrafeoLoroError::Bridge(format!("hydrate vertex {key}: {e}")))?;
 
-            if let Some(LoroValue::Map(node_data)) = v_root.get(&txn, id_str) {
-                let mut properties = std::collections::HashMap::new();
-
-                // Hydrate generic properties
-                if let Some(LoroValue::Map(props)) = node_data.get("prop") {
-                    for (k, v) in props.iter() {
-                        properties.insert(k.to_string(), lval_to_gval(v.clone()));
-                    }
-                }
-
-                // Hydrate collaborative description text
-                if let Some(LoroValue::String(desc)) = node_data.get("description") {
-                    properties.insert("description".to_string(), GValue::String(desc.to_string()));
-                }
-
-                // Session has no upsert_node; use create_node_with_props +
-                // (later) set_node_property for updates. The bridge's
-                // `loro_key → grafeo::NodeId` map (see §20) handles identity.
-                let labels: [&str; 0] = [];
-                let props_iter = properties.iter().map(|(k, v)| (k.as_str(), v.clone()));
-                let _ = session.create_node_with_props(&labels, props_iter);
-            }
+            // 4. Build LoroOp::UpsertNode + apply via SSOT (grafeo_tx.rs:86).
+            //    FLAG(L3): no existing `From<LoroProperty> for GraphValue` —
+            //    add impl OR manual match (Null/Bool/Integer/Float/String) at
+            //    src/types/values.rs.
+            let op = LoroOp::UpsertNode {
+                loro_key: key.clone(),
+                labels: entity.labels,
+                properties: entity.properties
+                    .into_iter()
+                    .map(|(k, v)| (k, GraphValue::from(v)))
+                    .collect(),
+            };
+            apply_loro_op(&session, &op, maps)?;
         }
 
-        // Block-STM parallel transaction execution
-        let mut prepared = session.prepare_commit().unwrap();
-        prepared.set_metadata("origin", "loro-bridge"); // advisory only
-        let _epoch = prepared.commit().unwrap();
-    });
+        // 5. Prepare + commit with origin tag. Metadata is advisory-only per
+        //    Devil Gap 1 (dropped on commit — see §9 echo prevention for the
+        //    `bridge_origin_epochs` side-channel that actually filters echoes).
+        let mut prepared = session.prepare_commit()?; // verified at session/mod.rs:4496
+        prepared.set_metadata(ORIGIN_LORO_BRIDGE, ORIGIN_LORO_BRIDGE); // prepared.rs:107
+        prepared.commit()?; // verified at prepared.rs:124 — consumes self
+        Ok(())
+    })
 }
 ```
+
+Loro 1.13.6 verified API surface (DEVIL M1 — replaces pre-verification sketch):
+- `LoroDoc::get_map<I: IntoContainerId>(&self, I) -> LoroMap` — `loro-1.13.6/src/lib.rs:489` (no `txn` arg; LoroDoc uses interior mutability).
+- `LoroMap::keys(&self) -> impl Iterator<Item = InternalString> + '_` — `:2315` (collect `Vec<String>` via `Display`).
+- `LoroMap::get(&self, &str) -> Option<ValueOrContainer>` — `:2150` (NOT `Option<LoroValue>`).
+- `ValueOrContainer::into_container() -> Option<Container>` + `Container::into_map() -> Option<LoroMap>` — `:3813`, `:3636` (both derive `EnumAsInner`).
+- `VertexEntity::hydrate_map(&LoroMap) -> Result<VertexEntity, HydrateError>` — `lorosurgeon-0.2.1/src/hydrate.rs:127` (via `#[derive(Hydrate)]` at `src/schema/vertex.rs:5`).
+- `GrafeoDB::session_with_cdc(false) -> Session` — `grafeo-engine-0.5.42/src/database/mod.rs:1728` (CDC off — outbound echoes suppressed).
+- `Session::begin_transaction(&mut self) -> Result<()>` — `session/mod.rs:3883` (default isolation = `SnapshotIsolation`; write-only chunk has no read-then-write race).
+- `Session::prepare_commit(&mut self) -> Result<PreparedCommit<'_>>` — `:4496`.
+- `PreparedCommit::set_metadata(&mut self, impl Into<String>, impl Into<String>)` — `transaction/prepared.rs:107` (advisory only — dropped on `commit()`).
+- `PreparedCommit::commit(self) -> Result<EpochId>` — `prepared.rs:124` (consumes self; `Session::Drop` auto-rollbacks un-prepared-commit'd tx at `session/mod.rs:5368-5383`).
 
 ---
 
