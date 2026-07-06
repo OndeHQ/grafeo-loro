@@ -668,3 +668,122 @@ Open handoff notes for next loop:
 1. Phase 2 Task 2 (`sync_tree_move_to_grafeo`) L1 should resolve the `T_CHILD` (`LoroTree`) vs `OrderedCollection` (`LoroMovableList`) distinction documented in architecture §7 Known Ambiguity (added by P2-L2). The existing `sync_tree_move_to_grafeo` signature uses `NodeId` not `TreeID`; verify against Loro's actual tree API.
 2. Phase 2 Task 2 will likely require extending `LoroOp` enum with a `TreeMove { tree_id, node_id, new_parent }` variant — Phase 1 left `apply_tree_move` as a documented stub (see worklog P2-HUNT-FIX-L2-R2 stage summary, Fix 8).
 3. Phase 2 Task 3 (`VertexBuilder`) is independent — can run in parallel with Task 2 if orchestrator wishes to spawn two loops. Rule 1 says "pick ONE" — recommend sequential.
+
+---
+Task ID: ORCH-P2T2-SETUP
+Agent: Orchestrator (Super Z)
+Task: Initialize Plonga-Plongo-Loop iteration 2 for Phase 2 Task 2 (sync_tree_move_to_grafeo)
+
+Work Log:
+- User authorized finishing all remaining Phase 2 tasks in this session.
+- Loop 2 = Phase 2 Task 2: implement `schema::tree::sync_tree_move_to_grafeo`.
+- Branch `p2-tree-move` created off `p2-derives` (which is pushed).
+- repomix.md refreshed.
+- Read existing `src/schema/tree.rs`: function signature is `fn sync_tree_move_to_grafeo(db: &GrafeoDB, node_id: NodeId, old_parent: NodeId, new_parent: NodeId) -> crate::error::Result<()>` with `unimplemented!()` body.
+- Recall from Phase 1 Devil's advocate (worklog P2-L1 + Phase 1 L2): grafeo 0.5.42 has NO `db.begin_write_tx()` API — must use Session API: `db.session_with_cdc(true)` → `session.begin_transaction()` → ... → `session.prepare_commit()` → `prepared.commit() -> Result<EpochId>`. Architecture doc §7 pseudocode uses old API — Devil flagged this for Phase 1, same constraint applies here.
+- Recall from Phase 1 hunter Fix 8: `apply_tree_move` exists in `src/bridge/grafeo_tx.rs:178-203` as a documented stub; `LoroOp::TreeMove` variant exists in `src/types/events.rs` but `translate_diff_event` never generates it (only handles ROOT_VERTICES/ROOT_EDGES). Task 2 scope is `sync_tree_move_to_grafeo` only — wiring TreeMove into the bridge is potentially out of scope (L1 should clarify).
+- Implementation plan §Phase 2 Task 2 validation: (a) unit test for cycle rejection; (b) integration test for 3-peer concurrent tree moves → consistent acyclic result.
+
+Stage Summary:
+- $stn = `p2-tree-move`
+- Branch off p2-derives @ 4f10de4
+- Phase 2 Task 2 selected
+- Key constraints for L1:
+  1. Use Grafeo Session API (NOT begin_write_tx); verify against grafeo-engine-0.5.42 source in ~/.cargo/registry/src/
+  2. Cycle detection: Grafeo enforces acyclic — verify whether it returns an error or what the API surface is
+  3. The current function signature uses `NodeId` (re-exported from grafeo) not `TreeID` — L1 should evaluate whether this matches the architecture doc's `u64` pseudocode and whether `T_CHILD` LoroTree integration is in-scope
+  4. Test scaffolds needed: cycle rejection unit test, 3-peer concurrent moves integration test
+- Next: spawn L1 scaffolder (Task ID `P2T2-L1`)
+
+---
+Task ID: P2T2-L1
+Agent: L1 Scaffolder
+Task: Wire sync_tree_move_to_grafeo contracts (Phase 2 Task 2) — skeletons only
+
+Work Log:
+- Confirmed branch `p2-tree-move` (off `p2-derives` @ 4f10de4).
+- Read worklog.md end-to-end (696 lines): Phase 1 complete (10/10 tests); Phase 2 Task 1 (lorosurgeon derives) complete via Loop 1; ORCH-P2T2-SETUP initialized Loop 2 = Task 2 (sync_tree_move_to_grafeo). Scope is the `sync_tree_move_to_grafeo` skeleton + test scaffolds ONLY — bridge wiring is explicitly out of scope.
+- Verified Grafeo Session API against `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/grafeo-engine-0.5.42/src/`:
+  * `GrafeoDB::session` — `database/mod.rs:1663` (`&self -> Session`)
+  * `GrafeoDB::session_with_cdc` — `database/mod.rs:1728` (requires `cdc` feature)
+  * `Session::begin_transaction` — `session/mod.rs:3883` (`&mut self -> Result<()>`; default SnapshotIsolation)
+  * `Session::commit` — `session/mod.rs:3961` (`&mut self -> Result<()>`)
+  * `Session::prepare_commit` — `session/mod.rs:4496` (`&mut self -> Result<PreparedCommit<'_>>`)
+  * `Session::create_edge` — `session/mod.rs:4935` (`&self, NodeId, NodeId, &str -> EdgeId`; INFALLIBLE — no Result wrapper)
+  * `Session::delete_edge` — `session/mod.rs:5092` (`&self, EdgeId -> bool`; returns false if absent)
+  * `Session::get_neighbors_outgoing_by_type` — `session/mod.rs` (after 5237) — for cycle BFS
+  * `Session::get_neighbors_incoming` — `session/mod.rs:5237`
+  * `Session::node_exists` — `session/mod.rs` (around 5280)
+  * `PreparedCommit::set_metadata` — `transaction/prepared.rs:108` (advisory; dropped on commit per Devil Gap 1)
+  * `PreparedCommit::commit` — `transaction/prepared.rs:124` (`self -> Result<EpochId>`)
+  * `PreparedCommit::abort` — `transaction/prepared.rs:135` (explicit rollback; Drop also best-effort rolls back)
+  * `grafeo` umbrella re-exports `Session` at top level — `grafeo-0.5.42/src/lib.rs:68`.
+- Cycle-detection claim VERIFIED FALSE: grepped `~/.cargo/registry/src/*/grafeo-engine-0.5.42/src/` for `cycle|acyclic|Cycle` — only matches are (1) `catalog/mod.rs:1349` `resolved_node_type` (schema type-inheritance cycle, NOT graph-edge), (2) `procedures.rs:831` `has_negative_cycle` (Bellman-Ford algorithmic procedure, NOT a commit-time constraint), (3) `query/optimizer/join_order.rs:148` join-graph cycle (query planning), (4) `query/translators/cypher.rs:791` pattern cycle (query). NONE enforce user-edge acyclicity at commit time. Architecture doc §7 line 249 ("Loro's LoroTree enforces an acyclic graph internally") applies to Loro-side, NOT grafeo-side. The bridge MUST implement its own cycle pre-check.
+- Verified edge-type convention: existing `apply_tree_move` in `src/bridge/grafeo_tx.rs:200-206` hardcodes `"CHILD"` as the edge label and uses child→parent direction (src=child, dst=parent) — i.e. `EdgeKey = (node_key, parent_key, "CHILD")` and `session.create_edge(node_id, parent_id, "CHILD")`. This CONTRADICTS architecture doc §7 line 265 `INSERT (p)-[:CHILD]->(c)` (parent→child). Following DRY/SSOT, the L1 skeleton uses the existing code convention (child→parent). Flagged as Devil open question.
+- Declared `TREE_EDGE_LABEL: &str = "CHILD"` constant in `src/constants.rs:16` (SSOT for the literal; direction enforced at call sites). Existing literal uses in `src/bridge/grafeo_tx.rs:200,204,206` left untouched — refactoring them is Task 2-out-of-scope (Devil may flag).
+- Added `GrafeoLoroError::TreeMoveCreatesCycle { node_id, new_parent }` variant in `src/error.rs:33-44`. Variant carries structured `NodeId` fields so tests can `assert!(matches!(err, TreeMoveCreatesCycle { .. }))` instead of substring-matching on a `Bridge("cycle: ...")` message (anti-Goodhart defense).
+- Replaced `src/schema/tree.rs:19-27` `unimplemented!()` body with a real skeleton:
+  * Function signature UNCHANGED: `pub fn sync_tree_move_to_grafeo(db: &GrafeoDB, node_id: NodeId, old_parent: NodeId, new_parent: NodeId) -> crate::error::Result<()>`.
+  * Body returns `Err(GrafeoLoroError::Bridge("sync_tree_move_to_grafeo not yet implemented".into()))` — honest placeholder (NOT `Ok(())`, which would be a tautology).
+  * 7 `// TODO(P2T2-L3): <step>` comments cover: pre-check cycle, open session, begin tx, resolve EdgeId + delete old edge, idempotent guard + create new edge, prepare_commit + set_metadata, commit + post-commit re-verify.
+  * Each TODO references the verified Session API method + file:line citation.
+  * Doc-comment block lists every verified Session API method with file:line.
+- Declared private helper `fn would_create_cycle(db: &GrafeoDB, node_id: NodeId, new_parent: NodeId) -> bool` in `src/schema/tree.rs:84` with `#[allow(dead_code)]` (wired by P2T2-L3 in pre-check) and `todo!()` body. Doc-comment cites the grafeo source verification for the no-acyclicity-enforcement claim.
+- Created `tests/unit/tree_move.rs` (87 LOC, 4 scaffolds):
+  * `fn tree_move_basic()` — move leaf A→B; assert old edge gone + new edge present
+  * `fn tree_move_cycle_rejected()` — assert `Err(GrafeoLoroError::TreeMoveCreatesCycle { .. })` via `matches!` (anti-Goodhart)
+  * `fn tree_move_root_to_leaf_rejected()` — root has no parent edge; assert Err (Devil pins exact variant)
+  * `fn tree_move_same_parent_noop()` — `sync_tree_move_to_grafeo(db, n, A, A)` returns Ok + edge set unchanged
+  * All 4 use `#[test] #[ignore = "P2T2-L1 scaffold: L3 implements the body"]` + `todo!()` bodies.
+  * Helper `fn build_chain_fixture(_db) -> (NodeId, NodeId, NodeId)` declared with `todo!()` body.
+  * Module-level doc lists all verified Session API methods with file:line.
+- Updated `tests/unit/main.rs` to add `mod tree_move;`.
+- Created `tests/integration/tree_move_concurrency.rs` (45 LOC, 1 scaffold):
+  * `async fn concurrent_tree_moves_three_peers_converge_acyclic()` — 3-peer concurrent moves → consistent acyclic result.
+  * Uses `#[tokio::test] #[ignore = "P2T2-L1 scaffold: L3 implements the body"]` + `todo!()` body.
+  * Doc-comment explicitly scopes this test to direct `sync_tree_move_to_grafeo` calls (3 sessions on same `GrafeoDB`, modeling CRDT peers via MVCC isolation), NOT to bridge-subscriber-driven `LoroOp::TreeMove` (which is out of scope per L1 mandate).
+- Updated `tests/integration/main.rs` to add `mod tree_move_concurrency;`.
+- Compile verification: `cargo check --all-targets` → EXIT 0, 5 warnings (all pre-existing Phase 1 dead-code warnings: `app.rs` builder fields, `hydration/vector.rs`, `presence/socket.rs`, `telemetry/health.rs`), 0 new warnings, 0 errors.
+- Test compile verification: `cargo test --no-run --all` → EXIT 0, 3 test binaries emitted (`unittests`, `integration-…`, `unit-…`).
+- Test run verification: `cargo test --all` → 17 PASS + 5 IGNORED + 0 FAIL (6 lib + 4 integration + 7 unit pass; 1 integration + 4 unit ignored = 5 new scaffolds). Phase 2 Task 1 baseline (17 PASS) preserved.
+- Anti-plenger audit (self-applied):
+  * Pure functions: skeleton returns deterministic `Err`; no side effects.
+  * DRY/SSOT: `TREE_EDGE_LABEL` constant is the SSOT for the literal; skeleton doc-comment cites the existing `apply_tree_move` for direction convention rather than re-deciding it.
+  * YAGNI: did NOT wire `LoroOp::TreeMove` into the bridge subscriber (out of scope); did NOT add a new `TreeMove` variant on `LoroOp` (existing one left untouched); did NOT add cycle-check implementation (only signature).
+  * Immutability: skeleton takes `&GrafeoDB` (immutable); `&mut Session` is local to L3's future implementation.
+  * High cohesion / loose coupling: `sync_tree_move_to_grafeo` lives in `schema::tree` (correct module); does NOT touch `bridge::*` (loose coupling); test scaffolds import only `grafeo_loro::schema::tree::sync_tree_move_to_grafeo` + `constants::TREE_EDGE_LABEL` + `error::GrafeoLoroError` + `types::ids::NodeId` (minimal surface).
+  * Native-first: uses grafeo's native Session API (verified against crate source), no wrappers.
+  * Deletion over addition: removed `unimplemented!()` rot; replaced with a real skeleton.
+  * Anti-hallucination: every grafeo method cited with file:line from actual `~/.cargo/registry/src/*/grafeo-engine-0.5.42/src/` path.
+  * Anti-happy-path: error variant `TreeMoveCreatesCycle` is structured (not stringly-typed); test scaffold uses `matches!` not substring; root-move test scaffold leaves Devil room to pin exact variant.
+  * Anti-Goodhart: `#[ignore]` on all 5 scaffolds ensures zero tests pass until L3 fills them in; no test asserts a trivially-true property.
+  * Anti-backward-compat: replaced `unimplemented!()` instead of preserving it.
+
+Stage Summary:
+- Grafeo Session API verified: `db.session()` (db/mod.rs:1663), `session.begin_transaction()` (session/mod.rs:3883), `session.create_edge` (session/mod.rs:4935 — INFALLIBLE), `session.delete_edge` (session/mod.rs:5092 — returns `bool`), `session.get_neighbors_outgoing_by_type` (session/mod.rs post-5237), `session.prepare_commit()` (session/mod.rs:4496), `PreparedCommit::set_metadata` (prepared.rs:108), `PreparedCommit::commit` (prepared.rs:124).
+- Edge-type convention: declared `TREE_EDGE_LABEL: &str = "CHILD"` in `src/constants.rs:16`. Direction = child→parent per existing `apply_tree_move` (`src/bridge/grafeo_tx.rs:200-206`); contradicts architecture doc §7 line 265 (parent→child) — flagged for Devil.
+- Cycle detection: Grafeo 0.5.42 has NO native graph-edge acyclicity enforcement (verified by grep — only schema-type, Bellman-Ford, and query-planner cycle checks exist). Declared `fn would_create_cycle(db: &GrafeoDB, node_id: NodeId, new_parent: NodeId) -> bool` private helper in `src/schema/tree.rs:84` with `todo!()` body; L3 implements BFS upward via `get_neighbors_outgoing_by_type`. Added `GrafeoLoroError::TreeMoveCreatesCycle { node_id, new_parent }` variant for structured error reporting.
+- Files touched:
+  * `src/constants.rs` — added `TREE_EDGE_LABEL` constant (SSOT for the `"CHILD"` literal)
+  * `src/error.rs` — added `TreeMoveCreatesCycle` variant
+  * `src/schema/tree.rs` — replaced `unimplemented!()` body with skeleton + declared `would_create_cycle` helper
+  * `tests/unit/main.rs` — added `mod tree_move;`
+  * `tests/unit/tree_move.rs` — NEW: 4 unit test scaffolds (basic / cycle_rejected / root_to_leaf_rejected / same_parent_noop) + build_chain_fixture helper
+  * `tests/integration/main.rs` — added `mod tree_move_concurrency;`
+  * `tests/integration/tree_move_concurrency.rs` — NEW: 1 integration scaffold (concurrent_tree_moves_three_peers_converge_acyclic)
+- Test scaffolds (all `#[ignore]` + `todo!()`):
+  * `tests/unit/tree_move.rs::tree_move_basic`
+  * `tests/unit/tree_move.rs::tree_move_cycle_rejected`
+  * `tests/unit/tree_move.rs::tree_move_root_to_leaf_rejected`
+  * `tests/unit/tree_move.rs::tree_move_same_parent_noop`
+  * `tests/integration/tree_move_concurrency.rs::concurrent_tree_moves_three_peers_converge_acyclic`
+- Compile status: `cargo check --all-targets` → EXIT 0; 5 pre-existing warnings (Phase 1 dead-code in `app.rs`, `hydration/vector.rs`, `presence/socket.rs`, `telemetry/health.rs`); 0 new warnings; 0 errors. `cargo test --all` → 17 PASS + 5 IGNORED + 0 FAIL (Phase 2 Task 1 baseline preserved).
+- Open questions for Devil:
+  1. **Edge direction contradiction**: existing `apply_tree_move` (`src/bridge/grafeo_tx.rs:200-206`) uses child→parent direction (src=child, dst=parent) but architecture doc §7 line 265 `INSERT (p)-[:CHILD]->(c)` uses parent→child. L1 followed the existing code convention (DRY/SSOT). Devil should pin which is canonical and either update the doc or update `apply_tree_move` to match.
+  2. **Root-move error variant**: `tree_move_root_to_leaf_rejected` scaffold does NOT pin the exact error variant — could be `Bridge("no parent edge for root …")` or `TreeMoveCreatesCycle` (if root's `old_parent` is interpreted as itself). Devil should pin.
+  3. **Concurrent-cycle race**: pre-check `would_create_cycle` runs BEFORE `begin_transaction`. In a 3-peer concurrent setting, peer B's commit between peer A's pre-check and peer A's commit could invalidate A's pre-check (TOCTOU). Options: (a) re-run cycle check inside the tx (post-insert, pre-commit) and rollback on cycle; (b) accept racy pre-check + post-commit acyclicity audit; (c) use serializable isolation (`begin_transaction_with_isolation(Serializable)`). Devil should pick one.
+  4. **Same-parent noop semantics**: `tree_move_same_parent_noop` asserts `sync_tree_move_to_grafeo(db, n, A, A)` returns `Ok(())`. But should the function still execute the delete+insert cycle (idempotent), or short-circuit before opening a tx? L1 left this open; Devil should pin.
+  5. **`apply_tree_move` literal hardcoding**: existing `apply_tree_move` still uses the literal `"CHILD"` (3 occurrences in `src/bridge/grafeo_tx.rs:200,204,206`) instead of the new `TREE_EDGE_LABEL` constant. Refactoring it to use the constant is in-scope-for-DRY but out-of-scope-for-Task-2 (Task 2 is `sync_tree_move_to_grafeo` only). Devil should decide if a follow-up refactor is filed.
+  6. **`ORIGIN_LORO_BRIDGE` metadata on tree-move commit**: skeleton includes `prepared.set_metadata("origin", ORIGIN_LORO_BRIDGE)` per Phase 1 echo-prevention pattern. But Devil Gap 1 (Phase 1) already established that `set_metadata` is DROPPED on `commit()` — the epoch side-channel is the actual echo filter. Is the `set_metadata` call still warranted? L1 left it in (defensive; matches Phase 1 batcher pattern at `src/bridge/batcher.rs:196`). Devil should pin.
+  7. **Bridge wiring scope boundary**: `LoroOp::TreeMove` exists in `src/types/events.rs:43-48` but `translate_diff_event` (in `src/bridge/sync_engine.rs`) never generates it. Task 2 L1 mandate explicitly excluded bridge wiring. Devil should confirm this is the correct scope boundary and not a hidden incompleteness.
+- Commit hash: <pending — commit will follow this worklog entry>
