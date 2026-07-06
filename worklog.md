@@ -5620,4 +5620,4 @@ Stage Summary:
   3. [M4] Add `create_outbound_sync_span<T: Tracer>(tracer: &T) -> BoxedSpan` to `traces.rs`; use in `spawn_outbound_worker` for parent span + inline-create `receive_cdc_event` + `loro_commit` children.
   4. [M2] Add `grafeo_commit` grandchild span in `MutationBatcher::flush_inner` around `commit()` call, nested under `batch_flush` parent (arch §23.2 line 1048).
   5. [m2] Implement Q14/Q16/Q17 auto-construction in `GrafeoLoroAppBuilder::build`: metrics via `global::meter("grafeo-loro")`, health via `HealthProbe::new(doc, db)`, tracer via `global::tracer("grafeo-loro")` wrapped in `Arc`.
-- Commit hash: <to be filled after commit>
+- Commit hash: 289450b (full: 289450b319cb591cf9a58fb344000c7f3e4f15a6)
