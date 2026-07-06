@@ -6,7 +6,20 @@ publish = false
 
 [dependencies]
 grafeo-loro = { path = ".." }
-# TODO: L2 — add libfuzzer-sys, arbitrary, loro
+# Pinned per P6-DEVIL C5.4 — libfuzzer-sys 0.4 matches the `fuzz_target!` macro signature used in consistency.rs.
+# Do NOT use 0.13 (different macro signature).
+libfuzzer-sys = "0.4"
+# Pinned per P6-DEVIL C5.4 — arbitrary 1.3+ derive macro for FuzzInput.
+arbitrary = { version = "1.3", features = ["derive"] }
+# Required for LoroDoc construction in the fuzz harness.
+loro = "1.0"
+# TODO: L3 — add any other deps needed for op generation (e.g. serde for corpus serialization).
+
+[lints.rust]
+# `cfg(fuzzing)` is set by `cargo +nightly fuzz run` (via cargo-fuzz). Without this
+# check-cfg declaration, rustc warns about an "unexpected cfg condition name" during
+# plain `cargo check` (which doesn't set `cfg(fuzzing)`).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [lib]
 path = "fuzz_targets/lib.rs"

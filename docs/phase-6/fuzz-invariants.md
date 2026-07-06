@@ -1,8 +1,8 @@
-# Phase 6 — Fuzz Invariants (T5, L1 cheatsheet)
+# Phase 6 — Fuzz Invariants (T5, L2 SSOT)
 
 Checklist of consistency invariants the `consistency` fuzz target must verify after every random Loro op batch. Source: `docs/grafeo-loro.architecture.md` §§ 1, 8, 9, 11, 16, 19, 20, 21.
 
-**Target**: `fuzz/fuzz_targets/consistency.rs`. L2 wires `FuzzInput` + op generator; L3 fills the invariant assertions.
+**Target**: `fuzz/fuzz_targets/consistency.rs`. L2 wires `FuzzInput` + op generator skeleton; L3 fills the invariant assertions.
 
 ---
 
@@ -12,7 +12,11 @@ Checklist of consistency invariants the `consistency` fuzz target must verify af
 
 - [ ] **I2 — Edge state parity**: After every op batch, the Grafeo edge set (via `BridgeMaps` edge map) contains exactly the same edges as the Loro `E` container. Src/dst/label triple matches.
 
-- [ ] **I3 — No panic on any op sequence**: Any sequence of valid Loro ops (insert, delete, move, update text, update property) must not cause `panic!`, `unwrap` failure, or `unreachable!` in `apply_loro_op`, `MutationBatcher::run`, or `parallel_hydrate_grafeo`.
+- [ ] **I3a — No panic in `apply_loro_op`**: Any `LoroOp` sequence (`UpsertNode`, `UpsertEdge`, `DeleteNode`, `DeleteEdge`, `TreeMove`) must not panic inside `bridge::grafeo_tx::apply_loro_op`. Per Devil C5.2 (split from I3 for finer failure attribution).
+
+- [ ] **I3b — No panic in `MutationBatcher::run`**: Any `LoroOp` sequence drained through the batcher must not panic inside `run` (including `prepared.commit()`). Per Devil C5.2.
+
+- [ ] **I3c — No panic in `parallel_hydrate_grafeo`**: Any Loro doc state hydrated via rayon chunks must not panic inside `parallel_hydrate_grafeo` (including `VertexEntity::hydrate_map` errors — those must be `Result`, not panic). Per Devil C5.2.
 
 - [ ] **I4 — Echo loop bounded**: After applying a bridge-originated op, the epoch side-channel set (`SyncEngine::bridge_origin_epochs`) never grows beyond `EPOCH_RETENTION + 1` entries. Pruning must occur each CDC poll cycle (architecture §9).
 
@@ -42,6 +46,32 @@ Checklist of consistency invariants the `consistency` fuzz target must verify af
 
 ## L2/L3 contract
 
-- L2: Define `FuzzInput` (via `arbitrary::Arbitrary`) that yields a `Vec<LoroOp>` plus a `SsotMode` and `CompressionType`.
-- L3: For each fuzz iteration, build a fresh `GrafeoLoroApp` (or reuse with reset), apply the op batch, then assert every invariant above. Failure → `panic!` (libfuzzer treats as crash).
-- L3: Document which invariants are **checked every iteration** (I3, I11) vs **checked periodically** (I4, I7, I9) to keep per-iteration cost bounded.
+- **L2**: Define `FuzzInput` (via `arbitrary::Arbitrary`) that yields a `Vec<FuzzOp>` plus a `SsotMode` and `CompressionType`. Define `FuzzOp` enum mirroring `LoroOp` variants (`UpsertNode`, `UpsertEdge`, `DeleteNode`, `DeleteEdge`, `TreeMove`). Define 15 invariant check fn skeletons (one per I1..I15, with I3 split into I3a/b/c). All bodies are `// TODO: L3`.
+
+- **L3**: For each fuzz iteration, build a fresh `GrafeoLoroApp` (or reuse with reset), apply the op batch, then assert every invariant above. Failure → `panic!` (libfuzzer treats as crash).
+
+- **L3 — Per-iteration vs periodic cadence** (per Devil C5.3 + C5.6):
+  - **Checked every iteration** (cheap, O(1) or O(n) over current state): I1, I2, I3a/b/c, I4, I11, I13, I15.
+  - **Checked periodically** (expensive I/O or full re-hydration): I7, I9.
+    - Concrete cadence:
+      - I7 (snapshot idempotency): every 1000 iterations OR on the final iteration of each fuzz run (whichever comes first). Cost: ~10-50ms per check.
+      - I9 (hydration determinism): every 1000 iterations OR on the final iteration. Cost: ~50-200ms per check (full re-hydration + byte-compare).
+  - **Checked only when the relevant op fires** (event-driven, not iteration-cadence): I5, I6, I8, I10, I12, I14.
+
+- **L3 — Non-trivial assertion guard** (per Devil M5):
+  - Each invariant assertion must be NON-TRIVIAL — it must fail if the invariant is violated.
+  - A `panic!` in the assertion is the only acceptable failure mode (libfuzzer treats as crash).
+  - DO NOT use `assert!(result.is_ok())` as a substitute for invariant checks — that only catches `Result::Err`, not semantic violations (e.g., wrong vertex count).
+  - Each `assert!` must compare two concrete values (e.g., `assert_eq!(grafeo_count, loro_count)`).
+
+- **L3 — Malformed-input handling** (per Devil happy-path bias note):
+  - If `FuzzInput::arbitrary` returns `Err` (malformed bytes), the fuzz target should `return` early (not panic) — libfuzzer treats early-return as a successful iteration, which is correct for malformed inputs.
+
+- **L3 — Seed corpus** (per Devil M6):
+  - `fuzz/corpus/consistency/` contains 5 seed files (created L2 as empty placeholders; L3 populates with serialized `FuzzInput`):
+    1. `empty.bin` — empty op batch (tests I3a on no-op path)
+    2. `single_upsert.bin` — one UpsertNode
+    3. `all_variants.bin` — one of each LoroOp variant
+    4. `cycle_attempt.bin` — TreeMove that would create a cycle (tests I14)
+    5. `large_batch.bin` — 256 ops (tests I13 batch-count invariant)
+  - L3 must populate each seed file with a serialized `FuzzInput` once the serialization format is finalized.
