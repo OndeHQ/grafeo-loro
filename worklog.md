@@ -2397,3 +2397,92 @@ Stage Summary:
   4. **Test scaffold bodies**: 5 `#[ignore]` tests in `tests/unit/compression.rs` need L3 to (a) fill bodies, (b) remove `#![allow(unused_imports)]` silencer (n3 deferral), (c) remove `#[ignore]` attribute. Test shape for `compression_empty_input_roundtrip` is pinned per m6 (iterate over `[None, Lz4, Zstd]`).
   5. **Phase 4 review flags**: (a) `CompressedPayload` is in-memory only — Phase 4 `StorageBackend::save` needs a wire format (codec byte + raw bytes); (b) `import_compressed` returns `ImportStatus` so Phase 4 `hydrate()` can inspect `.pending` for missing dependency ranges; (c) `import_compressed` is origin-agnostic — Phase 4 wraps with `LoroDoc::import_with(_, "storage-rehydration")` if the bridge subscriber must be filtered during rehydration (DEVIL Q4).
 - Commit hash: `003421e`
+
+---
+
+Task ID: P3T1-L3
+Agent: L3 Deep Implementation
+Task: Fill all 10 TODO(L3) markers in compression::wrapper; implement 5 tests; zero stubs remaining
+
+Work Log:
+- Confirmed on branch `p3-compression` (HEAD was `293ed9b` — P3T1-L2 worklog commit). Read mandatory framework files (`sub-agents-traits.md`, `klemer-agents.md`, `anti-plenger.md`, `plenger-traits.md`, `repomix.md`) and the 3 most recent worklog entries in full: `P3T1-L1` (:1996-2102), `P3T1-DEVIL` (:2106-2277), `P3T1-L2` (:2280-2399). Skimmed prior `P2T*-L3` patterns for style.
+- Re-read the L2 state of `src/compression/wrapper.rs` (118 lines, 10 `// TODO(L3):` markers + 8 `todo!("L3: ...")` bodies) and `tests/unit/compression.rs` (73 lines, 5 `#[test] #[ignore]` scaffolds with `todo!()` bodies + `#![allow(unused_imports)]` silencer per DEVIL n3 deferral).
+- Read `src/error.rs` (47 lines): `GrafeoLoroError::Loro(#[from] loro::LoroError)` at :6, `StorageIo(#[from] std::io::Error)` at :12, `Compression(String)` at :15. Confirmed: no new error variants needed (anti-plenger #5 Bloat).
+- Read `src/constants.rs`:43 — `pub const DEFAULT_ZSTD_LEVEL: i32 = 3;` (L1-added SSOT for zstd level).
+- Read `src/config.rs`:8-14 — `CompressionType` already derives `Debug, Clone, Copy, PartialEq, Eq, Default`.
+
+### API verification (mandatory — 1 line each)
+- lz4_flex::compress_prepend_size: verified at `lz4_flex-0.11.6/src/block/compress.rs:713` — `pub fn compress_prepend_size(input: &[u8]) -> Vec<u8>` (infallible).
+- lz4_flex::decompress_size_prepended: verified at `lz4_flex-0.11.6/src/block/decompress.rs:496` — `pub fn decompress_size_prepended(input: &[u8]) -> Result<Vec<u8>, DecompressError>`.
+- zstd::stream::encode_all: verified at `zstd-0.13.3/src/stream/functions.rs:32` — `pub fn encode_all<R: io::Read>(source: R, level: i32) -> io::Result<Vec<u8>>`.
+- zstd::stream::decode_all: verified at `zstd-0.13.3/src/stream/functions.rs:8` — `pub fn decode_all<R: io::Read>(source: R) -> io::Result<Vec<u8>>`.
+- LoroDoc::export: verified at `loro-1.13.6/src/lib.rs:1306` — `pub fn export(&self, mode: ExportMode) -> Result<Vec<u8>, LoroEncodeError>`.
+- LoroDoc::import: verified at `loro-1.13.6/src/lib.rs:710` — `pub fn import(&self, bytes: &[u8]) -> Result<ImportStatus, LoroError>` (returns `Result`, NOT bare `ImportStatus` — bare `?` propagates `LoroError` via `#[from]` to `GrafeoLoroError::Loro` automatically; `Ok(...)` wraps the `ImportStatus`).
+- loro::ImportStatus: verified at `loro-1.13.6/src/lib.rs:12` — `pub use loro_internal::encoding::ImportStatus;` (public re-export — no extra dep surface).
+- (Additional) ExportMode::Snapshot: verified at `loro-1.13.6/src/lib.rs:56` (`pub use loro_internal::encoding::{EncodedBlobMode, ExportMode};`) → unit variant at `loro-internal-1.13.6/src/encoding.rs:55`.
+- (Additional) LoroDoc::new: verified at `loro-1.13.6/src/lib.rs:137` — `pub fn new() -> Self`.
+- (Additional) LoroDoc::get_text: verified at `loro-1.13.6/src/lib.rs:511` — `pub fn get_text<I: IntoContainerId>(&self, id: I) -> LoroText`.
+- (Additional) LoroDoc::get_deep_value: verified at `loro-1.13.6/src/lib.rs:937` — `pub fn get_deep_value(&self) -> LoroValue`.
+- (Additional) LoroText::insert: verified at `loro-1.13.6/src/lib.rs:2440` — `pub fn insert(&self, pos: usize, s: &str) -> LoroResult<()>`.
+- (Additional) LoroValue: PartialEq: verified at `loro-common-1.13.1/src/value.rs:29` (manual impl covering Map variant — `A.get_deep_value() == B.get_deep_value()` is sound).
+- (Additional) LoroEncodeError → LoroError: verified at `loro-common-1.13.1/src/error.rs:204` — `impl From<LoroEncodeError> for LoroError`. Confirms the two-hop chain requirement (single `?` would NOT auto-chain `LoroEncodeError → LoroError → GrafeoLoroError::Loro`).
+- No API discrepancy found — every signature matches the L2 task spec table exactly.
+
+### Implementation
+- compress dispatch (3 arms):
+  * `None` → `raw_bytes.to_vec()` (infallible pure clone).
+  * `Lz4` → `lz4_flex::compress_prepend_size(raw_bytes)` (infallible `Vec<u8>`).
+  * `Zstd` → `zstd::stream::encode_all(raw_bytes, DEFAULT_ZSTD_LEVEL).map_err(|e| GrafeoLoroError::Compression(e.to_string()))?` (NOT bare `?` — would route io::Error to StorageIo per DEVIL M3).
+  Final: `Ok(Self { compression: strategy, raw_data })`.
+- decompress dispatch (3 arms):
+  * `None` → `Ok(self.raw_data.clone())`.
+  * `Lz4` → `lz4_flex::decompress_size_prepended(&self.raw_data).map_err(|e| GrafeoLoroError::Compression(e.to_string()))` (returns `Result<Vec<u8>, GrafeoLoroError>` directly — match arm yields it).
+  * `Zstd` → `zstd::stream::decode_all(&self.raw_data[..]).map_err(|e| GrafeoLoroError::Compression(e.to_string()))`.
+- export_compressed flow (2 lines):
+  * `let bytes = self.export(mode).map_err(|e| GrafeoLoroError::Loro(e.into()))?;` (two-hop chain — explicit `.into()` calls `From<LoroEncodeError> for LoroError`).
+  * `CompressedPayload::compress(&bytes, strategy)` (returns `Result<CompressedPayload>` directly — DRY: reuses `compress` impl, no dispatch duplication).
+- import_compressed flow (2 lines):
+  * `let bytes = payload.decompress()?;` (GrafeoLoroError propagates directly).
+  * `Ok(self.import(&bytes)?)` (LoroError → GrafeoLoroError::Loro via `#[from]`; ImportStatus returned to caller per DEVIL M2).
+- Removed ALL 10 `// TODO(L3):` comment lines + ALL 8 `todo!("L3: ...")` bodies from `src/compression/wrapper.rs`. Kept the `// verified at <path:line>` documentation comments (per L3 task instruction "those are documentation, not stubs").
+- Trimmed the module-level doc from "L2 wiring — bodies are `todo!`" framing to "L3 deep implementation — codec calls filled" (the `todo!` line was now stale post-implementation).
+
+### Tests implemented (5) — `tests/unit/compression.rs`
+1. `compression_lz4_roundtrip`: input `b"hello compression world hello compression world"` (45 bytes, repeated pattern — exercises LZ4's matching logic). Asserts `payload.compression == Lz4`, `payload.raw_data != input` (anti-vacuous — LZ4 must transform), `payload.decompress() == input`. Uses `.expect(...)` for human-readable panic context.
+2. `compression_zstd_roundtrip`: same input shape as LZ4. Asserts `payload.compression == Zstd`, `payload.raw_data != input` (anti-Goodhart — Zstd must shrink/transform), `payload.decompress() == input`.
+3. `compression_zstd_preserves_loro_importability` (Phase 3 Task 1 SPEC VALIDATION GATE): creates `LoroDoc::new()`, `doc.get_text("text").insert(0, "hello world")`, then `doc.export_compressed(ExportMode::Snapshot, Zstd)`, then `fresh.import_compressed(&payload)`, then asserts `doc_a.get_deep_value() == doc_b.get_deep_value()` (proves export → Zstd compress → decompress → import preserves CRDT state end-to-end). `ImportStatus` is bound to `_` (no missing dependencies expected for a self-contained snapshot — Phase 4 `hydrate()` will inspect `.pending` for cold-boot recovery).
+4. `compression_none_passthrough`: input `b"uncompressed payload"` (20 bytes). Asserts `payload.compression == None`, `payload.raw_data == input` (pure clone, NO header), `payload.decompress() == input`. Verifies the `None` arm is not a tautological no-op that silently breaks on empty input.
+5. `compression_empty_input_roundtrip`: iterates over `[CompressionType::None, Lz4, Zstd]` (per DEVIL m6 pinned shape). For each: `CompressedPayload::compress(b"", strategy)` then `.decompress()`, asserts `recovered == b""`. Anti-happy-path: Zstd emits a non-empty frame header even for empty input, but roundtrip still yields empty `Vec<u8>`; LZ4 prepends a 4-byte zero size; None is pure clone of empty. Uses `unwrap_or_else(|e| panic!(...))` so the failing codec is named in the panic.
+- Removed `#![allow(unused_imports)]` silencer (DEVIL n3 deferral expired at L3 — bodies now use all imports).
+- Removed `use grafeo_loro::constants::DEFAULT_ZSTD_LEVEL;` (test bodies don't reference the constant — it's only used inside `wrapper.rs::compress` via `crate::constants::DEFAULT_ZSTD_LEVEL`). Removing the silencer without removing this import would have produced an unused-import warning.
+- Removed all 5 `#[ignore = "P3T1-L1 scaffold: L3 implements the body"]` attributes.
+- Removed the 4-line `// DEVIL n3: silencer retained ...` rationale comment (no longer applicable).
+
+### Verification
+- `cargo check --all-targets` → **EXIT 0**, 0 errors, 5 warnings (5 pre-existing Phase 1/2 dead-code in `app.rs:47` builder fields, `hydration/vector.rs:9+27` VectorOffloadManager + generate_local_embedding, `presence/socket.rs:6` room_id, `telemetry/health.rs:9` doc/db/last_sync_ts fields), **0 new warnings vs baseline 5**.
+- `cargo test --all` → **40 PASS + 0 FAIL + 0 IGNORED** (6 lib + 5 integration + 29 unit PASS — was 24 unit PASS + 5 unit IGNORED at L2 baseline; the 5 newly-un-ignored compression tests bring unit count from 24→29). Exactly matches expected `35 baseline + 5 newly-un-ignored = 40 PASS, 0 FAIL, 0 IGNORED`.
+- `grep -rn "TODO(L3)\|todo!\|unimplemented!" src/compression/` → **0 matches** (zero stubs remaining — L3 mandate satisfied).
+- `grep -rn "#\[ignore\]" tests/unit/compression.rs` → **0 matches**.
+- `grep -rn "allow(unused_imports)" tests/unit/compression.rs` → **0 matches**.
+- `grep -rn "// TODO" src/compression/` → **0 matches** (sanity sweep for any lingering TODO comment).
+
+### Anti-plenger self-audit
+- #1 Pure Functions: `compress(&[u8], CompressionType) -> Result<Self>` and `decompress(&self) -> Result<Vec<u8>>` take immutable refs, return `Result` (no global state mutation). `export_compressed(&self, ...)` / `import_compressed(&self, ...)` match Loro's interior-mutability pattern. ✓
+- #2 DRY: `export_compressed` calls `CompressedPayload::compress(&bytes, strategy)` (single dispatch SSOT — no duplicate match arms); `import_compressed` calls `payload.decompress()` (single dispatch SSOT). ✓
+- #3 YAGNI: no extra methods, no `codec()` accessor (field is `pub`), no serde derives (deferred to Phase 4 per DEVIL Q5). ✓
+- #6 Immutability: all receivers `&self` or `&[u8]`; NO `&mut self` anywhere (matches Loro's interior-mutability contract). ✓
+- #9 Absolute Idempotency: `compress(decompress(payload)) == payload` semantically (codec + bytes preserved); `compression_zstd_preserves_loro_importability` test verifies the Loro-semantic idempotency gate end-to-end; `compression_lz4_roundtrip` + `compression_zstd_roundtrip` verify byte-level idempotency. ✓
+- #10 Fewest LOC: Zstd arm is single-call `encode_all(_, level).map_err(...)?` (NOT 3-step `Encoder::new`/`write_all`/`finish` — DEVIL M1 approved the convenience wrapper); `decompress` LZ4/Zstd arms return the `.map_err(...)` expression directly (no intermediate `let`). ✓
+- #11 Deletion over addition: removed all 10 `// TODO(L3):` markers, all 8 `todo!()` bodies, all 5 `#[ignore]` attrs, the `#![allow(unused_imports)]` silencer, the 4-line n3 deferral comment, the now-stale "L2 wiring — bodies are `todo!`" module-doc line, the unused `DEFAULT_ZSTD_LEVEL` import. ✓
+- #14 Never simplify basics: Zstd `io::Error` routed via `GrafeoLoroError::Compression(e.to_string())` (NOT bare `?` that would misroute to `StorageIo` per DEVIL M3 — verified against `src/error.rs:12` `#[from] std::io::Error`); LZ4 `DecompressError` routed symmetrically via `Compression(String)`; LoroEncodeError two-hop chain handled explicitly via `.map_err(|e| GrafeoLoroError::Loro(e.into()))` (single `?` would NOT auto-chain two `From`s — verified at `loro-common-1.13.1/src/error.rs:204`). ✓
+
+Stage Summary:
+- Commit: `b3bb5ef` (full: `b3bb5ef6128692471df32cf50c86bd58a8bc330c`) on branch `p3-compression`.
+- Push: **SUCCESS** — `git push https://ghp_...@github.com/OndeHQ/grafeo-loro.git p3-compression` → `293ed9b..b3bb5ef  p3-compression -> p3-compression`.
+- Tests: **40 PASS, 0 FAIL, 0 IGNORED** (35 baseline + 5 newly-un-ignored compression tests).
+- Stubs remaining: **0** (zero `TODO(L3)`, zero `todo!()`, zero `unimplemented!()`, zero `#[ignore]`, zero `allow(unused_imports)` silencer).
+- Files touched:
+  * `src/compression/wrapper.rs` — replaced 10 `// TODO(L3):` markers + 8 `todo!()` bodies with real codec calls (LZ4 infallible `Vec<u8>`, Zstd `encode_all`/`decode_all` with `Compression(String)` routing, None passthrough; `export_compressed` two-hop `.into()` chain; `import_compressed` bare `?` propagation via `#[from]`). Kept all `// verified at <path:line>` doc comments.
+  * `tests/unit/compression.rs` — removed `#![allow(unused_imports)]` silencer (DEVIL n3 deferral expired); removed 5 `#[ignore]` attrs; removed unused `DEFAULT_ZSTD_LEVEL` import; filled all 5 test bodies per DEVIL m6 pinned shapes; updated module doc (L3 framing).
+- No API discrepancy found — all 7 (plus 6 supporting: `ExportMode::Snapshot`, `LoroDoc::new`, `LoroDoc::get_text`, `LoroDoc::get_deep_value`, `LoroText::insert`, `LoroValue: PartialEq`) verified signatures match the L2 task spec table exactly.
+- Ready for HUNT: **YES** — zero stubs, 40/40 tests pass, zero new warnings, branch pushed.
