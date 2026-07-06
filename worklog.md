@@ -529,3 +529,65 @@ Stage Summary:
   - `2394ef2` — `P2-L2: m1, n2, M2 — fix doc drift (lorosurgeon 0.2 + ROOT_TREE deletion) + Known Ambiguity note`
   - `f324bc5` — `P2-L2: B1, M1, M3, m2-m5, n1 — rewrite schema_roundtrip scaffolds with wiring`
   - Final HEAD on `p2-derives`: `f324bc5`
+
+---
+Task ID: P2-L3
+Agent: L3 Deep Implementation
+Task: Fill TODO sites in tests/unit/schema_roundtrip.rs for Phase 2 Task 1
+
+Work Log:
+- Read worklog end-to-end (531 lines): Phase 1 fully complete (10/10 tests pass, 0 ignored). ORCH-P2-SETUP initialized Phase 2 on branch `p2-derives`, picked Task 1 (lorosurgeon derives). P2-L1 verified derives compile + wrote 4 `#[ignore] todo!()` scaffolds. P2-DEVIL issued 1 BLOCKER + 3 MAJOR + 5 MINOR + 3 NIT. P2-L2 addressed all findings, rewrote scaffolds from 4 `todo!()` stubs to 7 wired scaffolds (181 LOC) with `// TODO(P2-L3)` sites marked for L3.
+- Confirmed on branch `p2-derives` (HEAD = `38bba81 P2-L2: worklog entry`).
+- Read `docs/critiques/p2-l1-devil.md` end-to-end (398 lines) + cross-checked every API citation against the actual `~/.cargo/registry/src/` crate sources. **API deviation discovered and documented below** (see `ordered_collection_reorder_preserves_identity` step).
+- API verification (anti-hallucination) — every non-trivial API call cited against actual crate source:
+  - `RootReconciler::new(LoroMap)` → `lorosurgeon-0.2.1/src/reconcile.rs:297-300` ✅
+  - `<T as Hydrate>::hydrate_map(&LoroMap)` → `lorosurgeon-0.2.1/src/hydrate.rs:64` ✅
+  - `Reconcile::key() -> LoadKey<Self::Key>` → `lorosurgeon-0.2.1/src/reconcile.rs:87-104` ✅
+  - `Reconcile::hydrate_key(&ValueOrContainer)` → `lorosurgeon-0.2.1/src/reconcile.rs:99-103` ✅ (trait default); derived impl at `lorosurgeon-derive-0.2.1/src/reconcile/struct_impl.rs:136-156` ✅
+  - `PropReconciler::map_put(LoroMap, String)` → `lorosurgeon-0.2.1/src/reconcile.rs:155-159` ✅
+  - `reconcile_movable_list` (keyed diffing, `mov()` ops for matched items) → `lorosurgeon-0.2.1/src/reconcile/movable_list.rs:113-202` ✅
+  - `TextReconciler::update` (Loro built-in LCS) → `lorosurgeon-0.2.1/src/reconcile.rs:406-416` ✅
+  - `PropReconciler::put_value` (no-op detection) → `lorosurgeon-0.2.1/src/reconcile.rs:179-194` ✅
+  - `LoroDoc::oplog_vv() -> VersionVector` → `loro-1.13.6/src/lib.rs:887` ✅
+  - `LoroDoc::oplog_frontiers() -> Frontiers` → `loro-1.13.6/src/lib.rs:948` ✅
+  - `LoroDoc::diff(&Frontiers, &Frontiers) -> LoroResult<DiffBatch>` → `loro-1.13.6/src/lib.rs:1496` ✅
+  - `LoroDoc::export(ExportMode::all_updates()) -> Vec<u8>` → `loro-1.13.6/src/lib.rs:1306` ✅
+  - `LoroDoc::import(&[u8]) -> ImportStatus` → `loro-1.13.6/src/lib.rs:710` ✅
+  - `LoroDoc::set_peer_id(PeerID)` → `loro-1.13.6/src/lib.rs:985` ✅
+  - `DiffBatch::iter()` yields `(&ContainerID, &Diff<'static>)` → `loro-1.13.6/src/event.rs:266-299` ✅
+  - `Diff::List(Vec<ListDiffItem>)` → `loro-1.13.6/src/event.rs:56-70` ✅
+  - `ListDiffItem::Insert { insert, is_move }` → `loro-1.13.6/src/event.rs:86-106` ✅
+  - `TextDelta::{Retain, Insert, Delete}` → `loro-internal-1.13.6/src/handler.rs:440-452` ✅
+  - `Frontiers: PartialEq + Eq` → `loro-internal-1.13.6/src/version/frontiers.rs:190-206` ✅
+  - `VersionVector: PartialEq + Eq` → `loro-internal-1.13.6/src/version.rs:299-309` ✅
+- **API deviation** (P2-L2 handoff said `doc.export_from(vv_before)`): no such method exists in `loro-1.13.6`. The actual API is `doc.diff(&Frontiers, &Frontiers) -> LoroResult<DiffBatch>` (`loro-1.13.6/src/lib.rs:1496`). L3 used `doc.oplog_frontiers()` to capture `Frontiers` directly (cleaner than `doc.oplog_vv()` + `doc.vv_to_frontiers()` round-trip). The `oplog_vv()` assertion was kept (per L2 handoff TODO (a)); only the diff-inspection API was swapped. **No hallucination — deviation is documented and the alternative API is verified against crate source.**
+- Filled TODO sites in `tests/unit/schema_roundtrip.rs` (one atomic commit, 269 insertions / 50 deletions, file grew from 181 LOC to 400 LOC):
+  1. **`vertex_entity_roundtrip`** — after the basic roundtrip, mutate `description` mid-string ("hello" → "hexllo"), capture `oplog_frontiers()` before/after, assert `before != after` (oplog advances), compute `doc.diff(&before, &after)`, walk the `DiffBatch` to find the `Diff::Text(deltas)` container, assert at least one `TextDelta::Retain { .. }` present (char-level LCS) AND no `TextDelta::Delete { delete >= 5 }` (whole-string replace). Re-hydrate and assert_eq to mutated original. **3 new assertions.**
+  2. **`edge_entity_roundtrip`** — after the basic roundtrip, mutate `properties` (change `weight` 0.5 → 0.9, add `since` Integer(2024)), re-reconcile, hydrate, assert_eq to mutated AND `assert_ne!(hydrated_mutated, original)`. **2 new assertions.**
+  3. **`ordered_collection_roundtrip`** — non-trivial 4-step case: empty → [n1, n2] (append) → [n1, n2, n3] (append) → [n0, n1, n2, n3] (prepend) → [n0, n1a, n1, n2, n3] (middle insert at idx 1). Each step: reconcile, commit, hydrate, assert_eq. Final assert: 5 items. **5 new assertions** (4 roundtrip + 1 len).
+  4. **`ordered_collection_reorder_preserves_identity`** — (a) `assert_ne!(vv_before, vv_after)` (oplog_vv advances); (b) `doc.diff(&f_before, &f_after)` yields `DiffBatch` with at least one `ListDiffItem::Insert { is_move: true, .. }` (Move op) AND zero `ListDiffItem::Insert { is_move: false, .. }` (no delete+insert pattern); (c) `assert_eq!(hydrated, cab)`. **3 new assertions.**
+  5. **`tree_node_flat_roundtrip`** — after the basic roundtrip, field-level concurrent merge across 2 `LoroDoc` peers (A peer_id=1, B peer_id=2). Initial sync A → B. A mutates `node_id` ("n1" → "n1A"), B mutates `title` ("Alpha" → "Bravo"). Both-way sync (A↔B). Both peers converge to `TreeNode { "n1A", "Bravo" }`. **3 new assertions** (initial sync, A converges, B converges).
+  6. **`tree_node_key_extraction`** — kept the existing `tn.key()` assertion; added: reconcile `TreeNode` into a `LoroMap`, wrap as `ValueOrContainer::Container(Container::Map(map))`, call `TreeNode::hydrate_key(&voc)`, assert_eq `LoadKey::Found("n1".to_string())`. **1 new assertion.**
+  7. **`loro_property_encoding_roundtrip`** — extended to all 5 variants via a `[(name, LoroProperty, LoroValue); 5]` table. Each variant: fresh `LoroDoc`, `PropReconciler::map_put(map, "k")`, reconcile, commit, `map.get("k").get_deep_value()`, assert_eq to expected bare `LoroValue`, AND `assert!(!matches!(value, LoroValue::Map(_)))` (Goodhart defense). **10 new assertions** (2 per variant × 5 variants).
+- Removed all 7 `#[ignore = "..."]` attributes. Tests now actually run in `cargo test --all`.
+- Removed the unused `drop(vv_before);` placeholder line (vv_before is now used in the assertion).
+- Imports updated: added `LoadKey`, `PropReconciler` (lorosurgeon); `Diff, ListDiffItem` (loro::event); `Container, ExportMode, LoroValue, TextDelta, ValueOrContainer` (loro). Removed the bare `loro::LoroDoc` import (folded into the multi-import line).
+- Did NOT touch any `src/` file (Phase 2 Task 1 is test-only verification — derives already compile, no source changes needed). Did NOT touch `src/schema/tree.rs::sync_tree_move_to_grafeo` (Phase 2 Task 2 scope). Did NOT touch `src/app.rs::VertexBuilder` (Phase 2 Task 3 scope). Did NOT push to remote (no GH token).
+- Anti-plenger audit: pure functions (all tests are pure wiring — no global state, no I/O outside LoroDoc); DRY (one consistent wiring template; the 5-variant property test uses a single table-driven loop instead of 5 copy-pasted blocks); SSOT (the LoroProperty wire-shape contract is asserted in exactly one place — `loro_property_encoding_roundtrip`); YAGNI (no speculative tests for Phase 2 Task 2/3 features); native-first (upstream `RootReconciler` + `lorosurgeon-0.2.1/tests/integration.rs:151-162` pattern verbatim); deletion-over-addition (removed `drop(vv_before);` placeholder); oneline-doc-first (doc comments trimmed to essentials). No backward-compat slavery, no tautology (vertex test asserts char-level LCS via oplog diff inspection, not just `assert_eq!(hydrated, original)`), no hallucination (every API verified against `~/.cargo/registry/src/`), no happy-path bias (edge mutation asserts `assert_ne!`; reorder test asserts Move ops AND absence of delete+insert pattern), no Goodhart's Law (loro_property test asserts NOT-Map shape, not just equals).
+
+Stage Summary:
+- TODO sites filled: all 7 (vertex_entity_roundtrip, edge_entity_roundtrip, ordered_collection_roundtrip, ordered_collection_reorder_preserves_identity, tree_node_flat_roundtrip, tree_node_key_extraction, loro_property_encoding_roundtrip).
+- `#[ignore]` attributes removed: 7.
+- New assertions added across the 7 tests: ~24 (3 + 2 + 5 + 3 + 3 + 1 + 10).
+- Files touched: `tests/unit/schema_roundtrip.rs` only (269 insertions, 50 deletions; 181 LOC → 400 LOC).
+- Compile status: `cargo check --all-targets` → exit 0, 0 errors, 5 pre-existing lib dead-code warnings (Phase-1 carryover: `hydration/vector.rs`, `presence/socket.rs`, `telemetry/health.rs`, plus 2 struct-field warnings) — **0 new warnings** from `tests/unit/`.
+- Test status: `cargo test --all` → **17/17 PASS, 0 ignored, 0 failed**:
+  - 6 lib tests (Phase 1 carryover): all PASS
+  - 4 integration tests (Phase 1 carryover): all PASS
+  - 7 unit tests (Phase 2 — all scaffolds now run): all PASS
+- Zero-stub verification: `grep -nE "TODO|todo!|unimplemented!|#\[ignore" tests/unit/schema_roundtrip.rs` → **ZERO matches**.
+- New issues for Plenger hunter:
+  - **API drift (informational)**: P2-L2 handoff referred to `doc.export_from(vv_before)` which does not exist in `loro-1.13.6`. L3 used `doc.diff(&Frontiers, &Frontiers) -> LoroResult<DiffBatch>` instead (`loro-1.13.6/src/lib.rs:1496`). The worklog captures this deviation; future L1/L2 agents writing similar tests should reference `doc.diff()` + `doc.oplog_frontiers()`, not the nonexistent `export_from`.
+  - **Test-import style (nit)**: `loro::TextDelta` is re-exported at top-level (`loro-1.13.6/src/lib.rs:58`), NOT under `loro::event::TextDelta` (it's a private re-import there). The test imports `TextDelta` from `loro::` top-level — this is the canonical path; future tests should follow the same convention.
+  - **No `src/` changes needed for Task 1** (confirms P2-L1 + P2-DEVIL conclusion): all 4 schema entities (`VertexEntity`, `EdgeEntity`, `OrderedCollection`, `TreeNode`) roundtrip cleanly through their `#[derive(Hydrate, Reconcile)]` impls with no source-side fixups. Phase 2 Task 1 is fully complete. Phase 2 Task 2 (`sync_tree_move_to_grafeo`) and Task 3 (`VertexBuilder`) remain.
+- Commit hash: `f328bf3` — `P2-L3: fill 7 TODO sites in schema_roundtrip.rs + remove all #[ignore]`. Final HEAD on `p2-derives`: `f328bf3`.
