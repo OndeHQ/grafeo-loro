@@ -61,10 +61,8 @@ impl PresenceManager {
                 "truncated: missing room_id_len".into(),
             ));
         }
-        let room_id_len = u16::from_le_bytes([
-            bytes[EPH_MAGIC.len()],
-            bytes[EPH_MAGIC.len() + 1],
-        ]) as usize;
+        let room_id_len =
+            u16::from_le_bytes([bytes[EPH_MAGIC.len()], bytes[EPH_MAGIC.len() + 1]]) as usize;
         let room_id_start = EPH_MAGIC.len() + 2;
         let room_id_end = room_id_start + room_id_len;
         if bytes.len() < room_id_end + 1 {
@@ -84,9 +82,8 @@ impl PresenceManager {
             )));
         }
         let payload_bytes = &bytes[room_id_end + 1..];
-        let payload: PresencePayload = serde_json::from_slice(payload_bytes).map_err(|e| {
-            GrafeoLoroError::InvalidEnvelope(format!("serde: {e}"))
-        })?;
+        let payload: PresencePayload = serde_json::from_slice(payload_bytes)
+            .map_err(|e| GrafeoLoroError::InvalidEnvelope(format!("serde: {e}")))?;
         Ok(EphEnvelope { room_id, payload })
     }
 
@@ -104,9 +101,8 @@ impl PresenceManager {
                 u16::MAX
             )));
         }
-        let json = serde_json::to_vec(payload).map_err(|e| {
-            GrafeoLoroError::InvalidEnvelope(format!("serde_json encode: {e}"))
-        })?;
+        let json = serde_json::to_vec(payload)
+            .map_err(|e| GrafeoLoroError::InvalidEnvelope(format!("serde_json encode: {e}")))?;
         let mut buf =
             Vec::with_capacity(EPH_MAGIC.len() + 2 + room_id_bytes.len() + 1 + json.len());
         buf.extend_from_slice(EPH_MAGIC);

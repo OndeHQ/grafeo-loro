@@ -592,7 +592,8 @@ impl GrafeoLoroApp {
                 // P5 needs: wal feature + tar crate + ArcSwap grafeo_db field
                 //           + non-destructive backup_full.
                 return Err(GrafeoLoroError::NotYetImplemented(
-                    "SsotMode::Grafeo checkpoint: requires wal feature + ArcSwap grafeo_db field".into(),
+                    "SsotMode::Grafeo checkpoint: requires wal feature + ArcSwap grafeo_db field"
+                        .into(),
                 ));
             }
         }
@@ -987,7 +988,8 @@ impl GrafeoLoroApp {
                 //     `parallel_hydrate_grafeo` using `graph_store().node_ids()`
                 //     + `entity.reconcile(RootReconciler::new(node_map))`).
                 return Err(GrafeoLoroError::NotYetImplemented(
-                    "SsotMode::Grafeo hydrate: requires wal feature + ArcSwap grafeo_db field".into(),
+                    "SsotMode::Grafeo hydrate: requires wal feature + ArcSwap grafeo_db field"
+                        .into(),
                 ));
             }
         }
