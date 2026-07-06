@@ -64,6 +64,7 @@ use crate::constants::{
     ORIGIN_GRAFEO_BRIDGE, ORIGIN_LORO_BRIDGE, OUTBOUND_POLL_MS, ROOT_EDGES, ROOT_VERTICES,
 };
 use crate::error::Result;
+use crate::telemetry::{MetricsRegistry, SharedTracer};
 use crate::types::events::{CdcEventWrapper, LoroOp};
 use crate::types::values::{grafeo_value_to_lval, lval_to_gval};
 use crate::constants::EPOCH_RETENTION;
@@ -134,6 +135,19 @@ pub struct SyncEngine {
     /// Shutdown broadcast — workers subscribe and exit on `trigger()`
     /// (replaces `tokio_util::CancellationToken`, Devil NIT N16).
     pub(crate) shutdown_tx: broadcast::Sender<()>,
+    /// Optional metrics registry (P5-L1 Task 4 wiring contact point).
+    /// `Some` in production (threaded from `GrafeoLoroAppBuilder::build`
+    /// via `Self::with_telemetry`); `None` in tests that use `Self::new`
+    /// / `Self::with_batch_config`. Worker loops record counters via this
+    /// handle: `init_loro_subscriber`'s origin-filter path bumps
+    /// `echo_filtered`, `spawn_outbound_worker` bumps `outbound_events`.
+    /// P5-L2 territory — bodies are `// TODO(P5-L2): record metrics`.
+    pub(crate) metrics: Option<Arc<MetricsRegistry>>,
+    /// Optional shared tracer (P5-L1 Task 4 wiring contact point). `Some`
+    /// in production; `None` in tests. `spawn_inbound_worker` opens an
+    /// `inbound_sync_loop` parent span via [`crate::telemetry::traces::
+    /// create_inbound_sync_span`] (P5-L2 territory).
+    pub(crate) tracer: Option<SharedTracer>,
 }
 
 impl SyncEngine {
@@ -150,6 +164,11 @@ impl SyncEngine {
     /// `MutationBatcher`. Callers needing explicit batcher tuning (Phase 4
     /// Task 4 — `GrafeoLoroAppBuilder::build`) use
     /// [`Self::with_batch_config`] instead (P4-DEVIL Q7).
+    ///
+    /// # Phase 5 Task 4 (P5-L1)
+    ///
+    /// This constructor does NOT take telemetry params — `metrics` + `tracer`
+    /// default to `None`. Production callers use [`Self::with_telemetry`].
     pub fn new(
         grafeo_db: Arc<GrafeoDB>,
         loro_doc: Arc<RwLock<LoroDoc>>,
@@ -159,6 +178,8 @@ impl SyncEngine {
             loro_doc,
             crate::constants::DEFAULT_BATCH_SIZE,
             crate::constants::DEFAULT_BATCH_MS,
+            None,
+            None,
         )
     }
 
@@ -167,23 +188,68 @@ impl SyncEngine {
     /// [`MutationBatcher::new`] instead of hardcoding [`DEFAULT_BATCH_SIZE`] /
     /// [`DEFAULT_BATCH_MS`]. Used by `GrafeoLoroAppBuilder::build` (Phase 4
     /// Task 4 — P4-DEVIL Q7). Tests use [`Self::new`] for defaults.
+    ///
+    /// # Phase 5 Task 4 (P5-L1)
+    ///
+    /// This constructor does NOT take telemetry params — `metrics` + `tracer`
+    /// default to `None`. Production code that needs telemetry should use
+    /// [`Self::with_telemetry`] (added P5-L1). Devil Q11 — should this
+    /// constructor be deprecated in favor of `with_telemetry`?
     pub fn with_batch_config(
         grafeo_db: Arc<GrafeoDB>,
         loro_doc: Arc<RwLock<LoroDoc>>,
         batch_size: usize,
         batch_ms: u64,
     ) -> (Self, mpsc::Receiver<InboundMsg>, mpsc::Receiver<OutboundMsg>) {
-        Self::new_inner(grafeo_db, loro_doc, batch_size, batch_ms)
+        Self::new_inner(grafeo_db, loro_doc, batch_size, batch_ms, None, None)
+    }
+
+    /// Construct an engine with explicit batcher tuning AND telemetry
+    /// handles (P5-L1 Task 4). Like [`Self::with_batch_config`] but also
+    /// threads `metrics` + `tracer` into the engine + its internal
+    /// `MutationBatcher`. Production `GrafeoLoroAppBuilder::build` calls
+    /// this (replacing the prior `with_batch_config` call) once it has
+    /// constructed the `MetricsRegistry` + `SharedTracer` from the
+    /// `opentelemetry::global` provider (P5-L2 territory).
+    ///
+    /// # L1 contract
+    ///
+    /// - `metrics: Option<Arc<MetricsRegistry>>` — `Some` in production,
+    ///   `None` in tests / dev mode without telemetry configured.
+    /// - `tracer: Option<SharedTracer>` — same semantics.
+    /// - Both are cloned into the internal `MutationBatcher` so worker loops
+    ///   in both `SyncEngine` + `MutationBatcher` can record without owning
+    ///   separate Arc handles.
+    /// - Both default to `None` in [`Self::new`] / [`Self::with_batch_config`]
+    ///   (backward compat with existing tests).
+    pub fn with_telemetry(
+        grafeo_db: Arc<GrafeoDB>,
+        loro_doc: Arc<RwLock<LoroDoc>>,
+        batch_size: usize,
+        batch_ms: u64,
+        metrics: Option<Arc<MetricsRegistry>>,
+        tracer: Option<SharedTracer>,
+    ) -> (Self, mpsc::Receiver<InboundMsg>, mpsc::Receiver<OutboundMsg>) {
+        Self::new_inner(grafeo_db, loro_doc, batch_size, batch_ms, metrics, tracer)
     }
 
     /// Shared constructor body (DRY — anti-plenger #2). Parameterized on the
     /// batcher's `batch_size` + `batch_ms` so both [`Self::new`] (defaults)
     /// and [`Self::with_batch_config`] (explicit) delegate here.
+    ///
+    /// # Phase 5 Task 4 (P5-L1)
+    ///
+    /// `metrics` + `tracer` params added P5-L1; existing constructors
+    /// ([`Self::new`] + [`Self::with_batch_config`]) pass `None, None` to
+    /// preserve backward compat. [`Self::with_telemetry`] is the only
+    /// caller that threads real telemetry handles.
     fn new_inner(
         grafeo_db: Arc<GrafeoDB>,
         loro_doc: Arc<RwLock<LoroDoc>>,
         batch_size: usize,
         batch_ms: u64,
+        metrics: Option<Arc<MetricsRegistry>>,
+        tracer: Option<SharedTracer>,
     ) -> (Self, mpsc::Receiver<InboundMsg>, mpsc::Receiver<OutboundMsg>) {
         let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
@@ -201,6 +267,8 @@ impl SyncEngine {
             bridge_origin_epochs.clone(),
             maps.clone(),
             shutdown_tx.clone(),
+            metrics.clone(),
+            tracer.clone(),
         ));
 
         let engine = Self {
@@ -215,6 +283,8 @@ impl SyncEngine {
             inbound_event_count,
             inbound_filtered_count,
             shutdown_tx,
+            metrics,
+            tracer,
         };
         (engine, inbound_rx, outbound_rx)
     }
@@ -225,6 +295,22 @@ impl SyncEngine {
     /// tests a hook to inspect state).
     pub fn maps(&self) -> &Arc<BridgeMaps> {
         &self.maps
+    }
+
+    /// Access the optional metrics registry (P5-L1). `Some` in production,
+    /// `None` in tests. Used by `init_loro_subscriber` (P5-L2 will bump
+    /// `echo_filtered` counter on origin-filter skip) + `spawn_outbound_worker`
+    /// (P5-L2 will bump `outbound_events` counter on each CDC event applied).
+    pub fn metrics(&self) -> Option<&Arc<MetricsRegistry>> {
+        self.metrics.as_ref()
+    }
+
+    /// Access the optional shared tracer (P5-L1). `Some` in production,
+    /// `None` in tests. Used by `spawn_inbound_worker` (P5-L2 will open an
+    /// `inbound_sync_loop` parent span via
+    /// [`crate::telemetry::traces::create_inbound_sync_span`]).
+    pub fn tracer(&self) -> Option<&SharedTracer> {
+        self.tracer.as_ref()
     }
 
     /// Wire `loro_doc.subscribe_root` → origin filter → translate to `LoroOp`
@@ -269,6 +355,12 @@ impl SyncEngine {
             // would NOT increment `inbound_event_count`.
             if event.origin == ORIGIN_GRAFEO_BRIDGE || event.origin == ORIGIN_LORO_BRIDGE {
                 inbound_filtered_count.fetch_add(1, Ordering::Relaxed);
+                // TODO(P5-L2): if let Some(m) = &metrics { m.echo_filtered.add(1, &[]) }
+                // — capture `metrics: Option<Arc<MetricsRegistry>>` clone into the
+                // subscriber closure (same pattern as `inbound_filtered_count`).
+                // Architecture §23.1 row 3: `grafeo_loro.sync.echo_filtered_total`
+                // label `direction` (set to "inbound" here; "outbound" filter is
+                // the epoch side-channel in `spawn_outbound_worker`/`spawn_cdc_poller`).
                 return;
             }
             let ops = translate_diff_event(&event);
@@ -291,12 +383,26 @@ impl SyncEngine {
     /// Inbound worker: drain `rx`, extract `LoroOp` from each `InboundMsg`,
     /// forward to the internal batcher channel. The batcher's `run` loop is
     /// spawned as a child task and joined on shutdown.
+    ///
+    /// # Phase 5 Task 4 wiring contact points (P5-L1)
+    ///
+    /// P5-L2 will (a) capture `self.tracer.clone()` into the `tokio::spawn`
+    /// closure and open an `inbound_sync_loop` parent span via
+    /// [`crate::telemetry::traces::create_inbound_sync_span`] (architecture
+    /// §23.2 tree row 2); (b) capture `self.metrics.clone()` and bump
+    /// `inbound_events` counter on each `InboundMsg::Op` forwarded
+    /// (architecture §23.1 row 1; note: `inbound_event_count` already
+    /// counts at the subscriber boundary — `inbound_events` counter is
+    /// redundant unless we record it at a different boundary, e.g. per-op
+    /// forwarded to batcher. Devil Q12).
     pub async fn spawn_inbound_worker(
         self: Arc<Self>,
         mut rx: mpsc::Receiver<InboundMsg>,
     ) -> JoinHandle<()> {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let batcher = self.batcher.clone();
+        // TODO(P5-L2): let tracer = self.tracer.clone();
+        // TODO(P5-L2): let metrics = self.metrics.clone();
         let (batch_tx, batch_rx) = mpsc::channel::<LoroOp>(CHANNEL_CAPACITY);
 
         // Spawn the batcher's run loop as a child task.
@@ -305,6 +411,8 @@ impl SyncEngine {
         });
 
         tokio::spawn(async move {
+            // TODO(P5-L2): let _parent_span = tracer.as_ref()
+            //     .map(|t| crate::telemetry::traces::create_inbound_sync_span(t.as_ref()));
             loop {
                 tokio::select! {
                     biased;
@@ -313,6 +421,9 @@ impl SyncEngine {
                         let Some(msg) = msg else { break };
                         match msg {
                             InboundMsg::Op(op) => {
+                                // TODO(P5-L2): if let Some(m) = &metrics {
+                                //     m.inbound_events.add(1, &[origin=..., event_type=...]);
+                                // }
                                 if batch_tx.send(op).await.is_err() {
                                     break;
                                 }
@@ -331,6 +442,18 @@ impl SyncEngine {
     /// epoch side-channel (already filtered at poll time, but double-check),
     /// apply to Loro with `set_next_commit_origin(ORIGIN_GRAFEO_BRIDGE)` +
     /// `commit()` serialized under the Loro write lock.
+    ///
+    /// # Phase 5 Task 4 wiring contact points (P5-L1)
+    ///
+    /// P5-L2 will (a) capture `self.metrics.clone()` and bump `outbound_events`
+    /// counter on each CDC event successfully applied to Loro (architecture
+    /// §23.1 row 2; labels `origin`, `event_type`); (b) capture
+    /// `self.tracer.clone()` and open an `outbound_sync_loop` parent span
+    /// (architecture §23.2 tree row 3 — note: NO `create_outbound_sync_span`
+    /// helper exists in `traces.rs`; Devil Q13 — should one be added, or is
+    /// the inbound-only span helper sufficient?); (c) capture a
+    /// `HealthProbe` Arc and call `health.update_sync_ts()` after each
+    /// successful Loro commit (Devil Q10 — HealthProbe ownership).
     pub async fn spawn_outbound_worker(
         self: Arc<Self>,
         mut rx: mpsc::Receiver<OutboundMsg>,
@@ -339,8 +462,13 @@ impl SyncEngine {
         let loro_doc = self.loro_doc.clone();
         let bridge_epochs = self.bridge_origin_epochs.clone();
         let maps = self.maps.clone();
+        // TODO(P5-L2): let tracer = self.tracer.clone();
+        // TODO(P5-L2): let metrics = self.metrics.clone();
+        // TODO(P5-L2): let health = self.health.clone();  // Devil Q10
 
         tokio::spawn(async move {
+            // TODO(P5-L2): let _parent_span = tracer.as_ref()
+            //     .map(|t| /* create_outbound_sync_span(t.as_ref()) — Devil Q13 */);
             loop {
                 tokio::select! {
                     biased;
@@ -351,6 +479,9 @@ impl SyncEngine {
                         // an epoch could in principle have been pruned between
                         // poll and apply. Skip if still in the set.
                         if bridge_epochs.read().contains(&msg.epoch) {
+                            // TODO(P5-L2): if let Some(m) = &metrics {
+                            //     m.echo_filtered.add(1, &[direction="outbound"]);
+                            // }
                             continue;
                         }
                         let outcome = {
@@ -366,6 +497,12 @@ impl SyncEngine {
                             doc.set_next_commit_origin(ORIGIN_GRAFEO_BRIDGE);
                             doc.commit();
                         }
+                        // TODO(P5-L2): if let Some(m) = &metrics {
+                        //     m.outbound_events.add(1, &[origin=..., event_type=...]);
+                        // }
+                        // TODO(P5-L2): if let Some(h) = &health {
+                        //     h.update_sync_ts();
+                        // }
                     }
                 }
             }
@@ -376,11 +513,22 @@ impl SyncEngine {
     /// end)` on a timer, filter out epochs in `bridge_origin_epochs`, push
     /// surviving events to the outbound channel. Prune the epoch set each
     /// cycle to keep only epochs newer than `last_epoch - EPOCH_RETENTION`.
+    ///
+    /// # Phase 5 Task 4 wiring contact points (P5-L1)
+    ///
+    /// P5-L2 will (a) capture `self.metrics.clone()` and bump `echo_filtered`
+    /// counter on each epoch-filtered event (architecture §23.1 row 3,
+    /// `direction="outbound"` — symmetric to the inbound subscriber's
+    /// `direction="inbound"` filter); (b) capture `self.tracer.clone()` and
+    /// open `outbound_sync_loop` + `receive_cdc_event` child spans
+    /// (architecture §23.2 tree row 3.1).
     pub async fn spawn_cdc_poller(self: Arc<Self>) -> JoinHandle<()> {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let grafeo_db = self.grafeo_db.clone();
         let outbound_tx = self.outbound_tx.clone();
         let bridge_epochs = self.bridge_origin_epochs.clone();
+        // TODO(P5-L2): let tracer = self.tracer.clone();
+        // TODO(P5-L2): let metrics = self.metrics.clone();
 
         tokio::spawn(async move {
             // L2 new issue #4: init from current_epoch so a restarted engine
@@ -407,6 +555,9 @@ impl SyncEngine {
                         };
                         for ev in events {
                             if bridge_epochs.read().contains(&ev.epoch) {
+                                // TODO(P5-L2): if let Some(m) = &metrics {
+                                //     m.echo_filtered.add(1, &[direction="outbound"]);
+                                // }
                                 continue;
                             }
                             let wrapped = OutboundMsg::new(ev.epoch, ev);

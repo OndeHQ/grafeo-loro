@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use lorosurgeon::reconcile::RootReconciler;
 use lorosurgeon::Reconcile;
+use tokio::task::JoinHandle;
 
 use crate::bridge::{apply_loro_op, BridgeMaps, SyncEngine};
 use crate::compression::wrapper::CompressedPayload;
@@ -15,13 +16,15 @@ use crate::constants::{
 use crate::error::{GrafeoLoroError, Result};
 use crate::schema::VertexEntity;
 use crate::storage::StorageBackend;
+use crate::telemetry::{HealthProbe, MetricsRegistry, SharedTracer};
 use crate::types::events::LoroOp;
 use crate::types::{GraphValue, LoroProperty, NodeId, PresencePayload};
 use crate::hydration::parallel_hydrate_grafeo;
 
 /// Top-level app facade.
 ///
-/// # Phase 2 Task 3 scope (P2T3-L2); Phase 4 Task 4 wiring (P4-L2)
+/// # Phase 2 Task 3 scope (P2T3-L2); Phase 4 Task 4 wiring (P4-L2);
+/// Phase 5 Task 4 telemetry (P5-L1)
 ///
 /// Holds a single `Arc<SyncEngine>` handle plus a process-local
 /// `loro_key_counter`. [`SyncEngine`] is the SSOT for `LoroDoc`, `GrafeoDB`,
@@ -35,9 +38,24 @@ use crate::hydration::parallel_hydrate_grafeo;
 /// call `storage.load/save/list/delete` + `CompressedPayload::compress`/
 /// `decompress` with the configured `compression`. Production construction
 /// goes through [`GrafeoLoroAppBuilder::build`], which threads the builder
-/// slots into [`Self::from_sync_engine_with_config`]. Tests use the
+/// slots into [`Self::from_sync_engine_with_telemetry`]. Tests use the
 /// non-breaking [`Self::from_sync_engine`] shim (delegates with defaults —
-/// `SsotMode::Loro`, no storage, `CompressionType::default()`).
+/// `SsotMode::Loro`, no storage, `CompressionType::default()`, no telemetry).
+///
+/// Phase 5 adds four telemetry fields (P5-L1 Task 4):
+/// - `metrics: Option<Arc<MetricsRegistry>>` — None in tests, Some in
+///   production (built from `opentelemetry::global::meter(...)` in `build()`).
+/// - `health: Option<Arc<HealthProbe>>` — None in tests, Some in production.
+/// - `tracer: Option<SharedTracer>` — None in tests, Some in production
+///   (built from `opentelemetry::global::tracer(...)` in `build()`).
+/// - `worker_handles: Option<Vec<JoinHandle<()>>>` — preserves the handles
+///   returned by `SyncEngine::spawn_all` (CB-1 forward-compat from P4-HUNT).
+///   Consumed by [`Self::shutdown`] in L2/L3 to await worker termination.
+///
+/// All four default to `None` in [`Self::from_sync_engine`] +
+/// [`Self::from_sync_engine_with_config`] (backward compat with existing
+/// tests). Production `build()` populates them via
+/// [`Self::from_sync_engine_with_telemetry`].
 ///
 /// All methods other than [`Self::create_vertex`] + [`Self::maps`] remain
 /// `unimplemented!()` (Phase 3-5 scope). See each method's doc-comment for
@@ -61,10 +79,35 @@ pub struct GrafeoLoroApp {
     /// `checkpoint` to wrap the snapshot bytes and by `hydrate` to decompress.
     /// Defaults to `CompressionType::Zstd` per architecture §24.4.
     pub(crate) compression: CompressionType,
+    /// Optional metrics registry (P5-L1 Task 4). `Some` in production
+    /// (built from `opentelemetry::global::meter("grafeo-loro")` in `build()`);
+    /// `None` in tests. `hydrate` records `hydration_duration` via this handle
+    /// (P5-L2 territory).
+    pub(crate) metrics: Option<Arc<MetricsRegistry>>,
+    /// Optional health probe (P5-L1 Task 3). `Some` in production; `None` in
+    /// tests. Exposed via [`Self::health`] for HTTP endpoint wiring (Phase 6).
+    pub(crate) health: Option<Arc<HealthProbe>>,
+    /// Optional shared tracer (P5-L1 Task 4). `Some` in production (built
+    /// from `opentelemetry::global::tracer("grafeo-loro")` in `build()`);
+    /// `None` in tests. `hydrate` opens a `cold_start_hydration` parent span
+    /// via this handle (P5-L2 territory).
+    pub(crate) tracer: Option<SharedTracer>,
+    /// Worker `JoinHandle`s preserved from `SyncEngine::spawn_all` (P5-L1
+    /// forward-compat with P4-HUNT CB-1). Consumed by [`Self::shutdown`] to
+    /// await worker termination + flush telemetry before drop. `None` in
+    /// tests / `from_sync_engine*` constructors that do not call `spawn_all`.
+    pub(crate) worker_handles: Option<Vec<JoinHandle<()>>>,
 }
 
 /// Builder for [`GrafeoLoroApp`]. Fluent setters; call [`build`](Self::build)
 /// to validate and spawn the runtime.
+///
+/// # Phase 5 Task 4 telemetry slots (P5-L1)
+///
+/// Three new optional slots added: `metrics`, `health`, `tracer`. All
+/// default to `None`. Production callers set them via [`.with_metrics(...)`]
+/// / [`.with_health(...)`] / [`.with_tracer(...)`] before `build()`. Tests
+/// that do not configure telemetry leave them at `None`.
 pub struct GrafeoLoroAppBuilder {
     storage: Option<Arc<dyn StorageBackend>>,
     ssot_mode: SsotMode,
@@ -79,13 +122,31 @@ pub struct GrafeoLoroAppBuilder {
     /// P4-DEVIL B1). `build()` rejects `SsotMode::Grafeo + None` with
     /// `Config("grafeo_dir required for SsotMode::Grafeo")`.
     grafeo_dir: Option<PathBuf>,
+    /// Optional metrics registry (P5-L1 Task 4). `Some` in production
+    /// (caller pre-builds via `MetricsRegistry::init(global::meter(...))`);
+    /// `None` in tests. `build()` threads `Some` into `SyncEngine::with_telemetry`
+    /// + `GrafeoLoroApp::metrics`. Devil Q14 — should `build()` construct the
+    /// registry itself from `global::meter("grafeo-loro")`, or require the
+    /// caller to pre-build via `.with_metrics(...)`? L1 leaves the decision
+    /// open; L2 implements per Devil ruling.
+    metrics: Option<Arc<MetricsRegistry>>,
+    /// Optional health probe (P5-L1 Task 3). `Some` in production (caller
+    /// pre-builds via `HealthProbe::new(doc_clone, db_clone)`); `None` in
+    /// tests. `build()` threads `Some` into `GrafeoLoroApp::health`.
+    health: Option<Arc<HealthProbe>>,
+    /// Optional shared tracer (P5-L1 Task 4). `Some` in production (caller
+    /// pre-builds via `Arc::new(global::tracer("grafeo-loro"))`); `None` in
+    /// tests. `build()` threads `Some` into `SyncEngine::with_telemetry` +
+    /// `GrafeoLoroApp::tracer`.
+    tracer: Option<SharedTracer>,
 }
 
 impl Default for GrafeoLoroAppBuilder {
     /// Defaults match architecture §24.4 (`SsotMode::Loro`,
     /// `CompressionType::Zstd`, `CompressionType::Lz4` for sync, 100 ms /
-    /// 256 ops batcher). `storage` + `grafeo_dir` default to `None` —
-    /// `build()` rejects a missing `storage` for production use.
+    /// 256 ops batcher). `storage` + `grafeo_dir` + `metrics` + `health` +
+    /// `tracer` default to `None` — `build()` rejects a missing `storage`
+    /// for production use (telemetry slots remain `None` if not set).
     fn default() -> Self {
         Self {
             storage: None,
@@ -95,6 +156,9 @@ impl Default for GrafeoLoroAppBuilder {
             batch_interval_ms: crate::constants::DEFAULT_BATCH_MS,
             batch_max_size: crate::constants::DEFAULT_BATCH_SIZE,
             grafeo_dir: None,
+            metrics: None,
+            health: None,
+            tracer: None,
         }
     }
 }
@@ -136,6 +200,13 @@ impl GrafeoLoroApp {
     /// (matches the builder's `storage: Option<Arc<dyn StorageBackend>>` slot).
     /// `hydrate`/`checkpoint` reject `None` at dispatch time with
     /// `Config("storage backend not set")` (defensive — same as `build()`).
+    ///
+    /// # Phase 5 Task 4 (P5-L1)
+    ///
+    /// Telemetry fields (`metrics`, `health`, `tracer`, `worker_handles`)
+    /// all default to `None` here — this constructor preserves backward
+    /// compat with existing tests (no signature change). Production code
+    /// that needs telemetry uses [`Self::from_sync_engine_with_telemetry`].
     pub fn from_sync_engine_with_config(
         sync_engine: Arc<SyncEngine>,
         ssot_mode: SsotMode,
@@ -148,6 +219,50 @@ impl GrafeoLoroApp {
             ssot_mode,
             storage,
             compression,
+            metrics: None,
+            health: None,
+            tracer: None,
+            worker_handles: None,
+        }
+    }
+
+    /// Construct an app from a pre-built [`SyncEngine`] with explicit Phase 4
+    /// dispatch fields AND Phase 5 telemetry fields (P5-L1 Task 4).
+    ///
+    /// # L1 contract
+    ///
+    /// Like [`Self::from_sync_engine_with_config`] but also takes the four
+    /// telemetry/lifecycle slots added in P5-L1:
+    /// - `metrics: Option<Arc<MetricsRegistry>>` — `Some` in production, `None`
+    ///   in tests / dev mode without telemetry configured.
+    /// - `health: Option<Arc<HealthProbe>>` — same.
+    /// - `tracer: Option<SharedTracer>` — same.
+    /// - `worker_handles: Option<Vec<JoinHandle<()>>>` — `Some(handles)` when
+    ///   the caller has invoked `SyncEngine::spawn_all`; `None` otherwise.
+    ///   Consumed by [`Self::shutdown`] in L2/L3 (CB-1 forward-compat).
+    ///
+    /// Production `build()` is the sole caller (P5-L2 territory — replaces
+    /// the prior `from_sync_engine_with_config` call at the end of `build`).
+    pub fn from_sync_engine_with_telemetry(
+        sync_engine: Arc<SyncEngine>,
+        ssot_mode: SsotMode,
+        storage: Option<Arc<dyn StorageBackend>>,
+        compression: CompressionType,
+        metrics: Option<Arc<MetricsRegistry>>,
+        health: Option<Arc<HealthProbe>>,
+        tracer: Option<SharedTracer>,
+        worker_handles: Option<Vec<JoinHandle<()>>>,
+    ) -> Self {
+        Self {
+            sync_engine,
+            loro_key_counter: Arc::new(AtomicU64::new(0)),
+            ssot_mode,
+            storage,
+            compression,
+            metrics,
+            health,
+            tracer,
+            worker_handles,
         }
     }
 
@@ -186,6 +301,36 @@ impl GrafeoLoroApp {
     /// for verifying `GrafeoLoroAppBuilder::build` threads the slot through).
     pub fn compression(&self) -> CompressionType {
         self.compression
+    }
+
+    /// Access the optional metrics registry (P5-L1). `Some` in production,
+    /// `None` in tests. Used by `hydrate` (P5-L2 will call
+    /// `metrics.record_hydration(...)` after `parallel_hydrate_grafeo`).
+    pub fn metrics(&self) -> Option<&Arc<MetricsRegistry>> {
+        self.metrics.as_ref()
+    }
+
+    /// Access the optional health probe (P5-L1). `Some` in production, `None`
+    /// in tests. Used by an HTTP endpoint (Phase 6 hardening) + by `shutdown`
+    /// (P5-L2/L3 will call `health.check(...)` before tearing down workers).
+    pub fn health(&self) -> Option<&Arc<HealthProbe>> {
+        self.health.as_ref()
+    }
+
+    /// Access the optional shared tracer (P5-L1). `Some` in production, `None`
+    /// in tests. Used by `hydrate` (P5-L2 will open a `cold_start_hydration`
+    /// parent span via `crate::telemetry::traces::create_cold_start_span`) +
+    /// `query` (P5-L2 will open a `hybrid_query` parent span).
+    pub fn tracer(&self) -> Option<&SharedTracer> {
+        self.tracer.as_ref()
+    }
+
+    /// Access the worker `JoinHandle`s preserved from `SyncEngine::spawn_all`
+    /// (P5-L1 CB-1 forward-compat). `Some` in production (populated by
+    /// `build()`); `None` in tests / `from_sync_engine*` constructors.
+    /// Consumed by [`Self::shutdown`] in L2/L3 to await worker termination.
+    pub fn worker_handles(&self) -> Option<&[JoinHandle<()>]> {
+        self.worker_handles.as_deref()
     }
 
     /// Begin a fluent vertex-upsert transaction.
@@ -712,10 +857,16 @@ impl GrafeoLoroApp {
                 tracing::info!("hydrate: parallel_hydrate_grafeo (Loro → Grafeo)");
                 {
                     let doc = self.sync_engine.loro_doc.read();
+                    // TODO(P5-L2): pass `self.metrics.as_ref()` + `self.tracer.as_ref()`
+                    // (architecture §23.2 tree row 1.3 — `parallel_hydrate_grafeo`
+                    // span). For L1 we pass `None, None` to preserve the cold-boot
+                    // path; L2 will thread the real telemetry handles.
                     parallel_hydrate_grafeo(
                         &self.sync_engine.grafeo_db,
                         &doc,
                         self.sync_engine.maps(),
+                        None,
+                        None,
                     )?;
                 }
 
@@ -793,8 +944,27 @@ impl GrafeoLoroApp {
     }
 
     /// Graceful shutdown: cancel workers, flush buffers, close stores.
+    ///
+    /// # Phase 5 Task 4 (P5-L1)
+    ///
+    /// L1 contract only — body remains `unimplemented!()`. L2/L3 fills the
+    /// algorithm per the following sequence (architecture §4 Step D):
+    ///
+    /// 1. `self.sync_engine.shutdown()` — trigger the broadcast (already
+    ///    implemented at `src/bridge/sync_engine.rs:611`).
+    /// 2. `if let Some(handles) = self.worker_handles { for h in handles {
+    ///    let _ = h.await; } }` — drain the inbound + outbound + CDC poller
+    ///    tasks (CB-1 forward-compat — `worker_handles` populated by `build()`).
+    /// 3. Final `checkpoint` to flush pending state (optional — Devil Q15:
+    ///    should `shutdown` auto-checkpoint, or is that the caller's job?).
+    /// 4. Flush telemetry exporters (P5-L2 territory — needs
+    ///    `opentelemetry::global::shutdown_tracer_provider()` if a tracer was
+    ///    configured).
+    /// 5. Close `GrafeoDB` (currently no-op — `GrafeoDB::close` is wal-gated
+    ///    per P4-DEVIL M3; deferred to Phase 5 wal feature work).
     pub async fn shutdown(self) -> Result<()> {
-        unimplemented!("shutdown is Phase 5 scope")
+        let _ = self;
+        unimplemented!("P5-L2/L3: drain worker_handles + flush telemetry + close stores per architecture §4 Step D")
     }
 }
 
@@ -936,6 +1106,71 @@ impl GrafeoLoroAppBuilder {
         self
     }
 
+    /// Provide a pre-built metrics registry (P5-L1 Task 4).
+    ///
+    /// # Phase 5 Task 4 wiring (P5-L1)
+    ///
+    /// Stores the `Arc<MetricsRegistry>` into the builder's `metrics` slot.
+    /// `build()` threads `Some(Arc::clone(&metrics))` into
+    /// `SyncEngine::with_telemetry` + `GrafeoLoroApp::metrics`.
+    ///
+    /// # Contract (P5-L2 wires the body — already trivial field assignment)
+    ///
+    /// - Consumes `self`, returns `Self` with `self.metrics = Some(metrics)`.
+    /// - Idempotent over the slot.
+    /// - Caller responsibility: construct `MetricsRegistry::init(meter)` from
+    ///   `opentelemetry::global::meter("grafeo-loro")` BEFORE calling this
+    ///   setter. Devil Q14 — should `build()` auto-construct the registry if
+    ///   this slot is `None`? L1 leaves the decision open.
+    pub fn with_metrics(mut self, metrics: Arc<MetricsRegistry>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Provide a pre-built health probe (P5-L1 Task 3).
+    ///
+    /// # Phase 5 Task 3 wiring (P5-L1)
+    ///
+    /// Stores the `Arc<HealthProbe>` into the builder's `health` slot.
+    /// `build()` threads `Some(Arc::clone(&health))` into
+    /// `GrafeoLoroApp::health`.
+    ///
+    /// # Contract
+    ///
+    /// - Consumes `self`, returns `Self` with `self.health = Some(health)`.
+    /// - Idempotent over the slot.
+    /// - Caller responsibility: construct `HealthProbe::new(doc_clone,
+    ///   db_clone)` from clones of the `Arc<RwLock<LoroDoc>>` + `Arc<GrafeoDB>`
+    ///   that `build()` will create. This is awkward — caller must construct
+    ///   the doc + db BEFORE the builder. Devil Q16 — should `build()`
+    ///   construct `HealthProbe` internally after creating `loro_doc` +
+    ///   `grafeo_db`, taking only `last_sync_ts` initial value as a param?
+    pub fn with_health(mut self, health: Arc<HealthProbe>) -> Self {
+        self.health = Some(health);
+        self
+    }
+
+    /// Provide a pre-built shared tracer (P5-L1 Task 4).
+    ///
+    /// # Phase 5 Task 4 wiring (P5-L1)
+    ///
+    /// Stores the `SharedTracer` (alias for `Arc<BoxedTracer>`) into the
+    /// builder's `tracer` slot. `build()` threads `Some(Arc::clone(&tracer))`
+    /// into `SyncEngine::with_telemetry` + `GrafeoLoroApp::tracer`.
+    ///
+    /// # Contract
+    ///
+    /// - Consumes `self`, returns `Self` with `self.tracer = Some(tracer)`.
+    /// - Idempotent over the slot.
+    /// - Caller responsibility: construct
+    ///   `Arc::new(opentelemetry::global::tracer("grafeo-loro"))` BEFORE
+    ///   calling this setter. Devil Q17 — should `build()` auto-construct
+    ///   the tracer from `global::tracer(...)` if this slot is `None`?
+    pub fn with_tracer(mut self, tracer: SharedTracer) -> Self {
+        self.tracer = Some(tracer);
+        self
+    }
+
     /// Validate config and spawn the runtime.
     ///
     /// # Phase 4 Task 4 scope (P4T4-L2)
@@ -958,22 +1193,24 @@ impl GrafeoLoroAppBuilder {
     ///      (`grafeo-engine-0.5.42/src/database/mod.rs:267`).
     /// 3. **Init `LoroDoc`** — `LoroDoc::new()` (`loro-1.13.6/src/lib.rs:137`)
     ///    wrapped in `Arc<RwLock<LoroDoc>>` per `SyncEngine::new`'s signature.
-    /// 4. **Init `SyncEngine`** (P4-DEVIL Q7) —
-    ///    `SyncEngine::with_batch_config(grafeo_db, loro_doc, batch_max_size,
-    ///    batch_interval_ms)` (verified at
-    ///    `src/bridge/sync_engine.rs:170`) returns the engine + the two
+    /// 4. **Init `SyncEngine`** (P4-DEVIL Q7 + P5-L1 Task 4) —
+    ///    `SyncEngine::with_telemetry(grafeo_db, loro_doc, batch_max_size,
+    ///    batch_interval_ms, metrics, tracer)` (added P5-L1; replaces the
+    ///    prior `with_batch_config` call) returns the engine + the two
     ///    channel receivers. The `MutationBatcher` is owned by
-    ///    `SyncEngine::new_inner` (no separate init step).
+    ///    `SyncEngine::new_inner` (no separate init step). `metrics` +
+    ///    `tracer` are `Option` so test builds without telemetry configured
+    ///    pass `None`.
     /// 5. **Spawn tokio tasks** — `Arc::new(engine).clone().spawn_all(
-    ///    inbound_rx, outbound_rx).await` (verified at
-    ///    `src/bridge/sync_engine.rs:403`) — spawns the Loro subscriber
+    ///    inbound_rx, outbound_rx).await` — spawns the Loro subscriber
     ///    (`init_loro_subscriber` is called inside `spawn_all`) + inbound
     ///    worker + outbound worker + CDC poller. Returns the three
-    ///    `JoinHandle`s; the caller (orchestrator) is responsible for
-    ///    awaiting them on shutdown.
+    ///    `JoinHandle`s; P5-L1 CB-1 forward-compat preserves them in
+    ///    `worker_handles` for `GrafeoLoroApp::shutdown` to drain.
     /// 6. **Wrap into `GrafeoLoroApp`** —
-    ///    `GrafeoLoroApp::from_sync_engine_with_config(Arc::new(engine),
-    ///    ssot_mode, Some(storage), compression)` (P4-DEVIL M8).
+    ///    `GrafeoLoroApp::from_sync_engine_with_telemetry(Arc::new(engine),
+    ///    ssot_mode, Some(storage), compression, metrics, health, tracer,
+    ///    Some(worker_handles))` (P4-DEVIL M8 + P5-L1 Task 4).
     ///
     /// # Concurrency (P4-DEVIL M10)
     ///
@@ -1028,34 +1265,62 @@ impl GrafeoLoroAppBuilder {
         // 3. Init LoroDoc.
         let loro_doc = Arc::new(parking_lot::RwLock::new(loro::LoroDoc::new()));
 
-        // 4. Init SyncEngine (P4-DEVIL Q7 — with_batch_config threads builder
-        //    batch params into the MutationBatcher).
-        let (engine, inbound_rx, outbound_rx) = SyncEngine::with_batch_config(
+        // 4. Init SyncEngine (P4-DEVIL Q7 + P5-L1 Task 4 — with_telemetry
+        //    threads builder batch params + telemetry handles into the
+        //    MutationBatcher).
+        //
+        // TODO(P5-L2): if `self.metrics` / `self.tracer` are `None` AND
+        //   Devil Q14/Q17 ruling allows auto-construction, build them here
+        //   from `opentelemetry::global::meter("grafeo-loro")` + `global::
+        //   tracer("grafeo-loro")` respectively. For L1 we just pass through
+        //   whatever the builder has (Option so test builds without telemetry
+        //   configured remain `None`).
+        let (engine, inbound_rx, outbound_rx) = SyncEngine::with_telemetry(
             grafeo_db,
             loro_doc,
             self.batch_max_size,
             self.batch_interval_ms,
+            self.metrics.clone(),
+            self.tracer.clone(),
         );
         let engine = Arc::new(engine);
 
         // 5. Spawn tokio tasks (init_loro_subscriber is called inside
         //    spawn_all — subscriber is active when build() returns; hydrate()
         //    handles this via ORIGIN_LORO_BRIDGE per P4-DEVIL M10).
-        let _join_handles = engine.clone().spawn_all(inbound_rx, outbound_rx).await;
+        //
+        // P5-L1 CB-1 forward-compat: preserve the returned `Vec<JoinHandle<()>>`
+        // in `worker_handles` so `GrafeoLoroApp::shutdown` can drain workers
+        // in L2/L3 (P4-HUNT CB-1 — previously discarded as `_join_handles`).
+        let worker_handles = engine.clone().spawn_all(inbound_rx, outbound_rx).await;
+
+        // TODO(P5-L2): if `self.health` is `None` AND Devil Q16 ruling allows
+        //   auto-construction, build `HealthProbe::new(loro_doc.clone(),
+        //   grafeo_db.clone())` here. For L1 we just pass through `self.health`
+        //   (Option so test builds without telemetry remain `None`).
 
         tracing::info!(
             ssot_mode = ?self.ssot_mode,
             compression = ?self.compression,
+            metrics_configured = self.metrics.is_some(),
+            health_configured = self.health.is_some(),
+            tracer_configured = self.tracer.is_some(),
             "GrafeoLoroAppBuilder::build: runtime spawned"
         );
 
-        // 6. Wrap into GrafeoLoroApp (P4-DEVIL M8 — from_sync_engine_with_config
-        //    threads ssot_mode + storage + compression into the app struct).
-        Ok(GrafeoLoroApp::from_sync_engine_with_config(
+        // 6. Wrap into GrafeoLoroApp (P4-DEVIL M8 + P5-L1 Task 4 —
+        //    from_sync_engine_with_telemetry threads ssot_mode + storage +
+        //    compression + metrics + health + tracer + worker_handles into
+        //    the app struct).
+        Ok(GrafeoLoroApp::from_sync_engine_with_telemetry(
             engine,
             self.ssot_mode,
             Some(storage),
             self.compression,
+            self.metrics,
+            self.health,
+            self.tracer,
+            Some(worker_handles),
         ))
     }
 }

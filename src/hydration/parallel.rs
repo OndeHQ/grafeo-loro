@@ -15,6 +15,7 @@ use crate::bridge::grafeo_tx::BridgeMaps;
 use crate::constants::{DEFAULT_CHUNK_SIZE, ORIGIN_LORO_BRIDGE, ROOT_VERTICES};
 use crate::error::{GrafeoLoroError, Result};
 use crate::schema::vertex::VertexEntity;
+use crate::telemetry::{MetricsRegistry, SharedTracer};
 use crate::types::events::LoroOp;
 use crate::types::values::GraphValue;
 
@@ -37,7 +38,24 @@ use crate::types::values::GraphValue;
 /// # Idempotency assumption
 ///
 /// Caller guarantees `GrafeoDB` + `BridgeMaps` are cold. Re-running on a warm DB will create duplicate nodes (no upsert check). Phase 4 `hydrate()` enforces this.
-pub fn parallel_hydrate_grafeo(db: &Arc<GrafeoDB>, doc: &LoroDoc, maps: &BridgeMaps) -> Result<()> {
+pub fn parallel_hydrate_grafeo(
+    db: &Arc<GrafeoDB>,
+    doc: &LoroDoc,
+    maps: &BridgeMaps,
+    metrics: Option<&Arc<MetricsRegistry>>,
+    tracer: Option<&SharedTracer>,
+) -> Result<()> {
+    // P5-L1 Task 4 wiring contact points. L2 will (a) wrap the whole call
+    // in a `parallel_hydrate_grafeo` child span via `tracer` (architecture
+    // §23.2 tree row 1.3); (b) record `hydration_duration` histogram + emit
+    // a per-chunk `hydrate_chunk` span (§23.2 tree row 1.3.1). Both params
+    // are `Option` so tests / dev mode without telemetry can pass `None`.
+    let _ = (metrics, tracer);
+    // TODO(P5-L2): if let Some(t) = tracer {
+    //     let _span = t.as_ref().span_builder("parallel_hydrate_grafeo").start(t.as_ref());
+    // }
+    // TODO(P5-L2): let started = std::time::Instant::now();
+
     // 1. Extract vertex keys from Loro root map "V". `LoroDoc::get_map` returns
     //    an empty LoroMap if the key is absent (cold-boot empty-doc edge case).
     //    `LoroMap::keys` yields `InternalString` (`loro-1.13.6/src/lib.rs:2315`),

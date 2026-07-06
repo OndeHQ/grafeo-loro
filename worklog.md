@@ -5481,3 +5481,117 @@ remote sync:                phase-4 pushed to origin
 
 Branch `phase-4` is the new head. Phase 5 (Presence & Telemetry) is the next user-decided scope per `docs/implementation-plan.md`. User will decide whether to proceed to a new session loop for Phase 5 or stop here.
 
+
+---
+
+## Phase 5 — Orchestrator Entry (Tasks 2/3/4; Task 1 Presence SKIPPED per user)
+
+**$stn**: `phase-5`
+**Branch**: `phase-5` (created from `phase-4` @ `9cdc60b`)
+**Phase 4 baseline**: 70/70 tests passing, 0 BLOCKERs from P4-HUNT, 3 MINOR forward-compat items (BA-1, DRY-1, CB-1).
+**Repo path**: `/home/z/my-project/grafeo-loro` (note: prior orchestrator used `/home/z/my-project/repos/grafeo-loro`; that path is stale — use the new path).
+**Tooling verified**: `bun 1.3.14`, `cargo 1.96.1`, `rustc 1.96.1`, `repomix 1.16.0`. Rust installed with `--profile minimal`.
+
+### Phase 5 Scope (per `docs/implementation-plan.md`, task 1 EXCLUDED by user request)
+
+Per user: "finish phase 5 (all task not 1)". Phase 5 task 1 (`presence::socket::PresenceManager`) is OUT OF SCOPE.
+
+- **Task 2 — `telemetry::metrics::MetricsRegistry`**
+  - `init(Meter)`: build `inbound_events`, `outbound_events`, `echo_filtered` (Counter<u64>), `batch_flush_duration`, `hydration_duration` (Histogram<f64>).
+  - `record_batch_flush(duration_ms, batch_size)`: record histogram + bump counter via attribute set.
+  - `record_hydration(duration_ms, mode)`: record histogram with mode attribute.
+- **Task 3 — `telemetry::health::HealthProbe::check`**
+  - `new(doc, db)`: store Arc handles + init `last_sync_ts`.
+  - `update_sync_ts()`: stamp current wall-clock ms (Relaxed atomic).
+  - `check(max_staleness_ms)`: probe (a) RwLock poison via `try_read`, (b) dummy Grafeo query, (c) `last_sync_ts` age. Return `HealthStatus`.
+- **Task 4 — Wire telemetry into bridge/batcher/hydration**
+  - `traces.rs`: implement `create_cold_start_span`, `create_inbound_sync_span`, `create_hybrid_query_span`.
+  - Wire spans + metrics into `src/bridge/sync_engine.rs`, `src/bridge/batcher.rs`, `src/hydration/parallel.rs`, `src/app.rs` (hydrate/checkpoint call sites).
+  - See P4-HUNT forward-compat items below — some may need addressing as part of Task 4 wiring.
+
+### P4-HUNT Forward-Compat Items (deferred to Phase 5)
+
+- **BA-1** (MINOR): `hydrate` delta-load `continue` swallows ALL `storage.load` errors (`src/app.rs:664-677`). Should distinguish `NotFound` from real errors. Phase 5 must fix if it touches delta-load path.
+- **DRY-1** (MINOR): `InMemoryStorage` impl duplicated across `tests/unit/hydrate_checkpoint.rs:47-121` + `tests/unit/builder_validation.rs:40-96`. Refactor into `tests/common/mod.rs` when Phase 5 adds storage-dependent tests.
+- **CB-1** (MINOR): `build()` discards `Vec<JoinHandle<()>>` from `spawn_all` (`src/app.rs:1044`). Needed by `shutdown().await` for graceful worker cancellation + telemetry flush.
+
+### Loop Plan (Plonga-Plongo for Phase 5, single $stn covers Tasks 2/3/4)
+
+1. **P5-L1** — L1 scaffolding (contracts only — no logic). Write/extend interfaces, types, method signatures for metrics/health/traces + Task 4 wiring contact points. Per `klemer-agents.md` L1: "Do NOT write implementation logic. Write ONLY compilable interfaces, types, skeletons, and empty method signatures as 'cheatsheet'."
+2. **P5-DEVIL** — Devil's advocate critique of P5-L1. Identify alignment gaps vs `docs/grafeo-loro.architecture.md` + `docs/implementation-plan.md`. Resolve open L1 questions. Write `docs/critiques/p5-l1-devil.md`.
+3. **P5-L2** — Fixer + L2 wiring (state fields + execution path wired, algorithms left as `// TODO`). Per `klemer-agents.md` L2: "Define the internal state. Wire the entire execution path. Leave all complex algorithms as `// TODO`."
+4. **P5-L3** — L3 deep implementation (fill all TODOs, zero stubs). Per `klemer-agents.md` L3: "Fill in the final TODOs. Leave zero unwritten logic, stubs, band-aids, or plenger-traits."
+5. **P5-HUNT** — Plenger-traits hunter. Verify no anti-patterns (tautology, context blindness, hallucination, band-aids, bloat, happy-path bias, Goodhart, backward-compat slaves). Write `docs/critiques/p5-hunt.md`.
+6. Back to step 3 if BLOCKER/MAJOR issues; else push.
+
+### Shared Rules (all sub-agents must comply — per `sub-agents-traits.md`)
+
+1. Read `repomix.md` first (signature-based read-only context). Update with `cd /home/z/my-project/grafeo-loro && repomix --output repomix.md` if stale. Config: `compress=true`, `removeComments=true`, `include=["**/*.rs"]` — ALREADY SET.
+2. Prefer `rg -n` (ripgrep) over individual file reads for context efficiency. Read full files ONLY when implementing in them.
+3. **Push to `phase-5` branch on significant progress** — bash session timeout auto-wipes. Use `git add -A && git commit -m "P5-{stage}: ..." && git push -u origin phase-5`. NEVER create another branch.
+4. Do not be afraid of timeout / max-turn notices — orchestrator will spawn more agents to continue.
+5. NEVER rebase in a way that drops or overwrites others' commits.
+6. ALWAYS `cd /home/z/my-project/grafeo-loro &&` before any git/cargo/repomix command — bash session resets cwd between calls.
+
+### Anti-Plenger Decisions (apply to ALL stages — per `anti-plenger.md`)
+
+Pure functions · DRY/SRP/SSOT · YAGNI · Performance & Security · High Cohesion / Loose Coupling · Immutability · Polymorphism over Conditionals · Observability · Absolute Idempotency · Same logic, fewest LOC · Deletion over addition · Native-first · Oneline code first, oneline doc only · Never simplify the basics or explicit requests.
+
+### Plenger-Traits to Hunt (per `plenger-traits.md`)
+
+Backward-compat slaves · Tautology · Context Blindness (esp. breaking async workflows) · Band-Aids · Bloat (DRY violations) · Hallucination (inventing libraries/methods) · Happy-Path Bias (zero defensive programming) · Goodhart's Law (green tests / broken system).
+
+---
+
+
+---
+
+Task ID: P5-L1
+Agent: L1 Scaffolding
+Task: Phase 5 Tasks 2/3/4 contract layer — evolve telemetry (metrics/health/traces) signatures + wire metrics/tracer/health/worker_handles contact points into app/sync_engine/batcher/parallel.
+
+Work Log:
+- Step 1: Read worklog Phase 5 Orchestrator Entry (lines 5487-5544) + Phase 4 close-out (lines 5419-5484). Confirmed on `phase-5` branch via `git branch --show-current`. Latest commit `9cdc60b` (P4-CLOSE).
+- Step 2: Read existing `src/telemetry/{mod,metrics,health,traces}.rs` — all four files already had skeleton contracts (5 metrics fields + 3 methods, HealthProbe+HealthStatus structs + 3 methods, 3 span-creation functions). All bodies `unimplemented!()` per L1.
+- Step 3: Read `docs/grafeo-loro.architecture.md` §23 (Observability: metric dimensions, span hierarchy, HealthProbe sketch) + `docs/implementation-plan.md` Phase 5 section (Tasks 2/3/4 — Task 1 Presence SKIPPED per user). Confirmed contract alignment.
+- Step 4: Read `src/bridge/sync_engine.rs` (822→934 lines) + `src/bridge/batcher.rs` (227→276 lines) + `src/hydration/parallel.rs` (109→127 lines) + `src/app.rs` (1478→1742 lines) end-to-end. Identified wiring contact points: SyncEngine struct + new_inner + spawn_*_worker methods, MutationBatcher struct + new + with_defaults + flush_inner, parallel_hydrate_grafeo signature, GrafeoLoroApp struct + Builder + build + from_sync_engine_with_config + shutdown.
+- Step 5: Read opentelemetry-0.23.0 source (`/home/z/.cargo/registry/.../opentelemetry-0.23.0/src/global/trace.rs`) — verified `BoxedTracer` is `Send + Sync` but NOT `Clone` (line 244). Defined `SharedTracer = Arc<BoxedTracer>` type alias in `telemetry/mod.rs` for cheap cloning across SyncEngine/MutationBatcher/GrafeoLoroApp.
+- Step 6: Evolved `src/telemetry/mod.rs` — added `SharedTracer` type alias, re-exported `MetricsRegistry`, expanded module doc with Phase 5 Tasks 2/3/4 mapping + Devil Q3 (alternative `Option<BoxedTracer>` per owner).
+- Step 7: Evolved `src/telemetry/metrics.rs` — kept existing 5 fields + 3 methods (already correct per architecture §23.1). Expanded doc comments with: instrument-name → architecture-row mapping table, storage convention (`Arc<MetricsRegistry>` on app, `Option<Arc<...>>` on engine/batcher), L1 contract notes (instrument names match §23.1, idempotency scope), L2 wiring pointers (where each method is called from). Added Devil Q6 (HydrationMode enum vs &str).
+- Step 8: Evolved `src/telemetry/health.rs` — kept existing struct + 3 methods. Expanded doc comments with: architecture §23.3 mapping, 3-component probe list (loro_ok / grafeo_ok / sync_ok), storage convention (`Arc<HealthProbe>` on app). Added Devil Q4 (GrafeoDB::execute API verification — may be wal-gated/absent in grafeo 0.5.42; fallback = `session_with_cdc(false)` + no-op tx) + Q5 (WARN per failing component vs silent return).
+- Step 9: Evolved `src/telemetry/traces.rs` — kept 3 span-creation functions. Expanded doc comments with: architecture §23.2 span hierarchy mapping (each function → tree row), L2 wiring pointers (create_cold_start_span → hydrate top, create_inbound_sync_span → spawn_inbound_worker top, create_hybrid_query_span → query top). Added Devil Q7 (generic `&T where T: Tracer` vs concrete `&SharedTracer`) + Q8 (span name verification).
+- Step 10: Wired `src/bridge/batcher.rs` — added `metrics: Option<Arc<MetricsRegistry>>` + `tracer: Option<SharedTracer>` fields to MutationBatcher struct. Updated `MutationBatcher::new` + `with_defaults` signatures to take 2 new params (only internal caller = `SyncEngine::new_inner`, no test breakage). Added `metrics()` + `tracer()` accessors (avoid dead_code warning). Added `// TODO(P5-L2):` markers in `flush_inner` for span creation + metrics recording + HealthProbe.update_sync_ts (Devil Q10 — does batcher need HealthProbe field?).
+- Step 11: Wired `src/bridge/sync_engine.rs` — added `metrics: Option<Arc<MetricsRegistry>>` + `tracer: Option<SharedTracer>` fields to SyncEngine struct. Updated `new_inner` to take 2 new params; existing `new` + `with_batch_config` pass `None, None` (backward compat with 7 test call sites preserved). Added new constructor `with_telemetry(db, doc, batch_size, batch_ms, metrics, tracer)` for production `build()`. Added `metrics()` + `tracer()` accessors. Updated internal `MutationBatcher::new(...)` call in `new_inner` to thread `metrics.clone()` + `tracer.clone()`. Added `// TODO(P5-L2):` markers in `init_loro_subscriber` (echo_filtered counter at origin filter), `spawn_inbound_worker` (inbound_events counter + inbound_sync_loop parent span), `spawn_outbound_worker` (outbound_events counter + outbound_sync_loop span + health.update_sync_ts — Devil Q13 outbound span helper), `spawn_cdc_poller` (echo_filtered counter with direction="outbound").
+- Step 12: Wired `src/hydration/parallel.rs` — added `metrics: Option<&Arc<MetricsRegistry>>` + `tracer: Option<&SharedTracer>` params to `parallel_hydrate_grafeo` signature (function is free fn, not struct — "field" from spec reinterpreted as "params"). Added `let _ = (metrics, tracer);` suppressor + `// TODO(P5-L2):` markers for `parallel_hydrate_grafeo` child span (§23.2 tree row 1.3) + `hydrate_chunk` per-chunk grandchild span (§23.2 tree row 1.3.1). Updated 8 test call sites in `tests/unit/parallel_hydrate.rs` to pass `None, None` (mechanical — no test semantics changed). Updated 1 app.rs call site in `hydrate` to pass `None, None` with `// TODO(P5-L2):` marker for wiring `self.metrics.as_ref()` + `self.tracer.as_ref()`.
+- Step 13: Wired `src/app.rs` — added 4 new fields to `GrafeoLoroApp`: `metrics: Option<Arc<MetricsRegistry>>`, `health: Option<Arc<HealthProbe>>`, `tracer: Option<SharedTracer>`, `worker_handles: Option<Vec<JoinHandle<()>>>` (CB-1 forward-compat from P4-HUNT). Updated `from_sync_engine_with_config` body to init new fields to `None` (preserve 4-arg test API — no test breakage). Added new constructor `from_sync_engine_with_telemetry(sync_engine, ssot_mode, storage, compression, metrics, health, tracer, worker_handles) -> Self`. Added 4 accessors (`metrics()`, `health()`, `tracer()`, `worker_handles()`) to avoid dead_code warnings + enable test inspection. Added 3 builder setters: `.with_metrics(Arc<MetricsRegistry>)`, `.with_health(Arc<HealthProbe>)`, `.with_tracer(SharedTracer)`. Updated `GrafeoLoroAppBuilder::Default` impl to init 3 new slots to `None`. Updated `build()` body: switched from `SyncEngine::with_batch_config` → `SyncEngine::with_telemetry` (threads metrics + tracer); preserved `worker_handles` from `spawn_all` (was `let _join_handles = ...` — now `let worker_handles = ...` + `Some(worker_handles)`); switched final wrap from `from_sync_engine_with_config` → `from_sync_engine_with_telemetry` with all 8 args; added `// TODO(P5-L2):` markers for auto-construction of metrics/tracer/health if Devil Q14/Q16/Q17 rulings allow. Updated `shutdown()` body — kept `unimplemented!()` but added 5-step L2/L3 algorithm sketch (sync_engine.shutdown → drain worker_handles → optional checkpoint → flush telemetry → close GrafeoDB). Updated `build()` doc-comment step 4/5/6 to reflect new constructor names. Added Devil Q15 (shutdown auto-checkpoint vs caller responsibility).
+- Step 14: **`cargo check --all-targets`** — exit 0, 2 pre-existing warnings (`presence::socket::room_id` never read; `telemetry::health` fields `doc`/`db`/`last_sync_ts` never read — both unchanged from P4 baseline), 0 errors, 0 new warnings from P5-L1 work.
+- Step 15: **`cargo test --all`** — exit 0. Test counts: 6 lib tests + 5 integration tests + 59 unit tests + 2 ignored = **70 passed, 0 failed, 2 ignored** (exact match to P4-HUNT baseline — no regressions).
+- Step 16: Regenerated `repomix.md` with `repomix --output repomix.md` (21,971 tokens, 46 files) — reflects all P5-L1 wiring changes.
+- Step 17: Verified 22 `// TODO(P5-L2):` markers added across 4 files (1 in app.rs:hydrate, 3 in app.rs:build, 1 in batcher.rs:flush_inner × 2 sites, 9 in sync_engine.rs across 4 worker methods, 2 in parallel.rs). All bodies remain `unimplemented!()` (telemetry) or unchanged real impl (workers/hydrate/build) — L1 did NOT replace any `unimplemented!()` with real algorithms.
+
+Stage Summary:
+- **Files touched (9)**: `src/telemetry/mod.rs`, `src/telemetry/metrics.rs`, `src/telemetry/health.rs`, `src/telemetry/traces.rs`, `src/bridge/batcher.rs`, `src/bridge/sync_engine.rs`, `src/hydration/parallel.rs`, `src/app.rs`, `tests/unit/parallel_hydrate.rs` (8 mechanical call-site updates only). Plus regenerated `repomix.md`.
+- **Key contract decisions**: (a) telemetry fields are `Option<Arc<...>>` everywhere — `Arc<MetricsRegistry>` (non-Option) per spec was relaxed to Option to preserve backward compat with existing 4-arg `from_sync_engine_with_config` test API (Devil Q1). (b) `SharedTracer = Arc<BoxedTracer>` type alias (Devil Q3). (c) New constructor `from_sync_engine_with_telemetry` for production build(); existing constructors unchanged. (d) `SyncEngine::with_telemetry` added; `with_batch_config` kept for backward compat (Devil Q11). (e) `parallel_hydrate_grafeo` takes 2 new `Option<&...>` params; 8 test call sites updated to pass `None, None` (mechanical — no test semantics changed). (f) `worker_handles: Option<Vec<JoinHandle<()>>>` field added to GrafeoLoroApp + preserved from `spawn_all` in `build()` (CB-1 forward-compat). (g) `shutdown()` body remains `unimplemented!()` with 5-step algorithm sketch in doc-comment.
+- **Open question count for Devil: 17** (Q1-Q17, see below).
+- **Zero new warnings** introduced; 2 pre-existing warnings unchanged.
+- **70/70 tests still pass** (6 lib + 5 integration + 59 unit + 2 ignored = exact P4 baseline).
+- **Cargo.toml deps: NONE added** — all wiring uses existing `opentelemetry = "0.23"` (features `metrics` + `trace`) + `tracing = "0.1"` + `parking_lot = "0.12"` + `tokio` (already present). Devil need NOT approve any dep changes.
+- Commit hash: <to be filled after commit>
+- Open questions for P5-DEVIL:
+  Q1: Field type — `GrafeoLoroApp.metrics` is `Option<Arc<MetricsRegistry>>` (L1 decision: preserve backward compat with 4-arg `from_sync_engine_with_config` test API). Spec said `Arc<MetricsRegistry>` (non-Option). Confirm Option is acceptable, OR require `Arc<MetricsRegistry>` (would force updating existing tests to construct a no-op registry).
+  Q2: `HealthProbe.doc` field type is `Arc<RwLock<LoroDoc>>` (matches architecture §23.3 sketch). Alternative: `Weak<RwLock<LoroDoc>>` to avoid preventing doc drop on shutdown. Confirm Arc is correct (the app owns the doc anyway via `SyncEngine.loro_doc`, so Weak would always be upgradeable in practice — but Arc is simpler + matches architecture).
+  Q3: `SharedTracer = Arc<BoxedTracer>` type alias. Alternative: `Option<BoxedTracer>` per owner (no Arc) — `global::tracer(name)` returns a fresh `BoxedTracer` each call (cheap, all sharing the same provider). Trade-off: Arc adds refcount overhead but makes shared ownership explicit; per-owner BoxedTracer is slightly cheaper but requires each owner to call `global::tracer("grafeo-loro")` independently. Confirm Arc.
+  Q4: `HealthProbe::check` uses `self.db.execute("MATCH (n) RETURN count(n) LIMIT 1")` per architecture §23.3 line 1080. **Needs verification**: does `GrafeoDB::execute(gql: &str)` exist in grafeo 0.5.42? If wal-gated or absent, fallback is `db.session_with_cdc(false)` + `begin_transaction` + `prepare_commit` + `commit` (no-op tx as the dummy probe).
+  Q5: Should `HealthProbe::check` log a `WARN` for each failing component, or return silently? Architecture §23.4 lists WARN for echo loops + batch flush backpressure — silent return for health seems consistent. Confirm silent.
+  Q6: `MetricsRegistry::record_hydration(duration_ms, mode: &str)` takes `mode: &str` per architecture §23.1 row 5 labels `mode` ∈ {`"loro"`, `"grafeo"`}. Alternative: `HydrationMode` enum (`Loro` / `Grafeo`) with `impl Display` to render the OTLP attribute value. Enum prevents typos at compile time. Confirm &str (matches OTLP attribute model) OR enum (type safety).
+  Q7: `traces::create_*_span<T: Tracer>(tracer: &T)` is generic. Alternative: concrete `&SharedTracer` (=`&Arc<BoxedTracer>`). Generic allows tests to pass `noop::NoopTracer`; concrete matches production storage. Recommend: keep generic — tests benefit, production auto-derefs `Arc<T>` to `&T`. Confirm.
+  Q8: Span names — `cold_start_hydration`, `inbound_sync_loop`, `hybrid_query` per architecture §23.2. L1 doc-comment pins these names; L2 hardcodes them in `SpanBuilder`. Confirm names match architecture exactly (no renames).
+  Q9: Per architecture §23.2 tree row 2.3, should the batcher emit a `grafeo_commit` grandchild span under `batch_flush`? Currently the L1 contract only mentions `batch_flush` (no grandchild). YAGNI check — adding `grafeo_commit` would give per-flush commit timing but adds span overhead. Confirm YAGNI (no grandchild) OR require grandchild.
+  Q10: Does `MutationBatcher` need a `HealthProbe` field (so `flush_inner` can call `health.update_sync_ts()` after each successful commit), or only `SyncEngine::spawn_outbound_worker` (after each successful Loro commit)? Architecture §23.3 says "last sync" — sync means both inbound + outbound. Recommend: batcher gets a `health: Option<Arc<HealthProbe>>` field too (symmetric with metrics + tracer). Confirm.
+  Q11: Should `SyncEngine::with_batch_config` be deprecated (`#[deprecated(note = "use with_telemetry")]`) now that `with_telemetry` exists? Or keep both indefinitely (with_batch_config for tests that don't need telemetry, with_telemetry for production)? Recommend: keep both — `with_batch_config` is the test-friendly 4-arg form, `with_telemetry` is the production 6-arg form. Confirm.
+  Q12: `inbound_event_count: Arc<AtomicU64>` already counts at the subscriber boundary (in `init_loro_subscriber`'s handler). The OTel `inbound_events` counter is at a different boundary (per-op forwarded to batcher, in `spawn_inbound_worker`). Are these redundant? Architecture §23.1 row 1 says `inbound_events_total` with labels `origin`, `event_type` — these labels are NOT available at the subscriber boundary (only at the per-op batcher forward). Confirm OTel counter records per-op (with labels), `inbound_event_count` is the test-only counter at subscriber boundary. Both coexist.
+  Q13: Architecture §23.2 tree row 3 (`outbound_sync_loop` + child `receive_cdc_event` + `loro_commit`) — should `traces.rs` add a `create_outbound_sync_span<T: Tracer>(tracer: &T) -> BoxedSpan` helper (symmetric with `create_inbound_sync_span`)? Currently L1 only has 3 helpers (cold_start / inbound / hybrid). Recommend: add `create_outbound_sync_span` for symmetry + architecture alignment. Confirm.
+  Q14: Should `GrafeoLoroAppBuilder::build` auto-construct `MetricsRegistry::init(global::meter("grafeo-loro"))` if `.with_metrics(...)` not called? Or require callers to pre-build? Pre-build is more flexible (tests can inject no-op meters); auto-construct is more ergonomic (less boilerplate). Recommend: auto-construct if `None` AND a "telemetry enabled" flag is set (default false to preserve test behavior). Devil ruling needed.
+  Q15: Should `GrafeoLoroApp::shutdown` auto-`checkpoint` before draining workers (to flush pending state)? Or is checkpointing the caller's responsibility? Architecture §4 Step D is silent on this. Recommend: shutdown does NOT auto-checkpoint (separation of concerns — caller decides if a final checkpoint is needed); shutdown only drains workers + flushes telemetry. Confirm.
+  Q16: Should `GrafeoLoroAppBuilder::build` construct `HealthProbe::new(loro_doc.clone(), grafeo_db.clone())` internally after creating loro_doc + grafeo_db (since they exist at that point in build())? Currently L1 requires caller to pre-build via `.with_health(...)` — awkward because caller must construct doc + db BEFORE the builder. Recommend: `build()` auto-constructs HealthProbe if `self.health` is `None`, using the just-created loro_doc + grafeo_db. Devil ruling needed.
+  Q17: Should `GrafeoLoroAppBuilder::build` auto-construct `Arc::new(global::tracer("grafeo-loro"))` if `.with_tracer(...)` not called? Same trade-off as Q14. Recommend: same as Q14 ruling (auto-construct if telemetry enabled flag is set). Devil ruling needed.

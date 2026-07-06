@@ -130,7 +130,7 @@ fn parallel_hydrate_empty_doc_no_op() {
     let doc = LoroDoc::new();
     let maps = BridgeMaps::new();
 
-    let result = parallel_hydrate_grafeo(&db, &doc, &maps);
+    let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
     assert!(result.is_ok(), "empty-doc hydrate should be Ok, got {result:?}");
     assert_eq!(db.node_count(), 0, "no nodes should exist after empty hydrate");
     assert!(
@@ -159,7 +159,7 @@ fn parallel_hydrate_single_vertex_roundtrip() {
     let loro_key = "V/1";
     reconcile_vertex_into_loro(&doc, loro_key, &entity);
 
-    let result = parallel_hydrate_grafeo(&db, &doc, &maps);
+    let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
     assert!(result.is_ok(), "single-vertex hydrate should be Ok, got {result:?}");
 
     assert_eq!(db.node_count(), 1, "exactly 1 node should exist");
@@ -198,7 +198,7 @@ fn parallel_hydrate_multi_chunk_respects_chunk_size() {
         reconcile_vertex_into_loro(&doc, &key, &entity);
     }
 
-    let result = parallel_hydrate_grafeo(&db, &doc, &maps);
+    let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
     assert!(result.is_ok(), "300-vertex hydrate should be Ok, got {result:?}");
 
     assert_eq!(
@@ -237,7 +237,7 @@ fn parallel_hydrate_preserves_property_types() {
     let loro_key = "V/typed";
     reconcile_vertex_into_loro(&doc, loro_key, &entity);
 
-    let result = parallel_hydrate_grafeo(&db, &doc, &maps);
+    let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
     assert!(result.is_ok(), "typed-props hydrate should be Ok, got {result:?}");
 
     let node_id = *maps
@@ -292,7 +292,7 @@ fn parallel_hydrate_rejects_non_map_container() {
         .expect("ensure_mergeable_list");
     doc.commit();
 
-    let err = parallel_hydrate_grafeo(&db, &doc, &maps).expect_err("expected Bridge error");
+    let err = parallel_hydrate_grafeo(&db, &doc, &maps, None, None).expect_err("expected Bridge error");
     assert!(
         matches!(err, grafeo_loro::error::GrafeoLoroError::Bridge(_)),
         "expected Bridge error for malformed vertex shape, got {err:?}"
@@ -331,7 +331,7 @@ fn parallel_hydrate_populates_bridge_maps() {
         reconcile_vertex_into_loro(&doc, key, &entity);
     }
 
-    let result = parallel_hydrate_grafeo(&db, &doc, &maps);
+    let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
     assert!(result.is_ok(), "hydrate should succeed, got {result:?}");
 
     // Forward map (loro_key → NodeId) + inverse map (NodeId → loro_key) must
@@ -402,7 +402,7 @@ fn parallel_hydrate_10k_nodes_under_500ms() {
     // Time ONLY the hydration call (per HUNT C1: spec gate measures hydration,
     // not Loro doc fixture setup). `--release` is required for the spec gate.
     let start = std::time::Instant::now();
-    let result = parallel_hydrate_grafeo(&db, &doc, &maps);
+    let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "10k hydrate should succeed, got {result:?}");
@@ -436,7 +436,7 @@ fn parallel_hydrate_vertex_with_no_properties() {
     let loro_key = "V/empty";
     reconcile_vertex_into_loro(&doc, loro_key, &entity);
 
-    let result = parallel_hydrate_grafeo(&db, &doc, &maps);
+    let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
     assert!(result.is_ok(), "empty-props hydrate should be Ok, got {result:?}");
 
     assert_eq!(db.node_count(), 1, "exactly 1 node should exist");
