@@ -1,5 +1,7 @@
 use std::sync::Arc;
+use std::sync::Once;
 use grafeo::GrafeoDB;
+use tracing::warn;
 use crate::types::ids::NodeId;
 use crate::error::Result;
 use crate::constants::DEFAULT_EMBEDDING_DIM;
@@ -31,47 +33,41 @@ impl VectorOffloadManager {
     }
 }
 
-/// Local ONNX inference stub. Phase 3 Task 3 owns ONLY the contract — body is
-/// `unimplemented!()` until L3. Real ONNX wiring lands via
-/// `grafeo_engine::embedding::OnnxEmbeddingModel` (verified at
-/// `grafeo-engine-0.5.42/src/embedding/mod.rs:39` `trait EmbeddingModel` with
-/// `fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>` and
-/// `fn dimensions(&self) -> usize`; preset `MiniLmL6v2` is 384 dims per
-/// `embedding/config.rs:18`).
-///
-/// # Contract (L3 implements)
-///
-/// - **Deterministic** — same `text` MUST yield byte-identical `Vec<f32>`
-///   across calls. L3 algorithm: fold `text.bytes()` into a `u64` seed via
-///   `wrapping_mul(31).wrapping_add(b as u64)`, seed a `SplitMix64`/`ChaCha8`
-///   PRNG, emit `DEFAULT_EMBEDDING_DIM` `f32` samples in `[0.0, 1.0)`.
-/// - **Input-sensitive** — different `text` MUST yield different `Vec<f32>`
-///   (collision-resistant within PRNG seed space).
-/// - **Dimension** — output length is always `DEFAULT_EMBEDDING_DIM` (384),
-///   matching `all-MiniLM-L6-v2` so L3 can swap the dummy for real ONNX
-///   without resizing downstream Grafeo HNSW state.
-/// - **Warning** — emits `tracing::warn!` with message
-///   `"ONNX not integrated; returning deterministic dummy embedding"` exactly
-///   ONCE per process via `std::sync::Once` (informational, not actionable —
-///   anti-plenger #8 Observability vs #10 fewest-LOC tension resolved in favour
-///   of once-guard to avoid log spam under batch embedding loops).
-/// - **Sync** — no I/O, no `await`. Real ONNX `EmbeddingModel::embed` is also
-///   sync (`grafeo-engine-0.5.42/src/embedding/mod.rs:46`); if Task 4 needs it
-///   in an async context, it will `tokio::task::spawn_blocking`.
-/// - **Infallible stub** — the dummy never fails, but the signature is
-///   `Result<Vec<f32>>` so future real-ONNX wiring (which CAN fail on model
-///   load / tokenize / infer) does NOT break the call site (anti-plenger #14
-///   never simplify basics; `GrafeoLoroError` reuses existing variants —
-///   `Config(String)` for model-not-found, `Bridge(String)` for infer faults).
-/// - **Empty input** — `""` MUST still produce a deterministic vector (folds
-///   to the seed's zero-state, not a panic).
+/// Module-level once-guard for the ONNX stub warning (DEVIL NIT 1 + Q2:
+/// module-top placement is marginally preferred — grep-findable; L3 may move
+/// into the function body if preferred — both compile identically).
+static ONNX_WARN_ONCE: Once = Once::new();
+
+/// Deterministic dummy embedding generator (ONNX stub). Returns a
+/// `DEFAULT_EMBEDDING_DIM`-dimensional vector derived deterministically from
+/// `text` (same input → byte-identical output; empty `""` → valid vector).
+/// Logs `tracing::warn!("ONNX not integrated; returning deterministic dummy
+/// embedding")` once per process via `std::sync::Once`. Real ONNX lands via
+/// `grafeo_engine::embedding::OnnxEmbeddingModel` (Phase 6).
 ///
 /// # Errors
 ///
-/// Stub never returns `Err`. Real ONNX returns `Err` on tokenize/infer failure
-/// (routed via `GrafeoLoroError::Bridge` or `Config` — L3 decides; no new
-/// variant added at L1 per anti-plenger #5 Bloat).
+/// Stub never returns `Err`; real ONNX can fail (tokenize/infer/model-load),
+/// routed via existing `GrafeoLoroError::Config`/`Bridge` variants (no new
+/// variant — anti-plenger #5 Bloat).
 pub fn generate_local_embedding(text: &str) -> Result<Vec<f32>> {
+    ONNX_WARN_ONCE.call_once(|| {
+        warn!("ONNX not integrated; returning deterministic dummy embedding");
+    });
+    // TODO(L3): deterministic dummy algorithm (DEVIL Q5 + L1 decision 3):
+    //   1. Fold text bytes into a u64 seed:
+    //      `text.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))`
+    //   2. Seed a hand-rolled SplitMix64 PRNG (~10 LOC, no `rand` dep).
+    //      Reference: https://prng.di.unimi.it/splitmix64.c
+    //      grafeo-engine has a `MockEmbeddingModel` at
+    //      `grafeo-engine-0.5.42/src/embedding/mod.rs:62-93` with a similar
+    //      fold-seed-derive pattern (`#[cfg(test)]`-private, algorithm
+    //      reference only — NOT reusable from grafeo-loro).
+    //   3. Emit `DEFAULT_EMBEDDING_DIM` f32 samples in `[0.0, 1.0)` via
+    //      `(next_u64() >> 11) as f32 / (1u64 << 53) as f32`.
+    //   4. Return `Ok(vec![...])`.
+    //   Verify: same `text` → byte-identical `Vec<f32>`; empty `""` → valid
+    //   `DEFAULT_EMBEDDING_DIM`-length vector (PRNG zero-seed must not panic).
     let _ = (text, DEFAULT_EMBEDDING_DIM);
-    unimplemented!()
+    todo!("L3: deterministic dummy embedding via fold-seed-SplitMix64")
 }

@@ -113,10 +113,16 @@ impl GrafeoLoroApp {
         unimplemented!("update_text is Phase 3 scope")
     }
 
-    /// Regenerate the embedding vector for a vertex's text field.
+    /// Regenerate the embedding vector for a vertex's text field. App-level
+    /// wrapper: reads text from Loro, then delegates to
+    /// `VectorOffloadManager::handle_text_update` (Task 4) which calls
+    /// `generate_local_embedding` (Task 3). NOT Task 3 scope (Task 3 owns only
+    /// the leaf `generate_local_embedding` stub); NOT Task 4 scope (Task 4 owns
+    /// `VectorOffloadManager::handle_text_update` + `new`). This is a separate
+    /// app-facade concern that composes both — Phase 4+ scope (P3T3-DEVIL M2).
     pub async fn generate_embedding(&self, node_id: NodeId, field: &str) -> Result<()> {
         let _ = (node_id, field);
-        unimplemented!("generate_embedding is Phase 3 scope")
+        unimplemented!("generate_embedding is Phase 4+ scope (depends on Task 4's VectorOffloadManager::handle_text_update)")
     }
 
     /// Export a shallow snapshot and persist via the storage backend.

@@ -775,38 +775,65 @@ Grafeo stores vector embeddings as `Value::Vector(Arc<[f32]>)` natively. **Never
 ```rust
 use std::sync::Arc;
 use grafeo::{GrafeoDB, Value as GValue};
+use grafeo_loro::types::ids::NodeId;
+use grafeo_loro::error::Result;
+use grafeo_loro::constants::DEFAULT_EMBEDDING_DIM;
 
 pub struct VectorOffloadManager {
     db: Arc<GrafeoDB>,
 }
 
 impl VectorOffloadManager {
-    /// Detects updated text and generates local-only embeddings
-    pub async fn handle_text_update(&self, node_id: u64, text: &str) {
-        // 1. Generate local float vector (ONNX / API)
-        let embedding_vector: Vec<f32> = generate_local_embedding(text).await;
+    /// Detects updated text and generates local-only embeddings. Writes the
+    /// resulting vector directly to Grafeo (never to Loro). Task 4 owns the
+    /// body — calls `generate_local_embedding`, then upserts via Session +
+    /// PreparedCommit.
+    pub async fn handle_text_update(&self, node_id: NodeId, text: &str) -> Result<()> {
+        // 1. Generate local float vector (deterministic dummy until ONNX lands).
+        let embedding_vector: Vec<f32> = generate_local_embedding(text)?;
 
         // 2. Insert directly into Grafeo column and update HNSW index
         // (Illustrative — actual grafeo 0.5.42 API uses Session + PreparedCommit.)
         let mut session = self.db.session_with_cdc(true);
-        session.begin_transaction().unwrap();
+        session.begin_transaction()?;
         session.set_node_property(
             grafeo::NodeId(node_id),
             "embedding",
             GValue::Vector(Arc::from(embedding_vector)),
-        ).unwrap();
-        let mut prepared = session.prepare_commit().unwrap();
+        )?;
+        let mut prepared = session.prepare_commit()?;
         prepared.set_metadata("origin", "loro-bridge"); // advisory only
-        let _epoch = prepared.commit().unwrap();
+        let _epoch = prepared.commit()?;
         // Grafeo rebuilds local HNSW index incrementally on commit.
+        Ok(())
     }
 }
 
-async fn generate_local_embedding(_text: &str) -> Vec<f32> {
-    // Local ONNX inference pipeline (e.g., via tract or ort crate)
-    vec![0.15, 0.72, -0.05, 0.33] // Placeholder
+/// Deterministic dummy embedding generator (ONNX stub). Returns a
+/// `DEFAULT_EMBEDDING_DIM`-dimensional vector derived deterministically from
+/// `text` (same input → byte-identical output; empty `""` → valid vector).
+/// Logs `tracing::warn!("ONNX not integrated; returning deterministic dummy
+/// embedding")` once per process via `std::sync::Once`. Real ONNX lands via
+/// `grafeo_engine::embedding::OnnxEmbeddingModel` (Phase 6).
+pub fn generate_local_embedding(text: &str) -> Result<Vec<f32>> {
+    // TODO(L3): deterministic dummy algorithm — fold text bytes → u64 seed →
+    // hand-rolled SplitMix64 PRNG → DEFAULT_EMBEDDING_DIM f32 samples in [0,1).
+    todo!("L3: deterministic dummy embedding via fold-seed-SplitMix64")
 }
 ```
+
+### ONNX Stub Contract (Phase 3 Task 3)
+
+Until real ONNX integration lands (Phase 6 hardening), `generate_local_embedding` is a deterministic dummy:
+
+- **Dimension SSOT**: `crate::constants::DEFAULT_EMBEDDING_DIM: usize = 384` (`src/constants.rs:44`). Value matches `sentence-transformers/all-MiniLM-L6-v2` preset (`grafeo-engine-0.5.42/src/embedding/config.rs:18` `expected_dimensions: 384`). Forward-compatible across `MiniLmL12-v2` and `bge-small-en-v1.5` presets (also 384) — no HNSW index resize when Task 4 / Phase 5 swaps presets.
+- **Determinism**: same `text` MUST yield byte-identical `Vec<f32>` across calls (anti-plenger #9 Absolute Idempotency). L3 algorithm: fold `text.bytes()` into a `u64` seed, seed a hand-rolled `SplitMix64` PRNG (~10 LOC, no `rand` dep — DEVIL Q5), emit `DEFAULT_EMBEDDING_DIM` `f32` samples in `[0.0, 1.0)`.
+- **Warning log**: emits `tracing::warn!("ONNX not integrated; returning deterministic dummy embedding")` exactly ONCE per process via `std::sync::Once` (anti-plenger #8 Observability vs #10 fewest-LOC — once-guard prevents log-spam under batch embedding loops in Task 4). Once-guard placement (module-top vs function-body) is L3's call (NIT 1).
+- **Sync, fallible**: `pub fn(&str) -> Result<Vec<f32>>` — no `async` (real ONNX `EmbeddingModel::embed` is sync at `grafeo-engine-0.5.42/src/embedding/mod.rs:47`); `Result`-wrapped for future ONNX-fail safety (anti-plenger #14 never simplify basics — real ONNX can fail on tokenize/infer/model-load; routing via existing `GrafeoLoroError::Config`/`Bridge` variants, no new variant).
+- **Empty input**: `""` MUST still produce a valid `DEFAULT_EMBEDDING_DIM`-length vector (fold-seed of empty byte sequence → PRNG zero-state; no panic).
+- **Re-export**: `pub use hydration::vector::generate_local_embedding;` at `src/lib.rs` exposes the stub at the crate root for external visibility (matches P3T1-L1 m3 + P3T2-L2 m1 precedent).
+
+Real ONNX wiring (Phase 6) uses `grafeo_engine::embedding::{EmbeddingModel, OnnxEmbeddingModel}` (`grafeo-engine-0.5.42/src/embedding/mod.rs:39` `pub trait EmbeddingModel: Send + Sync` — sync; `mod.rs:47` `fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>` — sync, batched, fallible; `mod.rs:50` `fn dimensions(&self) -> usize`). grafeo-engine also ships a `MockEmbeddingModel` at `mod.rs:62-93` (`#[cfg(test)]`-private) with a similar fold-seed-derive pattern — algorithm reference only, not reusable from grafeo-loro.
 
 ---
 

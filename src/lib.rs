@@ -22,3 +22,6 @@ pub use compression::{CompressedPayload, LoroDocCompressionExt};
 // DEVIL m1: crate-root re-export of parallel_hydrate_grafeo for Phase 4 storage ergonomics
 // (`use grafeo_loro::parallel_hydrate_grafeo` vs the longer `hydration::parallel_hydrate_grafeo` path).
 pub use hydration::parallel_hydrate_grafeo;
+// P3T3-L2 m2: crate-root re-export of generate_local_embedding for external visibility
+// (matches P3T1-L1 m3 + P3T2-L2 m1 precedent; `pub` stub reachable from `tests/unit/`).
+pub use hydration::vector::generate_local_embedding;

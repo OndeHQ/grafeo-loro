@@ -33,3 +33,8 @@ tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+# P3T3-L2 m4 (DEVIL Q3 — Option A): tracing-subscriber provides the `Layer` trait
+# for `tests/unit/vector_embedding.rs::test_capture::WarnCounter`. Standard
+# companion to `tracing`; 1-line dev-dep, ~15 LOC for the WARN-counter layer
+# (vs ~50 LOC for hand-rolled `Subscriber` — anti-plenger #5 Bloat).
+tracing-subscriber = "0.3"

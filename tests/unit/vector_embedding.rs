@@ -12,7 +12,8 @@
 //! - `grafeo_loro::hydration::vector::generate_local_embedding(&str) -> Result<Vec<f32>>`
 //!   — sync, infallible at the stub layer; real ONNX may fail (P3T3-L1 decision
 //!   1: future-proofed via `Result` so Task 4's call site never needs to be
-//!   re-typed).
+//!   re-typed). Also re-exported at the crate root as
+//!   `grafeo_loro::generate_local_embedding` (P3T3-L2 m2).
 //! - `grafeo_loro::constants::DEFAULT_EMBEDDING_DIM: usize = 384` — SSOT for
 //!   output length; matches `sentence-transformers/all-MiniLM-L6-v2` preset
 //!   (`grafeo-engine-0.5.42/src/embedding/config.rs:18`).
@@ -21,6 +22,16 @@
 //!   `"ONNX not integrated; returning deterministic dummy embedding"`.
 //! - `std::sync::Once` — used to fire the warning exactly once per process
 //!   (P3T3-L1 decision 6: rate-limit to avoid log-spam under batch loops).
+//! - `grafeo_engine::embedding::EmbeddingModel` trait —
+//!   `grafeo-engine-0.5.42/src/embedding/mod.rs:39` (sync, NOT async). `embed`
+//!   at `mod.rs:47` (NOT `:46` — P3T3-DEVIL NIT 3 off-by-one correction),
+//!   `dimensions` at `mod.rs:50`, `name` at `mod.rs:53`.
+//! - grafeo-engine ships a `MockEmbeddingModel` at
+//!   `grafeo-engine-0.5.42/src/embedding/mod.rs:62-93` (`#[cfg(test)]`-private)
+//!   with algorithm `t.bytes().map(|b| b as f32).sum::<f32>()` → seed →
+//!   `((seed + i as f32) * 0.01).sin()` per dim — almost identical shape to L3's
+//!   fold-seed-PRNG algorithm. Algorithm reference only, NOT reusable from
+//!   grafeo-loro (P3T3-DEVIL MINOR 4).
 //!
 //! # L3 algorithm hint (informational, not binding)
 //!
@@ -40,9 +51,66 @@
 //!   (idempotency — anti-plenger #9).
 
 #![allow(unused_imports)]
+// TODO(L3): remove the silencer above when filling test bodies (matches the
+// P3T1-L1 → P3T1-L3 trajectory per ORCH-P3T1-CLOSE: "grep -rn 'allow(unused_imports)'
+// tests/unit/compression.rs → 0 matches (silencer removed when bodies filled)").
 
 use grafeo_loro::constants::DEFAULT_EMBEDDING_DIM;
 use grafeo_loro::hydration::vector::generate_local_embedding;
+
+/// Hand-rolled tracing-subscriber `Layer` that counts `WARN` events (DEVIL Q3
+/// — Option A decided at L2: adds `tracing-subscriber` to `[dev-dependencies]`
+/// for the `Layer` trait; ~15 LOC vs ~50 LOC for direct `Subscriber` impl).
+/// Anti-plenger #5 Bloat: do NOT reinvent `tracing_subscriber::Layer`.
+///
+/// # Once-global-state constraint (DEVIL Q3 caveat)
+///
+/// `generate_local_embedding` uses `std::sync::Once` to fire the ONNX-stub
+/// warning exactly once per process. The FIRST test in the process that calls
+/// `generate_local_embedding` will see the warning; subsequent tests in the
+/// same process will see 0 warnings (Once already fired). L3 MUST either:
+/// 1. Run with `cargo test -- --test-threads=1` AND ensure the warning test is
+///    the first to call `generate_local_embedding` in the process; OR
+/// 2. Move the warning test to its own integration-test binary (fresh process
+///    per `cargo test` invocation).
+///
+/// L2 wires the infrastructure; L3 implements the test body.
+mod test_capture {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing::Event;
+    use tracing::Level;
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::Layer;
+
+    /// Tracing layer that increments an `AtomicUsize` on every `WARN` event.
+    /// L3 installs this via
+    /// `tracing_subscriber::registry().with(WarnCounter::new()).set_default(|| ...)`.
+    pub struct WarnCounter {
+        count: AtomicUsize,
+    }
+
+    impl WarnCounter {
+        pub fn new() -> Self {
+            Self { count: AtomicUsize::new(0) }
+        }
+
+        pub fn get(&self) -> usize {
+            self.count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl<S> Layer<S> for WarnCounter
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            if event.metadata().level() == &Level::WARN {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+}
 
 /// Same input → byte-identical `Vec<f32>` across two calls. Catches
 /// non-deterministic PRNG seeding (e.g. `Instant::now()` as seed), mutable
@@ -59,26 +127,33 @@ fn generate_local_embedding_is_deterministic() {
 /// deterministic dummy embedding"` exactly ONCE per process (via
 /// `std::sync::Once`). Subsequent calls MUST NOT re-emit.
 ///
-/// # Test capture strategy (L3 to choose)
+/// # Test capture (DEVIL Q3 — Option A decided at L2)
 ///
-/// - **Option A** (preferred): add `tracing-subscriber` to `[dev-dependencies]`
-///   with the `registry` + `fmt` features, install a `Vec<String>` capturing
-///   layer via `tracing_subscriber::registry().with(CaptureLayer).set_default()`
-///   inside the test. NOTE: `tracing-subscriber` is NOT currently in
-///   `[dev-dependencies]` (verified at `Cargo.toml:34-35` — only `tokio` is).
-///   L3 must add it OR use `tracing-mock` (extra dep) OR hand-roll a
-///   `tracing_subscriber::Layer` impl.
-/// - **Option B** (cheap): `tracing::dispatcher::with_default(&NoOp, || ...)`
-///   + a `Subscriber` impl that counts `WARN` events via `AtomicUsize`. No new
-///   crate dep — hand-rolled `Subscriber` is ~30 LOC.
-/// - **Option C** (skip): drop this scaffold entirely if `Once` semantics
-///   make test-process-global state too brittle to assert on (parallel test
-///   threads would race on the once-guard). DECISION for DEVIL/L2: prefer
-///   Option B (no dep, deterministic single-threaded `#[serial_test::serial]`
-///   or `#[test]` with `--test-threads=1`).
+/// L2 wired `mod test_capture::WarnCounter` (a `tracing_subscriber::Layer`
+/// that counts `WARN` events via `AtomicUsize`). L3 installs it via
+/// `tracing_subscriber::registry().with(WarnCounter::new()).set_default(|| ...)`
+/// inside the test body, calls `generate_local_embedding`, then asserts
+/// `counter.get() == 1`.
+///
+/// `tracing-subscriber` was added to `[dev-dependencies]` at `Cargo.toml`
+/// (1 line, standard companion to `tracing`). Alternative considered: hand-
+/// rolled `Subscriber` impl (~50 LOC, no dep) — rejected as anti-plenger #5
+/// Bloat (reinvents `tracing_subscriber::Layer`). Option C (skip the
+/// warning-count test; manual `cargo test -- --nocapture` smoke) rejected
+/// because it loses automated test coverage (anti-plenger #8 Observability).
+///
+/// ## Once-global-state constraint
+///
+/// `std::sync::Once` is process-global. See `mod test_capture` docstring: L3
+/// MUST run with `--test-threads=1` AND ensure this test is the first to call
+/// `generate_local_embedding` in the process, OR move this test to its own
+/// integration-test binary (fresh process).
 #[test]
 #[ignore = "P3T3-L1 scaffold: L3 implements the body"]
 fn generate_local_embedding_logs_onnx_warning() {
+    // Reference WarnCounter to suppress dead-code warning at L2 (L3 will use
+    // it for the actual assertion when implementing the body).
+    let _ = test_capture::WarnCounter::new().get();
     let _ = (DEFAULT_EMBEDDING_DIM, generate_local_embedding);
     todo!()
 }
