@@ -2,11 +2,12 @@
 //!
 //! L3 implementation (per klemer-agents.md): all 16 invariant check fns filled
 //! with non-trivial assertions (per Devil M5). `FuzzOp` mirrors
-//! `grafeo_loro::types::events::LoroOp` with `Arbitrary`-derivable field types.
-//! `FuzzValue` mirrors the scalar subset of `GraphValue`. The op generator
-//! applies each `FuzzOp` through `apply_loro_op` (the SSOT inbound path) and
-//! asserts per-iteration invariants on the resulting `BridgeMaps` + `GrafeoDB`
-//! + `LoroDoc` state.
+//! `grafeo_loro::types::events::LoroOp` with `Arbitrary`-derivable field types
+//! (defined in `fuzz/fuzz_targets/lib.rs` — DRY/SSOT, shared with
+//! `gen_corpus`). `FuzzValue` mirrors the scalar subset of `GraphValue`. The
+//! op generator applies each `FuzzOp` through `apply_loro_op` (the SSOT
+//! inbound path) and asserts per-iteration invariants on the resulting
+//! `BridgeMaps` + `GrafeoDB` + `LoroDoc` state.
 //!
 //! # Build requirements
 //!
@@ -24,15 +25,15 @@
 //!
 //! # Invariant check cadence (per docs/phase-6/fuzz-invariants.md)
 //!
-//! - **Every iteration** (cheap): I1, I2, I3a, I3b, I3c, I4, I11, I15
+//! - **Every iteration** (cheap): I1, I2, I3a, I3b, I3c, I4, I11, I12, I15
 //! - **Periodic** (every 1000 ops OR final): I7, I9
-//! - **Event-driven** (when the relevant op fires): I5, I6, I8, I10, I12, I14
+//! - **Event-driven** (when the relevant op fires): I5, I6, I8, I10, I14
 //!
-//! # Deferred invariants (Phase 6 T1 excluded by user)
-//!
-//! - **I12 — MVCC snapshot isolation**: requires `GrafeoLoroApp::query` (which
-//!   is `unimplemented!()` per Phase 6 T1 user exclusion). Deferred until T1
-//!   fills the query body. Documented in `docs/phase-6/fuzz-invariants.md`.
+//! I12 (MVCC snapshot isolation) is implemented directly against grafeo's
+//! `set_viewing_epoch` time-travel API (architecture §19) — it does NOT depend
+//! on `GrafeoLoroApp::query` (which returns `Err(NotYetImplemented(...))` per
+//! Gap A.2). See `check_i12_mvcc_snapshot_isolation` doc-comment + L1 plan
+//! §Gap B in `docs/phase-7/gap-closure-l1-plan.md`.
 
 // When built with `--cfg fuzzing` (via `cargo +nightly fuzz run`), libfuzzer provides
 // `main`; the crate is compiled as `no_main`. When built without (e.g. `cargo check`
@@ -554,16 +555,86 @@ fn check_i11_bridge_maps_bijectivity(maps: &Arc<BridgeMaps>) {
     }
 }
 
-/// I12 — MVCC snapshot isolation: DEFERRED. Requires `GrafeoLoroApp::query`
-/// (currently `unimplemented!()` per Phase 6 T1 user exclusion). A proper
-/// check requires: (1) start a read-only session at epoch E, (2) advance the
-/// epoch via a concurrent write, (3) read via the read-only session — MUST
-/// observe the E snapshot, not the new one. Without `query`, we cannot verify
-/// the "observe a consistent snapshot" half of the invariant. Documented in
-/// `docs/phase-6/fuzz-invariants.md`.
-fn check_i12_mvcc_snapshot_isolation() {
-    // Intentionally empty — see doc-comment. NOT a stub; the check genuinely
-    // cannot be implemented until Phase 6 T1 fills `GrafeoLoroApp::query`.
+/// I12 — MVCC snapshot isolation: a session pinned to epoch E via
+/// `set_viewing_epoch(E)` MUST continue to observe the DB state as of E,
+/// even after a concurrent writer commits a new epoch E'. Clearing the
+/// override MUST then expose the new state.
+///
+/// Tests the "zero reader blocking + consistent snapshot" half of
+/// architecture §19 directly via grafeo's `set_viewing_epoch` time-travel
+/// API (NOT via `GrafeoLoroApp::query` — that remains
+/// `Err(NotYetImplemented(...))` per Gap A.2).
+///
+/// Per Devil B1 (gap-closure-l1-devil.md §CA.1): uses `grafeo::Value::Int64`
+/// (the real variant) — NOT the hallucinated `grafeo::Value::Integer`.
+fn check_i12_mvcc_snapshot_isolation(db: &Arc<GrafeoDB>, maps: &Arc<BridgeMaps>) {
+    // 1. Write node N with property "v" = 1 → commit returns epoch E1.
+    let mut w1 = db.session_with_cdc(false);
+    w1.begin_transaction()
+        .expect("I12: begin_transaction (write 1) failed");
+    let op = LoroOp::UpsertNode {
+        loro_key: "V/i12-snap-test".to_string(),
+        labels: vec!["Test".into()],
+        properties: HashMap::from([("v".to_string(), GraphValue::Integer(1))]),
+    };
+    apply_loro_op(&w1, &op, maps).expect("I12: apply_loro_op (write 1) failed");
+    let prepared1 = w1
+        .prepare_commit()
+        .expect("I12: prepare_commit (write 1) failed");
+    let e1 = prepared1.commit().expect("I12: commit (write 1) failed");
+
+    // 2. Open a read session and pin it to epoch E1.
+    let read_session = db.session();
+    read_session.set_viewing_epoch(e1);
+
+    // 3. Write node N's property "v" = 2 → commit returns epoch E2 (E2 > E1).
+    //    Uses the direct grafeo `set_node_property` API (NOT apply_loro_op)
+    //    because apply_loro_op's UpsertNode path would re-create the node
+    //    instead of mutating the existing property. See Devil CB.2 ruling.
+    let mut w2 = db.session_with_cdc(false);
+    w2.begin_transaction()
+        .expect("I12: begin_transaction (write 2) failed");
+    let node_id = *maps
+        .node_id_map
+        .read()
+        .get("V/i12-snap-test")
+        .expect("I12: BridgeMaps missing node after write 1");
+    w2.set_node_property(node_id, "v", grafeo::Value::Int64(2))
+        .expect("I12: set_node_property (write 2) failed");
+    let prepared2 = w2
+        .prepare_commit()
+        .expect("I12: prepare_commit (write 2) failed");
+    let e2 = prepared2.commit().expect("I12: commit (write 2) failed");
+
+    // Non-trivial assertion 1: epoch must advance on commit.
+    assert!(
+        e2.as_u64() > e1.as_u64(),
+        "I12: epoch did not advance: E1={}, E2={}",
+        e1.as_u64(),
+        e2.as_u64()
+    );
+
+    // Non-trivial assertion 2: read_session pinned at E1 MUST see v=1,
+    // NOT the new v=2.
+    let v_at_e1 = read_session.get_node_property(node_id, "v");
+    assert_eq!(
+        v_at_e1,
+        Some(grafeo::Value::Int64(1)),
+        "I12: snapshot isolation violated — pinned at E1={}, saw v={:?} (expected 1)",
+        e1.as_u64(),
+        v_at_e1
+    );
+
+    // Non-trivial assertion 3: clearing the override MUST expose v=2.
+    read_session.clear_viewing_epoch();
+    let v_now = read_session.get_node_property(node_id, "v");
+    assert_eq!(
+        v_now,
+        Some(grafeo::Value::Int64(2)),
+        "I12: post-clear read saw v={:?} (expected 2 after epoch advanced to {})",
+        v_now,
+        e2.as_u64()
+    );
 }
 
 /// I14 — Tree move serializability: after any sequence of `TreeMove` ops, the
@@ -838,8 +909,9 @@ fuzz_target!(|data: &[u8]| {
         check_i10_vector_offload_bypass(&db, &maps);
     }
 
-    // I12: DEFERRED — see check_i12_mvcc_snapshot_isolation doc-comment.
-    check_i12_mvcc_snapshot_isolation();
+    // I12: MVCC snapshot isolation — pinned-epoch reads + post-clear reads.
+    // Per L1 plan §Gap B: every iteration (cheap; 1 write + 3 reads + 2 commits).
+    check_i12_mvcc_snapshot_isolation(&db, &maps);
 
     // I14: tree move serializability (only if a TreeMove fired).
     if last_tree_move.is_some() {

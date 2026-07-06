@@ -34,9 +34,7 @@ Checklist of consistency invariants the `consistency` fuzz target must verify af
 
 - [ ] **I11 — BridgeMaps bijectivity**: For every `Node`/`Edge` in GrafeoDB, there exists exactly one `loro_key` in `BridgeMaps` (and vice versa). No orphaned map entries, no unmapped Grafeo entities.
 
-- [ ] **I12 — MVCC snapshot isolation**: A `GrafeoLoroApp::query` started at epoch `E` must observe a consistent snapshot even if concurrent inbound writes advance the epoch mid-query (architecture §19). No torn reads.
-
-  > **DEFERRED (Phase 6 T1)**: `GrafeoLoroApp::query` is `unimplemented!()` per user exclusion. A proper check requires: (1) start a read-only session at epoch E, (2) advance the epoch via a concurrent write, (3) read via the read-only session — MUST observe the E snapshot, not the new one. Without `query`, the "observe a consistent snapshot" half of the invariant cannot be verified. The fuzz harness documents this deferral via the empty `check_i12_mvcc_snapshot_isolation` stub + this note. Re-enable once T1 fills the query body.
+- [x] **I12 — MVCC snapshot isolation** (P7-L2-B): A read session pinned to epoch `E` via grafeo's `set_viewing_epoch(E)` MUST continue to observe the DB state as of `E` even after a concurrent writer commits a newer epoch `E'`. Clearing the override MUST then expose the new state. Architecture §19. Implemented directly against grafeo's `set_viewing_epoch` time-travel API (NOT via `GrafeoLoroApp::query` — that remains `Err(NotYetImplemented(...))` per Gap A.2). See `check_i12_mvcc_snapshot_isolation` in `fuzz/fuzz_targets/consistency.rs` + L1 plan §Gap B in `docs/phase-7/gap-closure-l1-plan.md`. Uses `grafeo::Value::Int64` (not the hallucinated `Integer` — Devil B1/CA.1).
 
 - [x] **I13 — Batcher count invariant** (COVERED BY I3b): After `MutationBatcher::run` flushes a batch of size `N`, `inbound_event_count` must increment by exactly `N`, and the batcher's internal queue must be empty.
 
@@ -55,12 +53,12 @@ Checklist of consistency invariants the `consistency` fuzz target must verify af
 - **L3**: For each fuzz iteration, build a fresh `GrafeoLoroApp` (or reuse with reset), apply the op batch, then assert every invariant above. Failure → `panic!` (libfuzzer treats as crash).
 
 - **L3 — Per-iteration vs periodic cadence** (per Devil C5.3 + C5.6):
-  - **Checked every iteration** (cheap, O(1) or O(n) over current state): I1, I2, I3a/b/c, I4, I11, I15. (I13 was removed in P6-L2-FIX — covered by I3b.)
+  - **Checked every iteration** (cheap, O(1) or O(n) over current state): I1, I2, I3a/b/c, I4, I11, I12, I15. (I13 was removed in P6-L2-FIX — covered by I3b.)
   - **Checked periodically** (expensive I/O or full re-hydration): I7, I9.
     - Concrete cadence:
       - I7 (snapshot idempotency): every 1000 iterations OR on the final iteration of each fuzz run (whichever comes first). Cost: ~10-50ms per check.
       - I9 (hydration determinism): every 1000 iterations OR on the final iteration. Cost: ~50-200ms per check (full re-hydration + byte-compare).
-  - **Checked only when the relevant op fires** (event-driven, not iteration-cadence): I5, I6, I8, I10, I12, I14.
+  - **Checked only when the relevant op fires** (event-driven, not iteration-cadence): I5, I6, I8, I10, I14.
 
 - **L3 — Non-trivial assertion guard** (per Devil M5):
   - Each invariant assertion must be NON-TRIVIAL — it must fail if the invariant is violated.
