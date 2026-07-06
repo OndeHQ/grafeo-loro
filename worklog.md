@@ -1937,3 +1937,57 @@ Next steps for user:
    (b) Open 1 PR from p2-vertex-builder→phase-1 (squash-merge all 3 tasks)
    (c) Create a `phase-2` aggregate branch and fast-forward it to p2-vertex-builder HEAD, then open 1 PR phase-2→phase-1
 3. Phase 3 (Compression & Hydration) is next per implementation-plan.md. New orchestrator session recommended.
+
+---
+Task ID: ORCH-P3T1-SETUP
+Agent: Orchestrator (Super Z)
+Task: Open Plonga-Plongo-Loop iteration for Phase 3 Task 1 (compression::wrapper); prep environment; define $stn; spawn L1
+
+Work Log:
+- Read user plan: clone phase-2 branch of github.com/OndeHQ/grafeo-loro, finish Phase 3 (all tasks) of docs/implementation-plan.md.
+- Environment prep complete:
+  * `bun i --canary` → bun 1.4.0-canary.1 installed at ~/.bun/bin/bun
+  * `bun add -g repomix` → repomix 1.16.0 installed at /usr/local/bin/repomix
+  * `curl ... sh.rustup.rs | sh -s -- -y --profile minimal` → rustc 1.96.1 (2026-06-26)
+- Cloned phase-2 branch (depth=1) using PAT, then immediately scrubbed token from `git remote set-url origin` (now plain https URL, no embedded credentials). User should still REVOKE the PAT post-session as defense-in-depth.
+- Confirmed baseline: HEAD = `a3ce426 ORCH-PHASE2-CLOSE: Phase 2 complete — 35/35 tests pass`. phase-2 branch is the aggregate tip of Phase 2 (chain: phase-1 → p2-derives → p2-tree-move → p2-vertex-builder → phase-2).
+- `cargo check --all-targets` baseline: 0 errors, 5 pre-existing warnings (identical to P2T3-L2R2 baseline: app.rs:47 builder fields, hydration/vector.rs:9 db field, hydration/vector.rs:27 generate_local_embedding fn, presence/socket.rs:6 room_id field, telemetry/health.rs:9 doc/db/last_sync_ts fields). No new code yet.
+- Generated fresh `repomix.md` (823K, 11629 lines) for subagent signature-based context reading.
+- Created branch `p3-compression` off `phase-2` HEAD.
+- Per framework rule "User will decide to proceed next task for new session loop" + Phase 2 precedent (one $stn per task), this session loop will cover ONLY Phase 3 Task 1 (`compression::wrapper`). Tasks 2/3/4 deferred to subsequent orchestrator sessions.
+
+Phase 3 Task 1 scope (per docs/implementation-plan.md §Phase 3 Task 1):
+1. LZ4: `lz4_flex::compress_prepend_size` / `decompress_size_prepended`
+2. Zstd: stream encoder/decoder level 3
+3. `LoroDocCompressionExt` trait impl (export_compressed / import_compressed)
+
+Validation gates (Task 1 contributes to all 3 Phase 3 validation criteria):
+- Benchmark: Hydration 10k nodes < 500ms on 8-core (Task 2 owns this; Task 1 is prerequisite — compressed Loro blob must roundtrip before hydration can run)
+- Test: Zstd roundtrip preserves Loro importability (Task 1 owns this directly)
+- Test: Vector never written to Loro container (Task 4 owns this; Task 1 unaffected)
+
+Existing skeleton state (already in repo from Phase 1 L1):
+- `src/compression/wrapper.rs`: 44 lines, `CompressedPayload { compression: CompressionType, raw_data: Vec<u8> }` + `compress()`/`decompress()` methods + `LoroDocCompressionExt` trait with `export_compressed`/`import_compressed`. All bodies `unimplemented!()`.
+- `src/compression/mod.rs`: 2 lines (`pub mod wrapper; pub use wrapper::*;` — verify exact content).
+- `src/config.rs`: `CompressionType { None, Lz4, Zstd }` (default Zstd).
+- `src/error.rs`: `GrafeoLoroError::Compression(String)` variant exists.
+- `src/constants.rs`: `DEFAULT_CHUNK_SIZE = 256` (hydration concern, not Task 1).
+- `Cargo.toml`: `lz4_flex = "0.11"`, `zstd = "0.13"` already declared.
+- `tests/unit/`: main.rs, schema_roundtrip.rs, tree_move.rs, vertex_builder.rs (no compression tests yet — L1 should scaffold `tests/unit/compression.rs`).
+
+Loop Plan for this $stn (`p3-compression`):
+1. L1 scaffolding (contracts/types/signatures only — NO implementation logic) ← `Task ID: P3T1-L1`
+2. Devil's advocate critique + solution ← `Task ID: P3T1-DEVIL`
+3. Fixer (L2 evolving/reducing scaffolds; wire state + flow; complex algorithms as `// TODO`) ← `Task ID: P3T1-L2`
+4. L3 deep implementation (zero TODOs/stubs/band-aids) ← `Task ID: P3T1-L3`
+5. Plenger hunter (audit anti-plenger.md violations) ← `Task ID: P3T1-HUNT`
+6. Loop back to step 3 if MAJORs found, else push $stn and close.
+
+Stage Summary:
+- $stn = `p3-compression` (branch created, currently == phase-2 HEAD `a3ce426`)
+- Environment ready: bun canary + repomix 1.16.0 + rust 1.96.1 minimal
+- Repo at /home/z/my-project/grafeo-loro, on branch p3-compression, clean working tree
+- repomix.md regenerated (823K, 11629 lines)
+- Baseline: 0 errors / 5 pre-existing warnings / 35 tests passing (carried over from Phase 2 close)
+- Token scrubbed from git remote. User must REVOKE ghp_vW5H... post-session.
+- Next: spawn P3T1-L1 subagent.
