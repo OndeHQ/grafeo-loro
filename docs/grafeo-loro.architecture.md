@@ -550,87 +550,76 @@ To minimize storage costs and network transit, `grafeo-loro` implements a dual-l
 
 ## 15. Compression Wrapper Implementation
 
+`CompressionType` is defined in `src/config.rs` (SSOT — Phase 4 storage references it via `crate::config::CompressionType`). Error type is `GrafeoLoroError` (see `src/error.rs`); `Compression(String)` is the symmetric codec-failure variant for BOTH LZ4 (`DecompressError`) and Zstd (`io::Error`) — `StorageIo` is reserved for storage backend I/O. Zstd level is sourced from `crate::constants::DEFAULT_ZSTD_LEVEL` (= 3, zstd's own `CLEVEL_DEFAULT`).
+
 ```rust
-use std::io::{Read, Write};
 use loro::{LoroDoc, ExportMode};
 
+use crate::config::CompressionType;
+use crate::constants::DEFAULT_ZSTD_LEVEL;
+use crate::error::{GrafeoLoroError, Result};
+
 // Cargo.toml dependencies:
-// zstd = "0.13"
-// lz4_flex = "0.11"
+// zstd = "0.13"     // binds to C zstd (no pure-Rust encoder exists in the ecosystem)
+// lz4_flex = "0.11" // pure-Rust
 
-pub enum CompressionType {
-    None,
-    Lz4,
-    Zstd,
-}
-
+/// Compressed payload envelope. In-memory only — Phase 4 `StorageBackend` adds
+/// the wire format (codec byte + raw bytes) for `save`/`load`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompressedPayload {
     pub compression: CompressionType,
     pub raw_data: Vec<u8>,
 }
 
 impl CompressedPayload {
-    /// 1. Compress raw exported Loro bytes
-    pub fn compress(raw_bytes: &[u8], strategy: CompressionType) -> Self {
-        match strategy {
-            CompressionType::None => Self {
-                compression: CompressionType::None,
-                raw_data: raw_bytes.to_vec(),
-            },
-            CompressionType::Lz4 => {
-                let compressed = lz4_flex::compress_prepend_size(raw_bytes);
-                Self {
-                    compression: CompressionType::Lz4,
-                    raw_data: compressed,
-                }
-            }
-            CompressionType::Zstd => {
-                let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
-                encoder.write_all(raw_bytes).unwrap();
-                let compressed = encoder.finish().unwrap();
-                Self {
-                    compression: CompressionType::Zstd,
-                    raw_data: compressed,
-                }
-            }
-        }
+    /// Compress `raw_bytes` using `strategy`. Fails on Zstd I/O errors
+    /// (routed via `Compression(String)`, symmetric with LZ4 — NOT `StorageIo`).
+    pub fn compress(raw_bytes: &[u8], strategy: CompressionType) -> Result<Self> {
+        let raw_data = match strategy {
+            CompressionType::None => raw_bytes.to_vec(),
+            CompressionType::Lz4 => lz4_flex::compress_prepend_size(raw_bytes),
+            CompressionType::Zstd => zstd::stream::encode_all(raw_bytes, DEFAULT_ZSTD_LEVEL)
+                .map_err(|e| GrafeoLoroError::Compression(e.to_string()))?,
+        };
+        Ok(Self { compression: strategy, raw_data })
     }
 
-    /// 2. Decompress bytes back to standard Loro binary format
-    pub fn decompress(&self) -> Result<Vec<u8>, std::io::Error> {
+    /// Decompress `raw_data` back to the original Loro bytes.
+    pub fn decompress(&self) -> Result<Vec<u8>> {
         match self.compression {
             CompressionType::None => Ok(self.raw_data.clone()),
-            CompressionType::Lz4 => {
-                let decompressed = lz4_flex::decompress_size_prepended(&self.raw_data)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                Ok(decompressed)
-            }
-            CompressionType::Zstd => {
-                let mut decoder = zstd::stream::Decoder::new(&self.raw_data[..]).unwrap();
-                let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed).unwrap();
-                Ok(decompressed)
-            }
+            CompressionType::Lz4 => lz4_flex::decompress_size_prepended(&self.raw_data)
+                .map_err(|e| GrafeoLoroError::Compression(e.to_string())),
+            CompressionType::Zstd => zstd::stream::decode_all(&self.raw_data[..])
+                .map_err(|e| GrafeoLoroError::Compression(e.to_string())),
         }
     }
 }
 
 pub trait LoroDocCompressionExt {
-    fn export_compressed(&self, mode: ExportMode, strategy: CompressionType) -> CompressedPayload;
-    fn import_compressed(&mut self, payload: &CompressedPayload) -> Result<(), loro::LoroError>;
+    fn export_compressed(&self, mode: ExportMode, strategy: CompressionType) -> Result<CompressedPayload>;
+    /// Returns `ImportStatus` so Phase 4 `hydrate()` can detect pending
+    /// dependencies (Loro's `import` doc warns about missing dependency ranges).
+    fn import_compressed(&self, payload: &CompressedPayload) -> Result<loro::ImportStatus>;
 }
 
 impl LoroDocCompressionExt for LoroDoc {
-    fn export_compressed(&self, mode: ExportMode, strategy: CompressionType) -> CompressedPayload {
-        let raw_bytes = self.export(mode).unwrap();
-        CompressedPayload::compress(&raw_bytes, strategy)
+    fn export_compressed(&self, mode: ExportMode, strategy: CompressionType) -> Result<CompressedPayload> {
+        // `LoroDoc::export` returns `Result<Vec<u8>, LoroEncodeError>`; `LoroEncodeError`
+        // chains to `LoroError` via `From` (loro-common error.rs:204), then to
+        // `GrafeoLoroError::Loro` via `#[from]`. Two-hop chain requires explicit
+        // `.map_err` (single `?` won't auto-chain two `From`s).
+        let bytes = self.export(mode).map_err(|e| GrafeoLoroError::Loro(e.into()))?;
+        CompressedPayload::compress(&bytes, strategy)
     }
 
-    fn import_compressed(&mut self, payload: &CompressedPayload) -> Result<(), loro::LoroError> {
-        let decompressed_bytes = payload.decompress()
-            .map_err(|_| loro::LoroError::DecodeError("Compression failure".into()))?;
-        self.import_with_status(&decompressed_bytes)?;
-        Ok(())
+    fn import_compressed(&self, payload: &CompressedPayload) -> Result<loro::ImportStatus> {
+        // `LoroDoc::import(&self, &[u8])` returns `Result<ImportStatus, LoroError>`
+        // (takes `&self` — interior mutability; NOT `&mut self`). `ImportStatus` is
+        // surfaced to the caller (DEVIL M2 — Phase 4 hydrate() inspects `pending`).
+        // No origin tag: compression module is origin-agnostic (Phase 4 wraps with `import_with` if needed).
+        let bytes = payload.decompress()?;
+        Ok(self.import(&bytes)?)  // LoroError -> GrafeoLoroError::Loro via #[from]
     }
 }
 ```

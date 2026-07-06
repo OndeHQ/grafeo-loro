@@ -22,6 +22,8 @@ tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"
 parking_lot = "0.12"
 rayon = "1.8"
 lz4_flex = "0.11"
+# zstd: binds to C zstd (no pure-Rust encoder exists in the ecosystem — `ruzstd` is decoder-only).
+# `zstd-sys` always compiles the C library via `cc`; defer pure-Rust evaluation to Phase 6 hardening if needed.
 zstd = "0.13"
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
