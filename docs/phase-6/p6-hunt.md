@@ -50,3 +50,13 @@
 - 0 `unwrap()` calls in consistency.rs.
 - 2 `TODO refactor` in src/ (`app.rs:251`, `batcher.rs:104`) — pre-existing Phase 5 wiring tech debt with documented "future phase" plan. NOT Phase 6 band-aids, NOT masking broken behavior. (Already noted in #1.)
 
+## Anti-Pattern #5: Bloat (DRY Violations)
+
+**Hunt**: `rg 'fn enc_|fn decode_' fuzz/fuzz_targets/gen_corpus.rs` + `rg 'fn convert_fuzz_op' fuzz/fuzz_targets/consistency.rs` + `rg 'fn (encode|decode|compress_to_wire|decompress)' src/`
+
+**Verdict**: NOT FOUND — clean by inspection (1 NIT noted).
+
+- `gen_corpus.rs` has 7 `enc_*` helpers (`enc_u64`, `enc_u16`, `enc_u8`, `enc_string`, `enc_fuzz_op`, `enc_fuzz_value`, `enc_fuzz_input`). These are bespoke binary writers for the seed corpus — NOT duplicating any `src/` logic (src/ has only `compress_to_wire`/`decompress`/`encode_edge_key`, all distinct purposes).
+- `EncFuzzValue`/`EncFuzzOp` in gen_corpus.rs are acknowledged mirror types of `FuzzValue`/`FuzzOp` (per `#[allow]` reason "mirror of FuzzValue; all variants kept for parity"). Justified by asymmetric needs: `FuzzValue` derives `Arbitrary` (decoder for libfuzzer input); `EncFuzzValue` is writer-only (for deterministic generator). **NIT**: could potentially be unified via a single type deriving both `Arbitrary` + a serialization trait, but the `Arbitrary` derive's byte format usually differs from a hand-written encoder, so the split is pragmatic.
+- `convert_fuzz_op` (consistency.rs:148) converts `FuzzOp` (fuzz-internal enum with `peer_count`/`bail_after_ops` fields) → `LoroOp` (production type). Legitimate adapter — NOT a DRY violation. `src/bridge::apply_loro_op` takes `LoroOp`, not `FuzzOp`, so the fuzz harness needs this adapter.
+
