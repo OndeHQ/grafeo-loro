@@ -3481,3 +3481,102 @@ Stage Summary:
   - #11 Deletion: stale FLAG(L3) comment DELETED from arch doc; band-aid `.map_err(|e| Bridge(format!(...)))` DELETED from parallel.rs.
   - #14 Never simplify basics: benchmark assertion now matches spec (500ms, not relaxed 1000ms); From<HydrateError> impl is the proper structural fix (not a band-aid).
 - Ready for next HUNT round or push: YES.
+
+---
+Task ID: P3T2-HUNT-R2
+Agent: Plenger Hunter Round 2
+Task: Verify L2-R2 fixes (C1/M1/M2/M3/m1); find new issues; verdict PROCEED or LOOP BACK
+
+Work Log:
+- Confirmed on branch `p3-parallel-hydrate` at HEAD `ddf5972` (P3T2-L2R2 worklog append commit; L2-R2 code fixes in commit `345f445`). Working tree clean. Read mandatory framework files in order: `sub-agents-traits.md`, `plenger-traits.md`, `anti-plenger.md`. Read 3 most recent worklog entries in full: `P3T2-L3` (:3165), `P3T2-HUNT` (:3251), `P3T2-L2R2` (:3412). Skimmed `P3T1-HUNT-R1` for Round-2 style calibration.
+- Independent re-verification: did NOT trust L2-R2's claims. Read `src/hydration/parallel.rs`, `src/error.rs`, `src/types/values.rs`, `src/bridge/grafeo_tx.rs`, `src/bridge/mod.rs`, `src/lib.rs`, `tests/unit/parallel_hydrate.rs`, `docs/grafeo-loro.architecture.md` §16 (lines 629-760), and upstream `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lorosurgeon-0.2.1/src/error.rs` + `lib.rs`. Ran `cargo test --all` + `cargo check --all-targets` + the `#[ignore]`'d benchmark 3×.
+
+### A. C1 fix verification (benchmark 500ms)
+- Assertion: VERIFIED `< 500ms` — `tests/unit/parallel_hydrate.rs:411` reads `assert!(elapsed.as_millis() < 500, "hydration of 10k nodes took {elapsed:?}; spec gate is 500ms")`. NOT `< 1000ms`. Spec gate met.
+- Timing: VERIFIED only hydration call timed — `Instant::now()` at line 404 is started AFTER the 10k Loro fixture loop (lines 389-400); `.elapsed()` at line 406 captured immediately after `parallel_hydrate_grafeo` returns. Fixture setup explicitly excluded (comment at :387-388 + :402-403).
+- Benchmark run 1: PASS — `test parallel_hydrate::parallel_hydrate_10k_nodes_under_500ms ... ok` (0.49s total test runtime; hydration-only well under 500ms).
+- Benchmark run 2: PASS — `test parallel_hydrate::parallel_hydrate_10k_nodes_under_500ms ... ok` (0.48s total).
+- Benchmark run 3: PASS — `test parallel_hydrate::parallel_hydrate_10k_nodes_under_500ms ... ok` (0.51s total).
+- Docstring anti-Goodhart: line 373-375 explicitly says "Assert `elapsed < 500ms`... The 500ms threshold is the documented spec gate — anti-Goodhart: do NOT relax to 'CI tolerance'." ✓
+
+### B. M1 fix verification (arch doc §16)
+- 13+ original stale points: ALL FIXED. Verified each:
+  - 3-arg signature `(db, doc, maps)` at arch doc :685-689 matches `parallel.rs:40` ✓
+  - No `doc.transact()` at arch doc :695 (uses `doc.get_map(ROOT_VERTICES)` directly) ✓
+  - `v_root.keys()` no `&txn` arg at arch doc :696 ✓
+  - `DEFAULT_CHUNK_SIZE` constant at arch doc :700 ✓
+  - `session_with_cdc(false)` at arch doc :702 ✓
+  - `?` instead of `.unwrap()` at arch doc :703/708/718/724/735/741/743 ✓
+  - `VertexEntity::hydrate_map` SSOT at arch doc :724 ✓
+  - `apply_loro_op` SSOT at arch doc :735 ✓
+  - `ORIGIN_LORO_BRIDGE` constant at arch doc :742 ✓
+  - `description` NOT written to Grafeo (no description extraction) ✓
+- L2-R2's 3 new fixes: ALL VERIFIED CORRECT.
+  - Line 662 narrative: routes `hydrate_map` errors via `Hydrate(#[from] lorosurgeon::error::HydrateError)` (NOT `Bridge(String)`); explicitly mentions "P3T2-L2R2 M2 replaces the prior `Bridge(format!(...))` band-aid" ✓
+  - Lines 705-724 pseudocode: shows `voc.into_container().ok().and_then(|c| c.into_map().ok()).ok_or_else(...)` — matches actual `parallel.rs:74-80` code exactly (`.ok()` collapse pattern). Comment at :709-714 explains the two-Result collapse. `hydrate_map` call at :724 uses `?` directly (no `.map_err`) ✓
+  - Line 753 API surface list: corrected from `Option<Container>`/`Option<LoroMap>` to `Result<Container, Self>`/`Result<LoroMap, Self>` with note about `.ok().and_then(...)` collapse ✓. Line 754 mentions the new `From<HydrateError>` impl routing ✓
+- Bonus: stale `FLAG(L3): no existing From<LoroProperty> for GraphValue` comment removed from arch doc (was at line 716-718 per HUNT; now replaced with `// L3 added: see src/types/values.rs:120-135` note at :722-723). ✓
+- NIT (not blocking): arch doc pseudocode error messages at :708 ("vertex {key} missing") and :718 ("vertex {key} not a Container::Map") differ slightly from actual code (`parallel.rs:68` says "vertex {key} missing from LoroMap"; `parallel.rs:79` says "vertex {key} is not a Container::Map"). Pseudocode is illustrative — acceptable cosmetic mismatch.
+
+### C. M2 fix verification (HydrateError From)
+- New variant at src/error.rs:37: VERIFIED — `Hydrate(#[from] lorosurgeon::error::HydrateError)` with `#[error("Hydrate error: {0}")]` at line 36, doc comment at :33-35. Placed correctly between `Bridge` and `TreeMoveCreatesCycle` variants.
+- Import path verified: `lorosurgeon::error::HydrateError` at `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lorosurgeon-0.2.1/src/error.rs:7-32` (5 variants: Loro/Unexpected/Missing/Json/Overflow); re-exported at `lorosurgeon::error::HydrateError` via `pub mod error` (lib.rs:270) and `lorosurgeon::HydrateError` via `pub use crate::error::{HydrateError, ReconcileError}` (lib.rs:291). Type path valid.
+- `HydrateError` derives `thiserror::Error` + `Debug` (verified error.rs:6) → `#[from]` attribute works (thiserror auto-generates `From<HydrateError> for GrafeoLoroError`). `std::error::Error` impl satisfied via thiserror. ✓
+- parallel.rs:81 uses `?` directly: VERIFIED — `let entity: VertexEntity = VertexEntity::hydrate_map(&vertex_map)?;` (no `.map_err(|e| GrafeoLoroError::Bridge(format!(...)))` wrapper). The `?` operator invokes the new `From<HydrateError>` impl.
+- `# Errors` rustdoc section at parallel.rs:31-35 documents BOTH `Bridge` (per-vertex shape mismatch at Loro container level) AND the new `Hydrate` variant (vertex field-shape mismatch — Missing/Unexpected/Overflow/Json). ✓
+- cargo check --all-targets passes: YES (exit 0, 5 substantive pre-existing baseline warnings + 2 cargo summary lines, 0 new).
+- plenger #4 (Band-Aids): REAL FIX — structured `HydrateError` variants (`Missing.key`/`Json.key` carry property-level context) preserved through `?` propagation; no longer stringified into `Bridge(format!(...))`. ✓
+- anti-plenger #2 (DRY): ONE definition of HydrateError conversion (via `#[from]`); no other call sites needed updating (grep of `HydrateError` in `src/` shows only `src/types/values.rs:7` import + `:40-52` `Hydrate` trait impl on `LoroProperty` which returns `Result<Self, HydrateError>` and does NOT need `GrafeoLoroError` conversion; `src/app.rs:371` is a doc comment only). ✓
+
+### D. M3 fix verification (Test 6 replacement)
+- New test name: VERIFIED — `parallel_hydrate_populates_bridge_maps` at `tests/unit/parallel_hydrate.rs:319` (replaced `parallel_hydrate_tags_origin_loro_bridge`).
+- Tests BridgeMaps population: VERIFIED — test asserts `id_map.len() == n` + `key_map.len() == n` + for each `loro_key`, `id_map[key]` exists + `key_map[id]` exists + `key_map[id] == key` (bidirectional inverse consistency). Real Phase 4 precondition contract (SyncEngine needs the inverse map to translate outbound CDC events).
+- Not a tautology of Test 3: VERIFIED — Test 3 (`parallel_hydrate_multi_chunk_respects_chunk_size` at :187-214) ONLY asserts `db.node_count() == 300` AND `maps.node_id_map.read().len() == 300` (count-only). Test 6 verifies the INVERSE direction (`node_key_map` exists with same cardinality AND `key_map[id] == key` round-trip). Test 3 does NOT cover this inverse-consistency contract — Test 6 provides NEW coverage.
+- plenger #8 (Goodhart): all 4 assertions real (`assert!(result.is_ok())` + `assert_eq!(id_map.len(), n)` + `assert_eq!(key_map.len(), n)` + `assert_eq!(inverse, key)`); no `assert!(true)`. ✓
+- plenger #2 (Tautology): real new coverage — BridgeMaps bidirectional inverse contract. ✓
+
+### E. m1 fix verification (Test 5 rename)
+- Renamed: VERIFIED — `parallel_hydrate_rejects_non_map_container` at `tests/unit/parallel_hydrate.rs:283` (replaced `parallel_hydrate_rejects_binary_property`).
+- Docstring at :262-281 explains the L3 deviation (originally specified as Binary rejection; changed to Container::List rejection because `VertexEntity::hydrate_map` SSOT rejects Binary at field-extraction level, not at the LoroValue level) AND cites `src/types/values.rs:296` `lval_to_gval_rejects_binary_and_container` for preserved Binary-rejection coverage. ✓ Verified the cited test exists at values.rs:296 (`fn lval_to_gval_rejects_binary_and_container` — exercises both Binary AND Container rejection paths).
+- Top-of-file edge case comment at :37-39 updated to reference the new test name `parallel_hydrate_rejects_non_map_container`. ✓
+
+### F. Full re-verification
+- `cargo test --all` → 47 PASS / 0 FAIL / 1 IGNORED (6 lib + 5 integration + 36 unit + 0 doc-tests; 1 unit IGNORED = the benchmark `parallel_hydrate_10k_nodes_under_500ms`). Matches L2-R2 claim ✓.
+- benchmark → PASS (3 runs: 0.49s/0.48s/0.51s total test runtime; hydration-only well under 500ms gate).
+- `grep -rn "TODO(L3)\|todo!\|unimplemented!" src/hydration/parallel.rs` → 0 matches ✓.
+- `grep -rn "#\[ignore\]" tests/unit/parallel_hydrate.rs` → 1 attribute (line 381, the benchmark); 2 additional doc-comment mentions (lines 4 + 378) which are NOT attributes ✓.
+- `grep -rn "allow(unused_imports)" tests/unit/parallel_hydrate.rs` → 0 matches ✓.
+- `cargo check --all-targets 2>&1` → 5 substantive pre-existing baseline warnings (app.rs:47 builder fields, app.rs:47 `db`, hydration/vector.rs:27 `generate_local_embedding`, presence/socket.rs:6 `room_id`, telemetry/health.rs:9 `doc`/`db`/`last_sync_ts`) + 2 cargo summary lines (`(lib) generated 5 warnings` + `(lib test) generated 5 warnings (5 duplicates)`) = 7 lines total. 0 new warnings. ✓
+
+### G. New issues introduced by L2-R2
+- None CRITICAL or MAJOR.
+- `From<HydrateError>` impl did NOT break any other code — grep of `HydrateError` in `src/` shows only `src/types/values.rs:7` import + `:40-52` `Hydrate` trait impl on `LoroProperty` (returns `Result<Self, HydrateError>`, does NOT need `GrafeoLoroError` conversion) + `src/error.rs:37` (the new variant) + `src/hydration/parallel.rs:35` (rustdoc). No other call sites need updating. ✓
+- Benchmark 10k vertex generation: UNCHANGED — still generates 10k UNIQUE vertices (keys `V/0` through `V/9999`), each with 2 labels + 3 properties (Bool/Integer/String). Lines 389-400 of test file. ✓
+- Test 6 replacement: NO new coupling — test uses `maps.node_id_map.read()` and `maps.node_key_map.read()`, which are PUBLIC fields of `BridgeMaps` (verified at `src/bridge/grafeo_tx.rs:28,30`); same access pattern as Test 1, Test 2, Test 3, Test 7, Test 8. ✓
+- Arch doc §16 update: NO new inconsistencies — pseudocode matches actual code at all structural points (function signature, flow, error routing, API surface list). Only NIT-level cosmetic wording differences in error message text (see §B NIT).
+- Pre-existing deferred MINOR (NOT new — NOT in L2-R2's task scope per HUNT's "MINOR (optional)" item 5): HUNT m3 (values.rs:124 doc comment "above" should be "below") and HUNT m5 (parallel.rs:14 `use crate::bridge::grafeo_tx::BridgeMaps` direct module access vs re-export `use crate::bridge::BridgeMaps`). L2-R2's explicit scope was C1/M1/M2/M3/m1 — m3 and m5 deferred. m4 was covered by M2. These remain as pre-existing MINORs (acceptable per HUNT's deferral).
+
+### Findings (categorized)
+#### CRITICAL
+- (none)
+#### MAJOR
+- (none)
+#### MINOR
+- (none blocking; pre-existing deferred m3/m5 from HUNT — NOT in L2-R2's explicit scope; informational only)
+#### NIT
+- n1: arch doc §16 pseudocode error messages at :708 + :718 differ slightly from actual `parallel.rs` error message text (cosmetic, illustrative-only pseudocode). Pseudocode is meant to be illustrative not literal — acceptable.
+
+### Verdict
+- **PROCEED**
+- All 5 L2-R2-targeted findings VERIFIED FIXED (C1 + M1 + M2 + M3 + m1).
+- 0 NEW CRITICAL introduced.
+- 0 NEW MAJOR introduced.
+- 0 NEW MINOR introduced (pre-existing m3/m5 deferred per HUNT, NOT in L2-R2 scope).
+- 1 NIT (cosmetic pseudocode wording) — acceptable.
+- 47 PASS / 0 FAIL / 1 IGNORED; benchmark PASS at 500ms gate (3/3 runs); 0 stubs; 0 new warnings.
+
+Stage Summary:
+- **Key findings**: All 5 L2-R2-targeted HUNT findings verified FIXED via independent re-verification (no trust): (1) C1 — benchmark assertion tightened from `< 1000ms` to `< 500ms` at test file :411; timing measures ONLY the hydration call (Instant::now() started after 10k Loro fixture loop); PASS 3/3 runs (0.49s/0.48s/0.51s total test runtime). (2) M1 — arch doc §16 all 13+ original stale points FIXED + 3 L2-R2-new fixes verified (line 662 narrative now cites Hydrate variant; lines 705-724 pseudocode now matches `.ok().and_then(|c| c.into_map().ok())` actual code; line 753 API surface corrected from `Option<T>` to `Result<T, Self>`; stale FLAG(L3) comment removed). (3) M2 — new `Hydrate(#[from] lorosurgeon::error::HydrateError)` variant at error.rs:37; import path verified (lorosurgeon::error::HydrateError at upstream error.rs:7-32, derives thiserror::Error + Debug → #[from] works); parallel.rs:81 uses `?` directly (no .map_err); # Errors rustdoc updated; plenger #4 (Band-Aids) REAL FIX. (4) M3 — Test 6 replaced with `parallel_hydrate_populates_bridge_maps` testing bidirectional inverse consistency (id_map ↔ key_map round-trip); NOT a tautology of Test 3 (Test 3 is count-only); all assertions real. (5) m1 — Test 5 renamed to `parallel_hydrate_rejects_non_map_container`; docstring + top-of-file comment cite preserved Binary-rejection coverage at values.rs:296. NO new issues introduced by L2-R2.
+- **Anti-plenger.md score**: 13/14 ✓ (rule 8 Observability still N/A — Phase 5 scope; all other rules satisfied). M2 (From<HydrateError>) is a REAL structural fix (not band-aid) — structured HydrateError variants (Missing.key/Json.key/Unexpected/Overflow) preserved through `?` propagation.
+- **Plenger-traits.md score**: 8/8 ✓ (all 8 anti-patterns cleared — rule 2 Tautology cleared by M3 fix; rule 4 Band-Aids cleared by M2 fix; rule 8 Goodhart cleared by C1 fix).
+- **Verdict**: **PROCEED** (0 CRITICAL + 0 MAJOR + 0 NEW MINOR + 1 NIT cosmetic).
