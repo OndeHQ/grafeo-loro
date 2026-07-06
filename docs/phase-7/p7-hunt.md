@@ -141,3 +141,27 @@ Only 1 ok path (L87). All error paths return `GrafeoLoroError::InvalidEnvelope(.
 **Verdict**: CLEAN.
 **Counts**: blockers 0, majors 0, minors 0, nits 0.
 
+## #8 Goodhart's Law — CLEAN (DEEPEST CHECK)
+
+**Hunt 1**: I12 body (`fuzz/fuzz_targets/consistency.rs:570-638`) — all 5 Goodhart sub-checks PASS:
+- ✅ Actually write vertex with Int64(1): L575-580 (`apply_loro_op(UpsertNode { ..., properties: [("v", GraphValue::Integer(1))] })` — codebase enum; bridge converts to grafeo `Int64(1)` on store)
+- ✅ Pin read session at older epoch E1: L587-588 (`read_session.set_viewing_epoch(e1)`)
+- ✅ Write Int64(2) at newer epoch E2: L602 (`w2.set_node_property(node_id, "v", grafeo::Value::Int64(2))` — direct grafeo API per Devil CB.2)
+- ✅ Assert pinned session sees Int64(1): L620-626 (`assert_eq!(v_at_e1, Some(grafeo::Value::Int64(1)))`)
+- ✅ Clear override + assert session sees Int64(2): L629 (`clear_viewing_epoch()`), L631-637 (`assert_eq!(v_now, Some(grafeo::Value::Int64(2)))`)
+
+All assertions are non-trivial, descriptive, and use real grafeo API responses. No hardcoded short-circuits. No `.is_ok()` shortcuts.
+
+**Hunt 2**: I15 body (`fuzz/fuzz_targets/consistency.rs:682-740`) uses PRODUCTION APIs:
+- ✅ L691: `PresenceManager::build_eph_envelope(room_id, payload)` (production, not hand-rolled)
+- ✅ L693: `PresenceManager::parse_eph_envelope(&envelope_bytes)` (production, not hand-rolled)
+- ✅ Positive path (L690-703): full round-trip with `assert_eq!(decoded.room_id, room_id)` + `assert_eq!(decoded.payload, *payload)` (struct-level PartialEq covers all fields)
+- ✅ Negative path 1 bad magic (L707-714): mutates real envelope bytes (`copy_from_slice(b"XXXX")`) — uses production buffer as starting point, not hand-rolled prefix
+- ✅ Negative path 2 truncated (L717-722): passes `EPH_MAGIC` (4 bytes) only
+- ✅ Negative path 3 bad serde (L728-739): hand-constructs prefix using `EPH_MAGIC` + `(room_id.len() as u16).to_le_bytes()` + room_id + `0x01` (EPH_MSG_TYPE_PRESENCE) + `b"not valid json {{{"`. All negative paths use `matches!(err, GrafeoLoroError::InvalidEnvelope(_))` — concrete variant check, NOT `.is_err()` shortcut.
+
+**Yellow flag (non-blocking, nit)**: Negative path 3 hand-constructs the prefix bytes rather than mutating a production-built envelope. If `build_eph_envelope`'s wire format ever changes, this test could silently rot. Mitigation: the positive path uses `build_eph_envelope` directly, so any format drift would break the positive path FIRST (clear signal). Acceptable risk; documented for transparency.
+
+**Verdict**: CLEAN. No Goodhart shortcuts.
+**Counts**: blockers 0, majors 0, minors 0, nits 1 (negative-path-3 prefix construction — fragile if wire format drifts, mitigated by positive-path dependency).
+
