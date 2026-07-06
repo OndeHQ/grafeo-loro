@@ -2663,3 +2663,66 @@ Stage Summary:
 - Spec compliance: all 4 Phase 3 Task 1 items satisfied (LZ4 APIs, Zstd stream level 3, LoroDocCompressionExt trait impl, validation gate test). docs/implementation-plan.md:62-64 + :79 fully covered.
 - Architecture doc §15: all 9 DEVIL M1 stale points fixed — verified by direct re-read of `docs/grafeo-loro.architecture.md:551-625`.
 - Verdict: **PROCEED** — push `p3-compression` (`$stn`), close Phase 3 Task 1 loop. L3's implementation is contract-correct, hallucination-free, tautology-free, and spec-compliant. The two MINOR findings (m1 cross-codec idempotency test, m2 corrupt-input negative test) are explicitly out-of-scope per Task 1 spec and can be addressed in L2-R2 or Phase 5 hardening without blocking the push.
+
+---
+Task ID: ORCH-P3T1-CLOSE
+Agent: Orchestrator (Super Z)
+Task: Close Plonga-Plongo-Loop iteration 1 for Phase 3 Task 1; verify HUNT verdict; push $stn; report
+
+Work Log:
+- Reviewed full Loop 1 chain: ORCH-P3T1-SETUP → P3T1-L1 → P3T1-DEVIL → P3T1-L2 → P3T1-L3 → P3T1-HUNT.
+- P3T1-HUNT verdict: **PROCEED** (0 CRITICAL, 0 MAJOR, 2 MINOR, 2 NIT — all MINOR/NIT are explicitly out-of-scope for Task 1 per spec; no L2-R2 round needed).
+- Committed HUNT's previously-uncommitted worklog entry (177 lines) as `ddc1bb2` (HUNT was read-only by mandate).
+- Independent orchestrator re-verification:
+  * `cargo check --all-targets` → 0 errors, 5 pre-existing warnings (identical to Phase 2 close baseline `a3ce426`).
+  * `cargo test --all` → **40 PASS / 0 FAIL / 0 IGNORED** (6 lib + 5 integration + 29 unit + 0 doctests). Up from 35/35 at Phase 2 close; +5 new compression tests.
+  * `grep -rn "TODO(L3)\|todo!\|unimplemented!" src/compression/` → 0 matches (zero stubs confirmed).
+  * `grep -rn "#\[ignore\]" tests/unit/compression.rs` → 0 matches (all 5 tests live).
+  * `grep -rn "allow(unused_imports)" tests/unit/compression.rs` → 0 matches (n3 silencer removed).
+- Independent orchestrator re-verification of API citations (spot-check 3 of 7):
+  * `lz4_flex::compress_prepend_size` at `lz4_flex-0.11.6/src/block/compress.rs:713` — VERIFIED.
+  * `LoroDoc::import` at `loro-1.13.6/src/lib.rs:710` returns `Result<ImportStatus, LoroError>` (L3's correction of L2's "bare ImportStatus" assumption is right).
+  * `zstd::stream::encode_all` at `zstd-0.13.3/src/stream/functions.rs:32` — VERIFIED.
+- Independent orchestrator re-verification of spec validation gate: `compression_zstd_preserves_loro_importability` asserts `doc_a.get_deep_value() == doc_b.get_deep_value()` (semantic CRDT deep-value equality, NOT byte-equality of payloads). No Goodhart risk.
+- Branch state: `p3-compression` has 11 commits beyond `phase-2` (`a3ce426`):
+  1. `236468e` ORCH-P3T1-SETUP
+  2. `1672114` P3T1-L1 code
+  3. `c9b6d09` P3T1-L1 worklog
+  4. `f45380a` P3T1-DEVIL worklog (read-only audit, no code)
+  5. `003421e` P3T1-L2 code
+  6. `293ed9b` P3T1-L2 worklog
+  7. `b3bb5ef` P3T1-L3 code (implementation + 5 tests)
+  8. `cd1cb6d` P3T1-L3 worklog
+  9. `ddc1bb2` P3T1-HUNT worklog (read-only audit, no code)
+  10. (this commit) ORCH-P3T1-CLOSE worklog
+- All commits already pushed to `origin/p3-compression` (pushes happened at L1, L2, L3 stages via inline-token URL — token never persisted to `.git/config`).
+- Token security: PAT `ghp_vW5H...` was used 4 times for push (L1, L2, L3, this close). User MUST revoke at https://github.com/settings/tokens after this session.
+
+Stage Summary:
+- $stn = `p3-compression` LIVE at https://github.com/OndeHQ/grafeo-loro/tree/p3-compression
+- Phase 3 Task 1 (Implement `compression::wrapper`: LZ4 + Zstd + `LoroDocCompressionExt` trait) **COMPLETE**.
+- Test count: 35 (Phase 2 baseline) + 5 (P3T1) = **40/40 PASS**, 0 FAIL, 0 IGNORED.
+- 4 contract fixes vs Phase 1 L1 skeleton (caught by P3T1-L1, ratified by P3T1-DEVIL):
+  * `compress` → `Result<Self, GrafeoLoroError>` (was infallible `Self`)
+  * `decompress` → `Result<Vec<u8>, GrafeoLoroError>` (was `Result<Vec<u8>, std::io::Error>`)
+  * `export_compressed` → `Result<CompressedPayload, GrafeoLoroError>` (was infallible)
+  * `import_compressed` → `Result<loro::ImportStatus, GrafeoLoroError>` + `&self` receiver (was `Result<()>` + `&mut self`; L3 corrected L2's "bare ImportStatus" assumption — `LoroDoc::import` returns `Result<ImportStatus, LoroError>`)
+- Architecture doc §15 updated to match corrected contracts (DEVIL M1 — 9 stale points fixed).
+- Anti-plenger.md score: 13/14 ✓ (1 DEFERRED = #8 Observability, scoped to Phase 5 per implementation-plan.md).
+- Plenger-traits.md score: 8/8 ✓ (zero anti-patterns).
+- Loop iterations: 1 (no L2-R2 round needed; HUNT found 0 MAJOR).
+- Validation gates met:
+  * "Test: Zstd roundtrip preserves Loro importability" — `compression_zstd_preserves_loro_importability` PASS (semantic deep-value equality).
+  * (Hydration 10k < 500ms benchmark and Vector-never-in-Loro test belong to Phase 3 Tasks 2 & 4 — not Task 1.)
+
+Next steps for user:
+1. **REVOKE the GitHub PAT** `ghp_***REDACTED***` immediately at https://github.com/settings/tokens (used 4× for push; still active).
+2. Decide branch strategy for `p3-compression`:
+   (a) Open PR `p3-compression` → `phase-2` for review-then-merge
+   (b) Continue Phase 3 Task 2 (`hydration::parallel::parallel_hydrate_grafeo`) on a new branch `p3-parallel-hydrate` layered on `p3-compression` (matches Phase 2 chain pattern)
+   (c) Aggregate all Phase 3 tasks into a single `phase-3` branch before opening PR
+3. Phase 3 remaining tasks (deferred to subsequent orchestrator sessions per framework rule "User will decide to proceed next task for new session loop"):
+   * Task 2: `hydration::parallel::parallel_hydrate_grafeo` (Rayon parallel chunks, per-chunk Grafeo tx, `lval_to_gval` for properties)
+   * Task 3: `hydration::vector::generate_local_embedding` (stub, deterministic dummy vector, ONNX warning log)
+   * Task 4: `VectorOffloadManager::handle_text_update` (embedding → direct Grafeo upsert, bypass Loro)
+   * Phase 3 validation gates owned by Tasks 2 & 4: "Hydration 10k nodes < 500ms on 8-core" benchmark; "Vector never written to Loro container" test.
