@@ -34,9 +34,37 @@ impl VectorOffloadManager {
 }
 
 /// Module-level once-guard for the ONNX stub warning (DEVIL NIT 1 + Q2:
-/// module-top placement is marginally preferred — grep-findable; L3 may move
-/// into the function body if preferred — both compile identically).
+/// module-top placement is marginally preferred — grep-findable).
 static ONNX_WARN_ONCE: Once = Once::new();
+
+/// Hand-rolled SplitMix64 PRNG (DEVIL Q5 — no `rand` dep). Reference:
+/// <https://prng.di.unimi.it/splitmix64.c>. Algorithm: increment state by the
+/// golden-ratio constant, then mix via xor-shift-multiply. ~10 LOC. Zero-seed
+/// safe (the `wrapping_add(0x9E3779B97F4A7C15)` on the first `next_u64` call
+/// produces a non-zero state, so the empty-input `""` case folds to seed `0u64`
+/// and the first sample is deterministic — anti-happy-path).
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+}
+
+/// Map a `u64` to `f32` in `[0.0, 1.0)` using the top 24 bits (float32 has a
+/// 24-bit mantissa — anti-plenger #10 fewest LOC, no precision loss vs the
+/// 53-bit `f64` formula `(x >> 11) as f32 / (1u64 << 53) as f32`).
+fn u64_to_f01(x: u64) -> f32 {
+    ((x >> 40) as f32) / ((1u64 << 24) as f32)
+}
 
 /// Deterministic dummy embedding generator (ONNX stub). Returns a
 /// `DEFAULT_EMBEDDING_DIM`-dimensional vector derived deterministically from
@@ -54,20 +82,20 @@ pub fn generate_local_embedding(text: &str) -> Result<Vec<f32>> {
     ONNX_WARN_ONCE.call_once(|| {
         warn!("ONNX not integrated; returning deterministic dummy embedding");
     });
-    // TODO(L3): deterministic dummy algorithm (DEVIL Q5 + L1 decision 3):
-    //   1. Fold text bytes into a u64 seed:
-    //      `text.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))`
-    //   2. Seed a hand-rolled SplitMix64 PRNG (~10 LOC, no `rand` dep).
-    //      Reference: https://prng.di.unimi.it/splitmix64.c
-    //      grafeo-engine has a `MockEmbeddingModel` at
-    //      `grafeo-engine-0.5.42/src/embedding/mod.rs:62-93` with a similar
-    //      fold-seed-derive pattern (`#[cfg(test)]`-private, algorithm
-    //      reference only — NOT reusable from grafeo-loro).
-    //   3. Emit `DEFAULT_EMBEDDING_DIM` f32 samples in `[0.0, 1.0)` via
-    //      `(next_u64() >> 11) as f32 / (1u64 << 53) as f32`.
-    //   4. Return `Ok(vec![...])`.
-    //   Verify: same `text` → byte-identical `Vec<f32>`; empty `""` → valid
-    //   `DEFAULT_EMBEDDING_DIM`-length vector (PRNG zero-seed must not panic).
-    let _ = (text, DEFAULT_EMBEDDING_DIM);
-    todo!("L3: deterministic dummy embedding via fold-seed-SplitMix64")
+
+    // Fold text bytes into a u64 seed (deterministic, input-sensitive).
+    let seed: u64 = text
+        .bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+
+    // Hand-rolled SplitMix64 PRNG (no `rand` dep — DEVIL Q5). Reference:
+    // https://prng.di.unimi.it/splitmix64.c. grafeo-engine's `MockEmbeddingModel`
+    // at `grafeo-engine-0.5.42/src/embedding/mod.rs:62-93` uses a similar
+    // fold-seed-derive pattern (`#[cfg(test)]`-private, algorithm reference only).
+    let mut rng = SplitMix64::new(seed);
+    let mut vec = Vec::with_capacity(DEFAULT_EMBEDDING_DIM);
+    for _ in 0..DEFAULT_EMBEDDING_DIM {
+        vec.push(u64_to_f01(rng.next_u64()));
+    }
+    Ok(vec)
 }

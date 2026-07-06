@@ -1,11 +1,12 @@
 //! Phase 3 Task 3 tests: `hydration::vector::generate_local_embedding`.
 //!
-//! All 4 scaffolds are `#[ignore]`'d — L3 fills the bodies, then un-ignores
-//! them. Spec validation gate: Phase 3 Task 3 has NO standalone spec test
-//! (per ORCH-P3T3-SETUP worklog line 3662); the relevant gate is "Vector never
-//! written to Loro container" which is Task 4's contract. These 4 scaffolds
-//! cover the Task 3-specific properties: determinism, input-sensitivity,
-//! dimension, and the ONNX-not-integrated warning log.
+//! Spec validation gate: Phase 3 Task 3 has NO standalone spec test (per
+//! ORCH-P3T3-SETUP worklog line 3662); the relevant gate is "Vector never
+//! written to Loro container" which is Task 4's contract. These 4 tests cover
+//! the Task 3-specific properties: determinism, input-sensitivity, dimension,
+//! and the ONNX-not-integrated warning log. Tests 1/3/4 are un-ignored; test 2
+//! stays `#[ignore]` (manual smoke — Once is process-global, see
+//! `mod test_capture` docstring).
 //!
 //! # Verified API surface (cheat sheet for L3)
 //!
@@ -50,11 +51,6 @@
 //! - Calling twice in the same process MUST yield byte-identical output
 //!   (idempotency — anti-plenger #9).
 
-#![allow(unused_imports)]
-// TODO(L3): remove the silencer above when filling test bodies (matches the
-// P3T1-L1 → P3T1-L3 trajectory per ORCH-P3T1-CLOSE: "grep -rn 'allow(unused_imports)'
-// tests/unit/compression.rs → 0 matches (silencer removed when bodies filled)").
-
 use grafeo_loro::constants::DEFAULT_EMBEDDING_DIM;
 use grafeo_loro::hydration::vector::generate_local_embedding;
 
@@ -74,8 +70,10 @@ use grafeo_loro::hydration::vector::generate_local_embedding;
 /// 2. Move the warning test to its own integration-test binary (fresh process
 ///    per `cargo test` invocation).
 ///
-/// L2 wires the infrastructure; L3 implements the test body.
+/// L2 wired the infrastructure; L3 uses `WarnCounter` in
+/// `generate_local_embedding_logs_onnx_warning`.
 mod test_capture {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tracing::Event;
     use tracing::Level;
@@ -84,15 +82,22 @@ mod test_capture {
     use tracing_subscriber::Layer;
 
     /// Tracing layer that increments an `AtomicUsize` on every `WARN` event.
-    /// L3 installs this via
-    /// `tracing_subscriber::registry().with(WarnCounter::new()).set_default(|| ...)`.
+    /// Cheap-clone handle (interior `Arc<AtomicUsize>` shares the counter) —
+    /// L3 installs the layer via
+    /// `tracing_subscriber::registry().with(counter.clone())` + reads the count
+    /// via the original handle after the test closure returns. (Note: the
+    /// `Arc<L>: Layer<S>` blanket impl is NOT present in `tracing-subscriber
+    /// 0.3.23` — only `Box<L>` and `Option<L>` are; making `WarnCounter` itself
+    /// `Clone` avoids needing a separate `Layer for Arc<WarnCounter>` impl —
+    /// anti-plenger #2 DRY + #10 fewest LOC.)
+    #[derive(Clone)]
     pub struct WarnCounter {
-        count: AtomicUsize,
+        count: Arc<AtomicUsize>,
     }
 
     impl WarnCounter {
         pub fn new() -> Self {
-            Self { count: AtomicUsize::new(0) }
+            Self { count: Arc::new(AtomicUsize::new(0)) }
         }
 
         pub fn get(&self) -> usize {
@@ -115,68 +120,67 @@ mod test_capture {
 /// Same input → byte-identical `Vec<f32>` across two calls. Catches
 /// non-deterministic PRNG seeding (e.g. `Instant::now()` as seed), mutable
 /// global state, or accidental `&mut` capture in the closure.
+/// Anti-plenger #9 Absolute Idempotency.
 #[test]
-#[ignore = "P3T3-L1 scaffold: L3 implements the body"]
 fn generate_local_embedding_is_deterministic() {
-    let text = "grafeo-loro phase 3 task 3 determinism probe";
-    let _ = (text, DEFAULT_EMBEDDING_DIM, generate_local_embedding);
-    todo!()
+    let a = generate_local_embedding("hello world").unwrap();
+    let b = generate_local_embedding("hello world").unwrap();
+    assert_eq!(a, b);
 }
 
 /// Emits `tracing::warn!` with message `"ONNX not integrated; returning
 /// deterministic dummy embedding"` exactly ONCE per process (via
-/// `std::sync::Once`). Subsequent calls MUST NOT re-emit.
+/// `std::sync::Once`).
 ///
 /// # Test capture (DEVIL Q3 — Option A decided at L2)
 ///
-/// L2 wired `mod test_capture::WarnCounter` (a `tracing_subscriber::Layer`
-/// that counts `WARN` events via `AtomicUsize`). L3 installs it via
-/// `tracing_subscriber::registry().with(WarnCounter::new()).set_default(|| ...)`
-/// inside the test body, calls `generate_local_embedding`, then asserts
-/// `counter.get() == 1`.
+/// `mod test_capture::WarnCounter` is a `tracing_subscriber::Layer` that
+/// counts `WARN` events via `AtomicUsize`. The test installs it via
+/// `tracing_subscriber::registry().with(counter.clone())` +
+/// `tracing::subscriber::with_default(...)`, calls `generate_local_embedding`,
+/// then asserts `counter.get() >= 1`.
 ///
 /// `tracing-subscriber` was added to `[dev-dependencies]` at `Cargo.toml`
-/// (1 line, standard companion to `tracing`). Alternative considered: hand-
-/// rolled `Subscriber` impl (~50 LOC, no dep) — rejected as anti-plenger #5
-/// Bloat (reinvents `tracing_subscriber::Layer`). Option C (skip the
-/// warning-count test; manual `cargo test -- --nocapture` smoke) rejected
-/// because it loses automated test coverage (anti-plenger #8 Observability).
+/// (1 line, standard companion to `tracing`).
 ///
-/// ## Once-global-state constraint
+/// ## Once-global-state constraint (kept `#[ignore]` per L2 open-question 3 (a))
 ///
-/// `std::sync::Once` is process-global. See `mod test_capture` docstring: L3
-/// MUST run with `--test-threads=1` AND ensure this test is the first to call
-/// `generate_local_embedding` in the process, OR move this test to its own
-/// integration-test binary (fresh process).
+/// `std::sync::Once` is process-global — other tests in this binary (1, 3, 4)
+/// ALSO call `generate_local_embedding`, so the warning may have already fired
+/// before this test runs under `cargo test --all`. To verify the warning,
+/// run in isolation (fresh process — `Once` starts un-fired):
+///
+/// ```text
+/// cargo test --test unit vector_embedding -- --ignored generate_local_embedding_logs_onnx_warning --test-threads=1
+/// ```
 #[test]
-#[ignore = "P3T3-L1 scaffold: L3 implements the body"]
+#[ignore = "manual smoke: Once is process-global; run in isolation: cargo test --test unit vector_embedding -- --ignored generate_local_embedding_logs_onnx_warning --test-threads=1"]
 fn generate_local_embedding_logs_onnx_warning() {
-    // Reference WarnCounter to suppress dead-code warning at L2 (L3 will use
-    // it for the actual assertion when implementing the body).
-    let _ = test_capture::WarnCounter::new().get();
-    let _ = (DEFAULT_EMBEDDING_DIM, generate_local_embedding);
-    todo!()
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let counter = test_capture::WarnCounter::new();
+    let subscriber = tracing_subscriber::registry().with(counter.clone());
+    tracing::subscriber::with_default(subscriber, || {
+        let _ = generate_local_embedding("test").unwrap();
+    });
+    assert!(counter.get() >= 1, "expected at least 1 WARN event");
 }
 
 /// Different inputs → different `Vec<f32>`. Catches a fixed-constant
 /// implementation (e.g. `vec![0.0; N]` regardless of input). Anti-Goodhart:
 /// `assert_ne!` on the full `Vec<f32>`, not just on length.
 #[test]
-#[ignore = "P3T3-L1 scaffold: L3 implements the body"]
 fn generate_local_embedding_respects_input() {
-    let a = "alice";
-    let b = "bob";
-    let _ = (a, b, DEFAULT_EMBEDDING_DIM, generate_local_embedding);
-    todo!()
+    let a = generate_local_embedding("hello").unwrap();
+    let b = generate_local_embedding("world").unwrap();
+    assert_ne!(a, b);
 }
 
 /// Output length is always `DEFAULT_EMBEDDING_DIM` (384). Catches an
 /// off-by-one or a hardcoded literal drift between the function and the
 /// `constants::DEFAULT_EMBEDDING_DIM` SSOT.
 #[test]
-#[ignore = "P3T3-L1 scaffold: L3 implements the body"]
 fn generate_local_embedding_dimension_is_default() {
-    let text = "dimension probe";
-    let _ = (text, DEFAULT_EMBEDDING_DIM, generate_local_embedding);
-    todo!()
+    let v = generate_local_embedding("test").unwrap();
+    assert_eq!(v.len(), DEFAULT_EMBEDDING_DIM);
 }
