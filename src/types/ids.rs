@@ -5,9 +5,9 @@
 //! conversion overhead, no risk of two `u64` newtypes drifting. `PeerId`
 //! stays local because grafeo has no CRDT peer concept.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-pub use grafeo::{NodeId, EdgeId};
+pub use grafeo::{EdgeId, NodeId};
 
 /// CRDT peer identifier. No grafeo equivalent — Loro-only concept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

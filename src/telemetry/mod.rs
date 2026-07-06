@@ -32,9 +32,9 @@ use std::sync::Arc;
 
 use opentelemetry::global::BoxedTracer;
 
+pub mod health;
 pub mod metrics;
 pub mod traces;
-pub mod health;
 
 pub use health::{HealthProbe, HealthStatus};
 pub use metrics::{HydrationMode, MetricsRegistry};

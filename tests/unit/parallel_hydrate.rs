@@ -52,8 +52,8 @@ use grafeo_loro::hydration::parallel_hydrate_grafeo;
 use grafeo_loro::schema::VertexEntity;
 use grafeo_loro::types::values::GraphValue;
 use grafeo_loro::types::LoroProperty;
-use lorosurgeon::{Reconcile, RootReconciler};
 use loro::LoroDoc;
+use lorosurgeon::{Reconcile, RootReconciler};
 
 /// Insert `entity` into `doc.get_map("V")[loro_key]` as a `Container::Map`
 /// (the cold-boot read path expects `Container::Map`, not `LoroValue::Map`).
@@ -62,7 +62,9 @@ use loro::LoroDoc;
 /// (`parallel_hydrate_grafeo`) owns the Grafeo write.
 fn reconcile_vertex_into_loro(doc: &LoroDoc, loro_key: &str, entity: &VertexEntity) {
     let v_map = doc.get_map(ROOT_VERTICES);
-    let node_map = v_map.ensure_mergeable_map(loro_key).expect("ensure_mergeable_map");
+    let node_map = v_map
+        .ensure_mergeable_map(loro_key)
+        .expect("ensure_mergeable_map");
     entity
         .reconcile(RootReconciler::new(node_map))
         .expect("reconcile VertexEntity");
@@ -86,9 +88,9 @@ fn assert_grafeo_node(
     expected_props: &[(&str, GraphValue)],
 ) {
     let session = db.session();
-    let node = session.get_node(node_id).unwrap_or_else(|| {
-        panic!("grafeo should have node {node_id:?}")
-    });
+    let node = session
+        .get_node(node_id)
+        .unwrap_or_else(|| panic!("grafeo should have node {node_id:?}"));
     for lbl in expected_labels {
         assert!(
             node.has_label(lbl),
@@ -131,8 +133,15 @@ fn parallel_hydrate_empty_doc_no_op() {
     let maps = BridgeMaps::new();
 
     let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
-    assert!(result.is_ok(), "empty-doc hydrate should be Ok, got {result:?}");
-    assert_eq!(db.node_count(), 0, "no nodes should exist after empty hydrate");
+    assert!(
+        result.is_ok(),
+        "empty-doc hydrate should be Ok, got {result:?}"
+    );
+    assert_eq!(
+        db.node_count(),
+        0,
+        "no nodes should exist after empty hydrate"
+    );
     assert!(
         maps.node_id_map.read().is_empty(),
         "BridgeMaps should have zero bindings after empty hydrate"
@@ -160,7 +169,10 @@ fn parallel_hydrate_single_vertex_roundtrip() {
     reconcile_vertex_into_loro(&doc, loro_key, &entity);
 
     let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
-    assert!(result.is_ok(), "single-vertex hydrate should be Ok, got {result:?}");
+    assert!(
+        result.is_ok(),
+        "single-vertex hydrate should be Ok, got {result:?}"
+    );
 
     assert_eq!(db.node_count(), 1, "exactly 1 node should exist");
     let node_id = *maps
@@ -199,7 +211,10 @@ fn parallel_hydrate_multi_chunk_respects_chunk_size() {
     }
 
     let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
-    assert!(result.is_ok(), "300-vertex hydrate should be Ok, got {result:?}");
+    assert!(
+        result.is_ok(),
+        "300-vertex hydrate should be Ok, got {result:?}"
+    );
 
     assert_eq!(
         db.node_count(),
@@ -229,7 +244,7 @@ fn parallel_hydrate_preserves_property_types() {
         HashMap::from([
             ("b".into(), LoroProperty::Bool(true)),
             ("i".into(), LoroProperty::Integer(42)),
-            ("f".into(), LoroProperty::Float(3.14)),
+            ("f".into(), LoroProperty::Float(3.5)),
             ("s".into(), LoroProperty::String("hello".into())),
             ("n".into(), LoroProperty::Null),
         ]),
@@ -238,7 +253,10 @@ fn parallel_hydrate_preserves_property_types() {
     reconcile_vertex_into_loro(&doc, loro_key, &entity);
 
     let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
-    assert!(result.is_ok(), "typed-props hydrate should be Ok, got {result:?}");
+    assert!(
+        result.is_ok(),
+        "typed-props hydrate should be Ok, got {result:?}"
+    );
 
     let node_id = *maps
         .node_id_map
@@ -252,7 +270,7 @@ fn parallel_hydrate_preserves_property_types() {
         &[
             ("b", GraphValue::Bool(true)),
             ("i", GraphValue::Integer(42)),
-            ("f", GraphValue::Float(3.14)),
+            ("f", GraphValue::Float(3.5)),
             ("s", GraphValue::String("hello".into())),
             ("n", GraphValue::Null),
         ],
@@ -274,7 +292,7 @@ fn parallel_hydrate_preserves_property_types() {
 /// `lval_to_gval` rejection is therefore unreachable through this code path.
 /// Per the L3 task spec, this test was CHANGED to assert the malformed-shape
 /// rejection arm in `parallel_hydrate_grafeo` itself (`voc.into_container()`
-/// + `c.into_map()` collapse to `None` when the sub-map is a `Container::List`).
+/// and `c.into_map()` collapse to `None` when the sub-map is a `Container::List`).
 /// P3T2-L2R2 m1: renamed from `parallel_hydrate_rejects_binary_property` to
 /// `parallel_hydrate_rejects_non_map_container` to reflect what the test
 /// actually asserts (the original Binary-rejection coverage is preserved at
@@ -292,14 +310,19 @@ fn parallel_hydrate_rejects_non_map_container() {
         .expect("ensure_mergeable_list");
     doc.commit();
 
-    let err = parallel_hydrate_grafeo(&db, &doc, &maps, None, None).expect_err("expected Bridge error");
+    let err =
+        parallel_hydrate_grafeo(&db, &doc, &maps, None, None).expect_err("expected Bridge error");
     assert!(
         matches!(err, grafeo_loro::error::GrafeoLoroError::Bridge(_)),
         "expected Bridge error for malformed vertex shape, got {err:?}"
     );
     // Anti-Goodhart: the malformed vertex was the only entry, so no partial
     // commit occurred (the failing chunk's session auto-rolled back).
-    assert_eq!(db.node_count(), 0, "no nodes should exist after failed hydrate");
+    assert_eq!(
+        db.node_count(),
+        0,
+        "no nodes should exist after failed hydrate"
+    );
 }
 
 /// Side-effect contract: `parallel_hydrate_grafeo` populates `BridgeMaps`
@@ -437,7 +460,10 @@ fn parallel_hydrate_vertex_with_no_properties() {
     reconcile_vertex_into_loro(&doc, loro_key, &entity);
 
     let result = parallel_hydrate_grafeo(&db, &doc, &maps, None, None);
-    assert!(result.is_ok(), "empty-props hydrate should be Ok, got {result:?}");
+    assert!(
+        result.is_ok(),
+        "empty-props hydrate should be Ok, got {result:?}"
+    );
 
     assert_eq!(db.node_count(), 1, "exactly 1 node should exist");
     let node_id = *maps

@@ -9,11 +9,11 @@
 //! Loro 1.x uses an **auto-commit** model: there is no `transact_mut()`. The
 //! `LoroDoc` is `Send + Sync` and exposes `set_next_commit_origin(&self, &str)`
 //! + `commit(&self)` — both `&self`. We still wrap it in `Arc<RwLock<LoroDoc>>`
-//! to **logically serialize** the `set_next_commit_origin + commit` pair on
-//! the outbound path: holding the write lock across both calls prevents a
-//! peer's commit from interleaving between our `set_next_commit_origin` and
-//! our `commit`, which would tag the wrong origin on the wrong commit. This
-//! is the only reason for the `RwLock`; it is NOT for thread safety.
+//!   to **logically serialize** the `set_next_commit_origin + commit` pair on
+//!   the outbound path: holding the write lock across both calls prevents a
+//!   peer's commit from interleaving between our `set_next_commit_origin` and
+//!   our `commit`, which would tag the wrong origin on the wrong commit. This
+//!   is the only reason for the `RwLock`; it is NOT for thread safety.
 //!
 //! ## Grafeo concurrency model
 //!
@@ -54,14 +54,15 @@ use std::sync::Arc;
 use grafeo::GrafeoDB;
 use grafeo_common::types::EpochId;
 use loro::LoroDoc;
-use opentelemetry::KeyValue;
 use opentelemetry::trace::Tracer;
+use opentelemetry::KeyValue;
 use parking_lot::RwLock;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::bridge::batcher::MutationBatcher;
 use crate::bridge::grafeo_tx::{BridgeMaps, EdgeKey};
+use crate::constants::EPOCH_RETENTION;
 use crate::constants::{
     ORIGIN_GRAFEO_BRIDGE, ORIGIN_LORO_BRIDGE, OUTBOUND_POLL_MS, ROOT_EDGES, ROOT_VERTICES,
 };
@@ -69,7 +70,6 @@ use crate::error::Result;
 use crate::telemetry::{HealthProbe, MetricsRegistry, SharedTracer};
 use crate::types::events::{CdcEventWrapper, LoroOp};
 use crate::types::values::{grafeo_value_to_lval, lval_to_gval};
-use crate::constants::EPOCH_RETENTION;
 
 /// Inbound channel payload: a Loro subscriber event translated to a graph op.
 pub enum InboundMsg {
@@ -152,10 +152,10 @@ pub struct SyncEngine {
     pub(crate) tracer: Option<SharedTracer>,
     /// Optional health probe (P5-L2 Devil M3 / Q10 — symmetric with `metrics`
     /// + `tracer`). `Some` in production; `None` in tests. `spawn_outbound_worker`
-    /// calls `health.update_sync_ts()` after each successful Loro commit, and
-    /// the internal `MutationBatcher` calls it after each successful inbound
-    /// flush. Architecture §23.3 says "last sync" = both inbound flush AND
-    /// outbound commit, so both paths stamp the same `last_sync_ts`.
+    ///   calls `health.update_sync_ts()` after each successful Loro commit, and
+    ///   the internal `MutationBatcher` calls it after each successful inbound
+    ///   flush. Architecture §23.3 says "last sync" = both inbound flush AND
+    ///   outbound commit, so both paths stamp the same `last_sync_ts`.
     pub(crate) health: Option<Arc<HealthProbe>>,
 }
 
@@ -181,7 +181,11 @@ impl SyncEngine {
     pub fn new(
         grafeo_db: Arc<GrafeoDB>,
         loro_doc: Arc<RwLock<LoroDoc>>,
-    ) -> (Self, mpsc::Receiver<InboundMsg>, mpsc::Receiver<OutboundMsg>) {
+    ) -> (
+        Self,
+        mpsc::Receiver<InboundMsg>,
+        mpsc::Receiver<OutboundMsg>,
+    ) {
         Self::new_inner(
             grafeo_db,
             loro_doc,
@@ -203,14 +207,18 @@ impl SyncEngine {
     ///
     /// This constructor does NOT take telemetry params — `metrics` + `tracer`
     /// + `health` default to `None`. Production code that needs telemetry should
-    /// use [`Self::with_telemetry`] (added P5-L1). Devil Q11 — should this
-    /// constructor be deprecated in favor of `with_telemetry`?
+    ///   use [`Self::with_telemetry`] (added P5-L1). Devil Q11 — should this
+    ///   constructor be deprecated in favor of `with_telemetry`?
     pub fn with_batch_config(
         grafeo_db: Arc<GrafeoDB>,
         loro_doc: Arc<RwLock<LoroDoc>>,
         batch_size: usize,
         batch_ms: u64,
-    ) -> (Self, mpsc::Receiver<InboundMsg>, mpsc::Receiver<OutboundMsg>) {
+    ) -> (
+        Self,
+        mpsc::Receiver<InboundMsg>,
+        mpsc::Receiver<OutboundMsg>,
+    ) {
         Self::new_inner(grafeo_db, loro_doc, batch_size, batch_ms, None, None, None)
     }
 
@@ -243,8 +251,14 @@ impl SyncEngine {
         metrics: Option<Arc<MetricsRegistry>>,
         tracer: Option<SharedTracer>,
         health: Option<Arc<HealthProbe>>,
-    ) -> (Self, mpsc::Receiver<InboundMsg>, mpsc::Receiver<OutboundMsg>) {
-        Self::new_inner(grafeo_db, loro_doc, batch_size, batch_ms, metrics, tracer, health)
+    ) -> (
+        Self,
+        mpsc::Receiver<InboundMsg>,
+        mpsc::Receiver<OutboundMsg>,
+    ) {
+        Self::new_inner(
+            grafeo_db, loro_doc, batch_size, batch_ms, metrics, tracer, health,
+        )
     }
 
     /// Shared constructor body (DRY — anti-plenger #2). Parameterized on the
@@ -265,7 +279,11 @@ impl SyncEngine {
         metrics: Option<Arc<MetricsRegistry>>,
         tracer: Option<SharedTracer>,
         health: Option<Arc<HealthProbe>>,
-    ) -> (Self, mpsc::Receiver<InboundMsg>, mpsc::Receiver<OutboundMsg>) {
+    ) -> (
+        Self,
+        mpsc::Receiver<InboundMsg>,
+        mpsc::Receiver<OutboundMsg>,
+    ) {
         let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -362,56 +380,59 @@ impl SyncEngine {
         // `subscribe_root(&self, Subscriber)` — read guard suffices.
         let doc = self.loro_doc.read();
 
-        let handler: loro::event::Subscriber = Arc::new(move |event: loro::event::DiffEvent<'_>| {
-            // P5-L2 wiring: `metrics` is captured by `move` so the L3
-            // `echo_filtered.add(...)` call inside the origin-filter branch
-            // below has the handle in scope. Until L3 fills the body, the
-            // noop borrow suppresses the unused-variable warning.
-            let _ = &metrics;
-            // Drop events generated by our own bridge (echo prevention).
-            //
-            // `ORIGIN_GRAFEO_BRIDGE` tags the outbound worker's Loro writes
-            // (Grafeo→Loro direction). `ORIGIN_LORO_BRIDGE` tags the local
-            // RYOW path in `VertexBuilder::commit` (P2T3-L2 BLOCKER B1) —
-            // `commit()` writes Loro first, then Grafeo; without this filter
-            // clause the synchronous subscriber would re-apply the same vertex
-            // to Grafeo via the batcher, producing either a duplicate
-            // label-less node (race case — `translate_diff_event` always
-            // emits `labels: Vec::new()`, see P2T3-DEVIL M4) or a spurious
-            // no-op Grafeo commit polluting the epoch side-channel (common
-            // case). Phase 1 tests never set `ORIGIN_LORO_BRIDGE` as a Loro
-            // commit origin (the constant is only used as advisory
-            // `PreparedCommit::set_metadata`, which is dropped on commit),
-            // so the extension is a no-op for existing tests.
-            //
-            // P2T3-L2R2 MAJOR 2: increment `inbound_filtered_count` so tests
-            // can directly observe filter activity. `inbound_event_count`
-            // alone is insufficient — `translate_diff_event` also silently
-            // skips Container-ref diffs (the diff shape produced by
-            // `ensure_mergeable_map` in `commit()`), so a filter regression
-            // would NOT increment `inbound_event_count`.
-            if event.origin == ORIGIN_GRAFEO_BRIDGE || event.origin == ORIGIN_LORO_BRIDGE {
-                inbound_filtered_count.fetch_add(1, Ordering::Relaxed);
-                // P5-L3: bump OTel `echo_filtered` counter with
-                // `direction=inbound` label (architecture §23.1 row 3).
-                // The `inbound_filtered_count` test counter coexists with
-                // this OTel counter (Devil Q12 — different boundaries).
-                if let Some(m) = metrics.as_ref() {
-                    m.echo_filtered.add(1, &[KeyValue::new("direction", "inbound")]);
-                }
-                return;
-            }
-            let ops = translate_diff_event(&event);
-            for op in ops {
-                if let Err(e) = inbound_tx.try_send(InboundMsg::Op(op)) {
-                    tracing::warn!(error = %e, "inbound channel full or closed; dropping LoroOp");
+        let handler: loro::event::Subscriber = Arc::new(
+            move |event: loro::event::DiffEvent<'_>| {
+                // P5-L2 wiring: `metrics` is captured by `move` so the L3
+                // `echo_filtered.add(...)` call inside the origin-filter branch
+                // below has the handle in scope. Until L3 fills the body, the
+                // noop borrow suppresses the unused-variable warning.
+                let _ = &metrics;
+                // Drop events generated by our own bridge (echo prevention).
+                //
+                // `ORIGIN_GRAFEO_BRIDGE` tags the outbound worker's Loro writes
+                // (Grafeo→Loro direction). `ORIGIN_LORO_BRIDGE` tags the local
+                // RYOW path in `VertexBuilder::commit` (P2T3-L2 BLOCKER B1) —
+                // `commit()` writes Loro first, then Grafeo; without this filter
+                // clause the synchronous subscriber would re-apply the same vertex
+                // to Grafeo via the batcher, producing either a duplicate
+                // label-less node (race case — `translate_diff_event` always
+                // emits `labels: Vec::new()`, see P2T3-DEVIL M4) or a spurious
+                // no-op Grafeo commit polluting the epoch side-channel (common
+                // case). Phase 1 tests never set `ORIGIN_LORO_BRIDGE` as a Loro
+                // commit origin (the constant is only used as advisory
+                // `PreparedCommit::set_metadata`, which is dropped on commit),
+                // so the extension is a no-op for existing tests.
+                //
+                // P2T3-L2R2 MAJOR 2: increment `inbound_filtered_count` so tests
+                // can directly observe filter activity. `inbound_event_count`
+                // alone is insufficient — `translate_diff_event` also silently
+                // skips Container-ref diffs (the diff shape produced by
+                // `ensure_mergeable_map` in `commit()`), so a filter regression
+                // would NOT increment `inbound_event_count`.
+                if event.origin == ORIGIN_GRAFEO_BRIDGE || event.origin == ORIGIN_LORO_BRIDGE {
+                    inbound_filtered_count.fetch_add(1, Ordering::Relaxed);
+                    // P5-L3: bump OTel `echo_filtered` counter with
+                    // `direction=inbound` label (architecture §23.1 row 3).
+                    // The `inbound_filtered_count` test counter coexists with
+                    // this OTel counter (Devil Q12 — different boundaries).
+                    if let Some(m) = metrics.as_ref() {
+                        m.echo_filtered
+                            .add(1, &[KeyValue::new("direction", "inbound")]);
+                    }
                     return;
                 }
-                // Count successful sends — gives tests a deterministic hook to
-                // assert no echo occurred during a settle window (Hunter MAJOR 3).
-                inbound_event_count.fetch_add(1, Ordering::Relaxed);
-            }
-        });
+                let ops = translate_diff_event(&event);
+                for op in ops {
+                    if let Err(e) = inbound_tx.try_send(InboundMsg::Op(op)) {
+                        tracing::warn!(error = %e, "inbound channel full or closed; dropping LoroOp");
+                        return;
+                    }
+                    // Count successful sends — gives tests a deterministic hook to
+                    // assert no echo occurred during a settle window (Hunter MAJOR 3).
+                    inbound_event_count.fetch_add(1, Ordering::Relaxed);
+                }
+            },
+        );
 
         let sub = doc.subscribe_root(handler);
         *self.loro_sub.lock() = Some(sub);
@@ -456,9 +477,9 @@ impl SyncEngine {
             // held in `_parent_span` for the duration of the loop below.
             // Child spans (`receive_loro_event`, `batch_flush`) are emitted
             // by the batcher's `flush_inner` (separate concern).
-            let _parent_span = tracer.as_ref().map(|t| {
-                crate::telemetry::traces::create_inbound_sync_span(t.as_ref())
-            });
+            let _parent_span = tracer
+                .as_ref()
+                .map(|t| crate::telemetry::traces::create_inbound_sync_span(t.as_ref()));
             loop {
                 tokio::select! {
                     biased;
@@ -540,9 +561,9 @@ impl SyncEngine {
             // P5-L3: open `outbound_sync_loop` parent span (architecture
             // §23.2 tree row 3, lines 1050-1052 — Devil M4). One per worker
             // lifetime; held in `_parent_span` for the duration of the loop.
-            let _parent_span = tracer.as_ref().map(|t| {
-                crate::telemetry::traces::create_outbound_sync_span(t.as_ref())
-            });
+            let _parent_span = tracer
+                .as_ref()
+                .map(|t| crate::telemetry::traces::create_outbound_sync_span(t.as_ref()));
             loop {
                 tokio::select! {
                     biased;
@@ -969,7 +990,7 @@ fn apply_change_event_to_loro(
         (EntityId::Edge(edge_id), ChangeKind::Create) => {
             // Create events populate src_id/dst_id/edge_type — use
             // `lookup_edge_endpoints` to translate them to Loro keys.
-            let (src_key, dst_key, label) = match lookup_edge_endpoints(event, &maps) {
+            let (src_key, dst_key, label) = match lookup_edge_endpoints(event, maps) {
                 Some(t) => t,
                 None => return Ok(()),
             };
@@ -1056,10 +1077,7 @@ fn apply_change_event_to_loro(
 /// Resolve a `ChangeEvent`'s `src_id`/`dst_id`/`edge_type` into Loro-side
 /// `(src_key, dst_key, label)` via `node_key_map`. Returns `None` if either
 /// endpoint lacks an inverse mapping (the node was not created via the bridge).
-fn lookup_edge_endpoints(
-    event: &grafeo::cdc::ChangeEvent,
-    maps: &BridgeMaps,
-) -> Option<EdgeKey> {
+fn lookup_edge_endpoints(event: &grafeo::cdc::ChangeEvent, maps: &BridgeMaps) -> Option<EdgeKey> {
     let src_id = event.src_id?;
     let dst_id = event.dst_id?;
     let label = event.edge_type.clone()?;

@@ -9,7 +9,7 @@
 //!
 //! ## grafeo-loro
 //! - `grafeo_loro::VectorOffloadManager` — re-exported at `src/hydration/mod.rs:5`
-//!   + crate root `src/lib.rs:31` (`pub use hydration::VectorOffloadManager;` —
+//!   and crate root `src/lib.rs:31` (`pub use hydration::VectorOffloadManager;` —
 //!   P3T4-L2 m5). Reach via the short path `grafeo_loro::VectorOffloadManager`.
 //! - `VectorOffloadManager::new(Arc<GrafeoDB>) -> Self` — trivial `Self { db }`.
 //! - `VectorOffloadManager::handle_text_update(&self, NodeId, &str) -> Result<()>`
@@ -126,9 +126,7 @@ async fn vector_offload_writes_embedding_to_grafeo() {
                 "embedding dimension must match DEFAULT_EMBEDDING_DIM"
             );
         }
-        other => panic!(
-            "expected Some(Value::Vector(_)) on EMBEDDING_PROPERTY, got {other:?}"
-        ),
+        other => panic!("expected Some(Value::Vector(_)) on EMBEDDING_PROPERTY, got {other:?}"),
     }
 }
 

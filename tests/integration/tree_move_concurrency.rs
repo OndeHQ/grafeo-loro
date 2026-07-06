@@ -109,10 +109,9 @@ async fn concurrent_sync_tree_move_calls_acyclic() {
     //   Err(Bridge(_))              → unexpected; fail the test
     let join_results = [r1, r2, r3];
     for (i, jr) in join_results.iter().enumerate() {
-        let r = jr.as_ref().unwrap_or_else(|e| panic!(
-            "peer {} task panicked: {e:?}",
-            i + 1
-        ));
+        let r = jr
+            .as_ref()
+            .unwrap_or_else(|e| panic!("peer {} task panicked: {e:?}", i + 1));
         match r {
             Ok(()) => {}
             Err(GrafeoLoroError::Grafeo(_)) => {}
@@ -147,7 +146,12 @@ async fn concurrent_sync_tree_move_calls_acyclic() {
         .count();
     let cyc = join_results
         .iter()
-        .filter(|r| matches!(r.as_ref().unwrap(), Err(GrafeoLoroError::TreeMoveCreatesCycle { .. })))
+        .filter(|r| {
+            matches!(
+                r.as_ref().unwrap(),
+                Err(GrafeoLoroError::TreeMoveCreatesCycle { .. })
+            )
+        })
         .count();
     assert!(
         oks > 0,

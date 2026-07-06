@@ -72,7 +72,7 @@ fn test_metrics_registry_init_construction_no_panic() {
 
 /// `record_batch_flush` with edge values must not panic. Tests 0 ms duration
 /// + 0 batch_size (empty batch — a real edge case when the buffer is drained
-/// between size-check + flush). Anti-plenger #7 (defensive programming).
+///   between size-check + flush). Anti-plenger #7 (defensive programming).
 #[test]
 fn test_record_batch_flush_no_panic_on_edge_values() {
     let meter = opentelemetry::global::meter("grafeo-loro-test");

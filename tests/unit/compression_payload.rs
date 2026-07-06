@@ -100,7 +100,11 @@ fn compression_wire_roundtrip_zstd() {
 /// empty `Vec<u8>` for each.
 #[test]
 fn compression_wire_empty_input_roundtrip() {
-    for strategy in [CompressionType::None, CompressionType::Lz4, CompressionType::Zstd] {
+    for strategy in [
+        CompressionType::None,
+        CompressionType::Lz4,
+        CompressionType::Zstd,
+    ] {
         let wire = CompressedPayload::compress_to_wire(b"", strategy)
             .unwrap_or_else(|e| panic!("compress_to_wire(&[], {strategy:?}) failed: {e}"));
         // Header is always 2 bytes regardless of body length.
@@ -114,8 +118,7 @@ fn compression_wire_empty_input_roundtrip() {
         let recovered = CompressedPayload::decompress_from_wire(&wire)
             .unwrap_or_else(|e| panic!("decompress_from_wire failed for {strategy:?}: {e}"));
         assert_eq!(
-            recovered,
-            b"",
+            recovered, b"",
             "empty-input roundtrip must yield empty Vec for {strategy:?}"
         );
     }
@@ -182,7 +185,11 @@ fn compression_wire_too_short_rejected() {
 /// validated the decompressed bytes, not the parsed struct shape).
 #[test]
 fn compression_wire_to_wire_from_wire_symmetric() {
-    for strategy in [CompressionType::None, CompressionType::Lz4, CompressionType::Zstd] {
+    for strategy in [
+        CompressionType::None,
+        CompressionType::Lz4,
+        CompressionType::Zstd,
+    ] {
         let payload = CompressedPayload::compress(INPUT, strategy)
             .unwrap_or_else(|e| panic!("compress({strategy:?}) failed: {e}"));
         let wire = payload.to_wire();

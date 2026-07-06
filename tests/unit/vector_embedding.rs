@@ -73,8 +73,8 @@ use grafeo_loro::hydration::vector::generate_local_embedding;
 /// L2 wired the infrastructure; L3 uses `WarnCounter` in
 /// `generate_local_embedding_logs_onnx_warning`.
 mod test_capture {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tracing::Event;
     use tracing::Level;
     use tracing::Subscriber;
@@ -97,7 +97,9 @@ mod test_capture {
 
     impl WarnCounter {
         pub fn new() -> Self {
-            Self { count: Arc::new(AtomicUsize::new(0)) }
+            Self {
+                count: Arc::new(AtomicUsize::new(0)),
+            }
         }
 
         pub fn get(&self) -> usize {

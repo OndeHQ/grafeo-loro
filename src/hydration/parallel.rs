@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use grafeo::GrafeoDB;
-use lorosurgeon::Hydrate;
 use loro::LoroDoc;
+use lorosurgeon::Hydrate;
 use opentelemetry::trace::Tracer;
 use rayon::prelude::*;
 
@@ -66,7 +66,9 @@ pub fn parallel_hydrate_grafeo(
     // future phase) + for the L2 contract that threads it through.
     let _ = metrics;
     let _parallel_span = tracer.map(|t| {
-        t.as_ref().span_builder("parallel_hydrate_grafeo").start(t.as_ref())
+        t.as_ref()
+            .span_builder("parallel_hydrate_grafeo")
+            .start(t.as_ref())
     });
     // Clone `tracer` into an owned `Option<Arc<BoxedTracer>>` so the rayon
     // closure (which must be `Fn + Send + Sync`) can capture it by value
@@ -84,66 +86,67 @@ pub fn parallel_hydrate_grafeo(
     //    single-threaded (grafeo-engine-0.5.42/src/session/mod.rs), so each
     //    chunk owns its own Session. `try_for_each` propagates the first `Err`
     //    and short-circuits remaining chunks (fail-fast anti-plenger #9).
-    keys.par_chunks(DEFAULT_CHUNK_SIZE).try_for_each(|chunk| -> Result<()> {
-        // P5-L3: emit a `hydrate_chunk` grandchild span (architecture §23.2
-        // tree row 1.3.1) per chunk. Held for the chunk's tx lifetime.
-        let _chunk_span = chunk_tracer.as_ref().map(|t| {
-            t.span_builder("hydrate_chunk").start(t.as_ref())
-        });
-        // 3. Per-chunk Grafeo session: CDC off suppresses outbound echoes
-        //    (matches `VertexBuilder::commit` at `src/app.rs:437`). On any
-        //    error below, `Session::Drop` auto-rollbacks the un-prepared-commit'd
-        //    tx (`session/mod.rs:5368-5383`) — compensation is just `drop(session)`.
-        let mut session = db.session_with_cdc(false);
-        session.begin_transaction()?;
+    keys.par_chunks(DEFAULT_CHUNK_SIZE)
+        .try_for_each(|chunk| -> Result<()> {
+            // P5-L3: emit a `hydrate_chunk` grandchild span (architecture §23.2
+            // tree row 1.3.1) per chunk. Held for the chunk's tx lifetime.
+            let _chunk_span = chunk_tracer
+                .as_ref()
+                .map(|t| t.span_builder("hydrate_chunk").start(t.as_ref()));
+            // 3. Per-chunk Grafeo session: CDC off suppresses outbound echoes
+            //    (matches `VertexBuilder::commit` at `src/app.rs:437`). On any
+            //    error below, `Session::Drop` auto-rollbacks the un-prepared-commit'd
+            //    tx (`session/mod.rs:5368-5383`) — compensation is just `drop(session)`.
+            let mut session = db.session_with_cdc(false);
+            session.begin_transaction()?;
 
-        // 4. Per-vertex hydration via SSOT (DEVIL M2 — DO NOT manually iterate
-        //    fields). `v_root.get(key)` returns `Option<ValueOrContainer>`
-        //    (`loro-1.13.6/src/lib.rs:2150`); `ValueOrContainer::into_container`
-        //    + `Container::into_map` extract the `LoroMap` (`EnumAsInner` at
-        //    `:3813` / `:3636`). `VertexEntity::hydrate_map` is the trait
-        //    method (`lorosurgeon-0.2.1/src/hydrate.rs:64`) on `Hydrate`.
-        for key in chunk {
-            let voc = v_root.get(key).ok_or_else(|| {
-                GrafeoLoroError::Bridge(format!("vertex {key} missing from LoroMap"))
-            })?;
-            // `ValueOrContainer::into_container` returns `Result<Container, Self>`
-            // and `Container::into_map` returns `Result<LoroMap, Self>` (both via
-            // `EnumAsInner`); collapse the two `Result`s to a single `Option`
-            // before `ok_or_else` (the original enums are diagnostic only).
-            let vertex_map = voc
-                .into_container()
-                .ok()
-                .and_then(|c| c.into_map().ok())
-                .ok_or_else(|| {
-                    GrafeoLoroError::Bridge(format!("vertex {key} is not a Container::Map"))
+            // 4. Per-vertex hydration via SSOT (DEVIL M2 — DO NOT manually iterate
+            //    fields). `v_root.get(key)` returns `Option<ValueOrContainer>`
+            //    (`loro-1.13.6/src/lib.rs:2150`); `ValueOrContainer::into_container`
+            //    + `Container::into_map` extract the `LoroMap` (`EnumAsInner` at
+            //    `:3813` / `:3636`). `VertexEntity::hydrate_map` is the trait
+            //    method (`lorosurgeon-0.2.1/src/hydrate.rs:64`) on `Hydrate`.
+            for key in chunk {
+                let voc = v_root.get(key).ok_or_else(|| {
+                    GrafeoLoroError::Bridge(format!("vertex {key} missing from LoroMap"))
                 })?;
-            let entity: VertexEntity = VertexEntity::hydrate_map(&vertex_map)?;
+                // `ValueOrContainer::into_container` returns `Result<Container, Self>`
+                // and `Container::into_map` returns `Result<LoroMap, Self>` (both via
+                // `EnumAsInner`); collapse the two `Result`s to a single `Option`
+                // before `ok_or_else` (the original enums are diagnostic only).
+                let vertex_map = voc
+                    .into_container()
+                    .ok()
+                    .and_then(|c| c.into_map().ok())
+                    .ok_or_else(|| {
+                        GrafeoLoroError::Bridge(format!("vertex {key} is not a Container::Map"))
+                    })?;
+                let entity: VertexEntity = VertexEntity::hydrate_map(&vertex_map)?;
 
-            // 5. Build `LoroOp::UpsertNode` and reuse the SSOT apply path
-            //    (`src/bridge/grafeo_tx.rs:86`) — `apply_upsert_node` handles
-            //    the `node_id_map` lookup + `create_node_with_props` +
-            //    `maps.insert_node` triplet (DRY; anti-plenger #2 + #5).
-            let op = LoroOp::UpsertNode {
-                loro_key: key.clone(),
-                labels: entity.labels,
-                properties: entity
-                    .properties
-                    .into_iter()
-                    .map(|(k, v)| (k, GraphValue::from(v)))
-                    .collect(),
-            };
-            apply_loro_op(&session, &op, maps)?;
-        }
+                // 5. Build `LoroOp::UpsertNode` and reuse the SSOT apply path
+                //    (`src/bridge/grafeo_tx.rs:86`) — `apply_upsert_node` handles
+                //    the `node_id_map` lookup + `create_node_with_props` +
+                //    `maps.insert_node` triplet (DRY; anti-plenger #2 + #5).
+                let op = LoroOp::UpsertNode {
+                    loro_key: key.clone(),
+                    labels: entity.labels,
+                    properties: entity
+                        .properties
+                        .into_iter()
+                        .map(|(k, v)| (k, GraphValue::from(v)))
+                        .collect(),
+                };
+                apply_loro_op(&session, &op, maps)?;
+            }
 
-        // 6. Prepare + commit with origin tag. `set_metadata` is advisory-only
-        //    per Devil Gap 1 (dropped on commit per `src/app.rs:461-465`); the
-        //    real echo-prevention side-channel is `bridge_origin_epochs` in
-        //    `SyncEngine` (§9). `prepare_commit` borrows `&mut session`;
-        //    `prepared.commit()` consumes `prepared` and releases the borrow.
-        let mut prepared = session.prepare_commit()?;
-        prepared.set_metadata(ORIGIN_LORO_BRIDGE, ORIGIN_LORO_BRIDGE);
-        prepared.commit()?;
-        Ok(())
-    })
+            // 6. Prepare + commit with origin tag. `set_metadata` is advisory-only
+            //    per Devil Gap 1 (dropped on commit per `src/app.rs:461-465`); the
+            //    real echo-prevention side-channel is `bridge_origin_epochs` in
+            //    `SyncEngine` (§9). `prepare_commit` borrows `&mut session`;
+            //    `prepared.commit()` consumes `prepared` and releases the borrow.
+            let mut prepared = session.prepare_commit()?;
+            prepared.set_metadata(ORIGIN_LORO_BRIDGE, ORIGIN_LORO_BRIDGE);
+            prepared.commit()?;
+            Ok(())
+        })
 }

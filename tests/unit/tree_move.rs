@@ -104,8 +104,16 @@ fn tree_move_cycle_rejected() {
         "expected TreeMoveCreatesCycle, got {err:?}"
     );
     // Anti-Goodhart: graph unchanged — root→mid and mid→leaf both intact.
-    assert_eq!(parents_of(&db, mid), vec![root], "root→mid edge must be intact");
-    assert_eq!(parents_of(&db, leaf), vec![mid], "mid→leaf edge must be intact");
+    assert_eq!(
+        parents_of(&db, mid),
+        vec![root],
+        "root→mid edge must be intact"
+    );
+    assert_eq!(
+        parents_of(&db, leaf),
+        vec![mid],
+        "mid→leaf edge must be intact"
+    );
 }
 
 /// Moving a root (no parent edge) under its own descendant must return
@@ -128,9 +136,20 @@ fn tree_move_root_to_descendant_rejected_as_cycle() {
     );
     // Anti-Goodhart: graph unchanged — root still has no parent, mid still
     // has root as its only parent, leaf still has mid as its only parent.
-    assert!(parents_of(&db, root).is_empty(), "root must remain parentless");
-    assert_eq!(parents_of(&db, mid), vec![root], "mid→root edge must be intact");
-    assert_eq!(parents_of(&db, leaf), vec![mid], "mid→leaf edge must be intact");
+    assert!(
+        parents_of(&db, root).is_empty(),
+        "root must remain parentless"
+    );
+    assert_eq!(
+        parents_of(&db, mid),
+        vec![root],
+        "mid→root edge must be intact"
+    );
+    assert_eq!(
+        parents_of(&db, leaf),
+        vec![mid],
+        "mid→leaf edge must be intact"
+    );
 }
 
 /// Idempotent move: calling `sync_tree_move_to_grafeo(db, node, A, A)` must

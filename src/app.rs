@@ -14,12 +14,12 @@ use crate::constants::{
     ORIGIN_LORO_BRIDGE, ROOT_VERTICES, STORAGE_KEY_BASE_LORO, STORAGE_KEY_DELTA_PREFIX,
 };
 use crate::error::{GrafeoLoroError, Result};
+use crate::hydration::parallel_hydrate_grafeo;
 use crate::schema::VertexEntity;
 use crate::storage::StorageBackend;
 use crate::telemetry::{HealthProbe, HydrationMode, MetricsRegistry, SharedTracer};
 use crate::types::events::LoroOp;
 use crate::types::{GraphValue, LoroProperty, NodeId, PresencePayload};
-use crate::hydration::parallel_hydrate_grafeo;
 
 /// Top-level app facade.
 ///
@@ -126,9 +126,9 @@ pub struct GrafeoLoroAppBuilder {
     /// (caller pre-builds via `MetricsRegistry::init(global::meter(...))`);
     /// `None` in tests. `build()` threads `Some` into `SyncEngine::with_telemetry`
     /// + `GrafeoLoroApp::metrics`. Devil Q14 — should `build()` construct the
-    /// registry itself from `global::meter("grafeo-loro")`, or require the
-    /// caller to pre-build via `.with_metrics(...)`? L1 leaves the decision
-    /// open; L2 implements per Devil ruling.
+    ///   registry itself from `global::meter("grafeo-loro")`, or require the
+    ///   caller to pre-build via `.with_metrics(...)`? L1 leaves the decision
+    ///   open; L2 implements per Devil ruling.
     metrics: Option<Arc<MetricsRegistry>>,
     /// Optional health probe (P5-L1 Task 3). `Some` in production (caller
     /// pre-builds via `HealthProbe::new(doc_clone, db_clone)`); `None` in
@@ -243,6 +243,11 @@ impl GrafeoLoroApp {
     ///
     /// Production `build()` is the sole caller (P5-L2 territory — replaces
     /// the prior `from_sync_engine_with_config` call at the end of `build`).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "P5-L2 wiring — full app construction with all telemetry params; refactor to AppConfig struct deferred to future phase"
+    )]
+    // TODO: refactor to AppConfig struct in future phase
     pub fn from_sync_engine_with_telemetry(
         sync_engine: Arc<SyncEngine>,
         ssot_mode: SsotMode,
@@ -474,9 +479,10 @@ impl GrafeoLoroApp {
         );
         let _enter = span.enter();
 
-        let storage = self.storage.as_ref().ok_or_else(|| {
-            GrafeoLoroError::Config("storage backend not set".into())
-        })?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| GrafeoLoroError::Config("storage backend not set".into()))?;
 
         match self.ssot_mode {
             SsotMode::Loro => {
@@ -726,9 +732,10 @@ impl GrafeoLoroApp {
         // `parallel_hydrate_grafeo` opens the `parallel_hydrate_grafeo` child
         // span (row 1.3); `cold_start_hydration` is held for the whole
         // function body. Drops on function return.
-        let _cold_start_span = self.tracer.as_ref().map(|t| {
-            crate::telemetry::traces::create_cold_start_span(t.as_ref())
-        });
+        let _cold_start_span = self
+            .tracer
+            .as_ref()
+            .map(|t| crate::telemetry::traces::create_cold_start_span(t.as_ref()));
 
         // P5-L3: capture start time for the `hydration_duration` histogram
         // (architecture §23.1 row 5). Recorded AFTER `parallel_hydrate_grafeo`
@@ -737,9 +744,10 @@ impl GrafeoLoroApp {
         // span lifetime (separate observability axis).
         let hydrate_started = std::time::Instant::now();
 
-        let storage = self.storage.as_ref().ok_or_else(|| {
-            GrafeoLoroError::Config("storage backend not set".into())
-        })?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| GrafeoLoroError::Config("storage backend not set".into()))?;
 
         match self.ssot_mode {
             SsotMode::Loro => {
@@ -933,9 +941,7 @@ impl GrafeoLoroApp {
                         .max();
                     match max_id {
                         Some(max) => {
-                            let prev = self
-                                .loro_key_counter
-                                .fetch_max(max + 1, Ordering::Relaxed);
+                            let prev = self.loro_key_counter.fetch_max(max + 1, Ordering::Relaxed);
                             tracing::info!(
                                 max_existing = max,
                                 new_counter = max + 1,
@@ -1324,13 +1330,11 @@ impl GrafeoLoroAppBuilder {
             ));
         }
         if self.batch_max_size == 0 {
-            return Err(GrafeoLoroError::Config(
-                "batch_max_size must be > 0".into(),
-            ));
+            return Err(GrafeoLoroError::Config("batch_max_size must be > 0".into()));
         }
-        let storage = self.storage.ok_or_else(|| {
-            GrafeoLoroError::Config("storage backend not set".into())
-        })?;
+        let storage = self
+            .storage
+            .ok_or_else(|| GrafeoLoroError::Config("storage backend not set".into()))?;
         if matches!(self.ssot_mode, SsotMode::Grafeo) && self.grafeo_dir.is_none() {
             return Err(GrafeoLoroError::Config(
                 "grafeo_dir required for SsotMode::Grafeo".into(),
@@ -1339,9 +1343,9 @@ impl GrafeoLoroAppBuilder {
 
         // 2. Init GrafeoDB (P4-DEVIL Q5 — NOT `GrafeoDB::open` (wal-gated)).
         let grafeo_db: Arc<grafeo::GrafeoDB> = match self.grafeo_dir {
-            Some(p) => Arc::new(grafeo::GrafeoDB::with_config(
-                grafeo::Config::persistent(p),
-            )?),
+            Some(p) => Arc::new(grafeo::GrafeoDB::with_config(grafeo::Config::persistent(
+                p,
+            ))?),
             None => Arc::new(grafeo::GrafeoDB::new_in_memory()),
         };
 
@@ -1638,7 +1642,10 @@ impl VertexBuilder {
         // 2. Generate fresh `loro_key` (AtomicU64 counter — see struct doc)
         //    and build the Loro-side `VertexEntity`. The strict reject above
         //    makes the `GraphValue → LoroProperty` conversion total.
-        let loro_key = format!("V/{}", self.loro_key_counter.fetch_add(1, Ordering::Relaxed));
+        let loro_key = format!(
+            "V/{}",
+            self.loro_key_counter.fetch_add(1, Ordering::Relaxed)
+        );
         let mut loro_props = HashMap::with_capacity(self.properties.len());
         for (k, v) in &self.properties {
             loro_props.insert(k.clone(), LoroProperty::try_from(v.clone())?);
@@ -1685,7 +1692,13 @@ impl VertexBuilder {
         let mut session = self.sync_engine.grafeo_db.session_with_cdc(false);
         if let Err(raw_err) = session.begin_transaction() {
             let grafeo_err: GrafeoLoroError = raw_err.into();
-            compensate_loro_vertex(&self.sync_engine, &loro_key, &grafeo_err, &self.labels, &self.properties);
+            compensate_loro_vertex(
+                &self.sync_engine,
+                &loro_key,
+                &grafeo_err,
+                &self.labels,
+                &self.properties,
+            );
             return Err(grafeo_err);
         }
 
@@ -1701,7 +1714,13 @@ impl VertexBuilder {
             properties: self.properties.clone(),
         };
         if let Err(grafeo_err) = apply_loro_op(&session, &op, self.sync_engine.maps()) {
-            compensate_loro_vertex(&self.sync_engine, &loro_key, &grafeo_err, &self.labels, &self.properties);
+            compensate_loro_vertex(
+                &self.sync_engine,
+                &loro_key,
+                &grafeo_err,
+                &self.labels,
+                &self.properties,
+            );
             drop(session); // auto-rollback Grafeo tx
             return Err(grafeo_err);
         }
@@ -1721,7 +1740,13 @@ impl VertexBuilder {
             Ok(p) => p,
             Err(raw_err) => {
                 let grafeo_err: GrafeoLoroError = raw_err.into();
-                compensate_loro_vertex(&self.sync_engine, &loro_key, &grafeo_err, &self.labels, &self.properties);
+                compensate_loro_vertex(
+                    &self.sync_engine,
+                    &loro_key,
+                    &grafeo_err,
+                    &self.labels,
+                    &self.properties,
+                );
                 self.sync_engine.maps().remove_node(&loro_key);
                 // `session` is dropped on `return` (auto-rollback Grafeo tx
                 // via Session::Drop at session/mod.rs:5372-5383). Explicit
@@ -1742,7 +1767,13 @@ impl VertexBuilder {
             // (`current_transaction` was `take()`'d), so `Session::Drop` is
             // also a no-op. (L2-R2 MINOR 4: corrected misleading comment.)
             let grafeo_err: GrafeoLoroError = raw_err.into();
-            compensate_loro_vertex(&self.sync_engine, &loro_key, &grafeo_err, &self.labels, &self.properties);
+            compensate_loro_vertex(
+                &self.sync_engine,
+                &loro_key,
+                &grafeo_err,
+                &self.labels,
+                &self.properties,
+            );
             // Step 5's `apply_loro_op` inserted a `BridgeMaps` binding for
             // `loro_key → grafeo_node_id`. The Grafeo node was just rolled
             // back, so the binding now points to a phantom NodeId — remove

@@ -15,8 +15,8 @@ use grafeo::GrafeoDB;
 use loro::{LoroDoc, LoroValue, ToJson};
 use parking_lot::RwLock;
 
-use grafeo_loro::bridge::SyncEngine;
 use grafeo_loro::bridge::sync_engine::InboundMsg;
+use grafeo_loro::bridge::SyncEngine;
 use grafeo_loro::constants::{DEFAULT_BATCH_MS, OUTBOUND_POLL_MS};
 use grafeo_loro::types::LoroOp;
 
@@ -75,7 +75,11 @@ async fn echo_loop_prevention() {
     // --- (a) Loro → Grafeo: insert vertex "k1" with {name: "Alice"} ---
     {
         let doc = loro_doc.read();
-        loro_insert_vertex(&doc, "k1", lmap([("name", LoroValue::String("Alice".into()))]));
+        loro_insert_vertex(
+            &doc,
+            "k1",
+            lmap([("name", LoroValue::String("Alice".into()))]),
+        );
     }
     settle_inbound().await;
 
@@ -105,9 +109,7 @@ async fn echo_loop_prevention() {
     // updates the LoroDoc's V map with the new property.
     {
         let mut session = grafeo_db.session_with_cdc(true);
-        session
-            .begin_transaction()
-            .expect("begin tx");
+        session.begin_transaction().expect("begin tx");
         session
             .execute("MATCH (n {name: 'Alice'}) SET n.age = 42")
             .expect("MATCH SET");
@@ -120,7 +122,8 @@ async fn echo_loop_prevention() {
     // the existing property.
     {
         let doc = loro_doc.read();
-        let props = loro_vertex_props(&doc, "k1").expect("V[k1] should exist after outbound update");
+        let props =
+            loro_vertex_props(&doc, "k1").expect("V[k1] should exist after outbound update");
         assert_eq!(
             props.get("name"),
             Some(&LoroValue::String("Alice".into())),
@@ -199,7 +202,11 @@ async fn bidirectional_sync_with_delay() {
     // Step 1: Loro → Grafeo. Insert vertex "k1" with {city: "Lyon"}.
     {
         let doc = loro_doc.read();
-        loro_insert_vertex(&doc, "k1", lmap([("city", LoroValue::String("Lyon".into()))]));
+        loro_insert_vertex(
+            &doc,
+            "k1",
+            lmap([("city", LoroValue::String("Lyon".into()))]),
+        );
     }
     settle_inbound().await;
     let node_id = engine
@@ -254,18 +261,23 @@ async fn bidirectional_sync_with_delay() {
         let doc = loro_doc.read();
         let v_map = doc.get_map("V");
         v_map
-            .insert("k1", lmap([
-                ("city", LoroValue::String("Lyon".into())),
-                ("country", LoroValue::String("France".into())),
-                ("pop", LoroValue::I64(500_000)),
-            ]))
+            .insert(
+                "k1",
+                lmap([
+                    ("city", LoroValue::String("Lyon".into())),
+                    ("country", LoroValue::String("France".into())),
+                    ("pop", LoroValue::I64(500_000)),
+                ]),
+            )
             .expect("loro update");
         doc.commit();
     }
     settle_inbound().await;
     {
         let session = grafeo_db.session();
-        let node = session.get_node(node_id).expect("grafeo node k1 still exists");
+        let node = session
+            .get_node(node_id)
+            .expect("grafeo node k1 still exists");
         assert_eq!(
             node.get_property("pop"),
             Some(&grafeo::Value::Int64(500_000)),
@@ -313,7 +325,11 @@ async fn edge_update_propagates() {
     // --- Setup: insert vertices "a" and "b" via Loro ---
     {
         let doc = loro_doc.read();
-        loro_insert_vertex(&doc, "a", lmap([("name", LoroValue::String("Alice".into()))]));
+        loro_insert_vertex(
+            &doc,
+            "a",
+            lmap([("name", LoroValue::String("Alice".into()))]),
+        );
         loro_insert_vertex(&doc, "b", lmap([("name", LoroValue::String("Bob".into()))]));
     }
     settle_inbound().await;
@@ -323,10 +339,7 @@ async fn edge_update_propagates() {
         let doc = loro_doc.read();
         let e_map = doc.get_map("E");
         e_map
-            .insert(
-                "a|b|KNOWS",
-                lmap([("since", LoroValue::I64(2020))]),
-            )
+            .insert("a|b|KNOWS", lmap([("since", LoroValue::I64(2020))]))
             .expect("loro edge insert");
         doc.commit();
     }
@@ -362,9 +375,11 @@ async fn edge_update_propagates() {
         use loro::ValueOrContainer;
         let edge_val = e_map.get("a|b|KNOWS").expect("E[a|b|KNOWS] should exist");
         let props = match edge_val {
-            ValueOrContainer::Value(LoroValue::Map(m)) => {
-                Some(m.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<HashMap<_, _>>())
-            }
+            ValueOrContainer::Value(LoroValue::Map(m)) => Some(
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<HashMap<_, _>>(),
+            ),
             _ => None,
         };
         let props = props.expect("edge value should be a LoroValue::Map");
@@ -414,7 +429,11 @@ async fn node_delete_round_trip() {
     // Pre-populate: Loro → Grafeo insert "k1" {name: Alice}.
     {
         let doc = loro_doc.read();
-        loro_insert_vertex(&doc, "k1", lmap([("name", LoroValue::String("Alice".into()))]));
+        loro_insert_vertex(
+            &doc,
+            "k1",
+            lmap([("name", LoroValue::String("Alice".into()))]),
+        );
     }
     settle_inbound().await;
     let node_id = engine
@@ -443,12 +462,7 @@ async fn node_delete_round_trip() {
         "inbound delete should remove grafeo node"
     );
     assert!(
-        engine
-            .maps()
-            .node_id_map
-            .read()
-            .get("k1")
-            .is_none(),
+        engine.maps().node_id_map.read().get("k1").is_none(),
         "inbound delete should clear the loro_key → NodeId mapping"
     );
 

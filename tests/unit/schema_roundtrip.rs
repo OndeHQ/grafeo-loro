@@ -5,9 +5,9 @@ use std::collections::HashMap;
 
 use grafeo_loro::schema::{EdgeEntity, OrderedCollection, TreeNode, VertexEntity};
 use grafeo_loro::types::LoroProperty;
-use lorosurgeon::{Hydrate, LoadKey, PropReconciler, Reconcile, RootReconciler};
 use loro::event::{Diff, ListDiffItem};
 use loro::{Container, ExportMode, LoroDoc, LoroValue, TextDelta, ValueOrContainer};
+use lorosurgeon::{Hydrate, LoadKey, PropReconciler, Reconcile, RootReconciler};
 
 // Isolated-entity pattern: `doc.get_map("root")` is the test fixture
 // (matches upstream `lorosurgeon-0.2.1/tests/integration.rs:151-162`).
@@ -43,21 +43,22 @@ fn vertex_entity_roundtrip() {
         ..original
     };
     let before = doc.oplog_frontiers();
-    mutated
-        .reconcile(RootReconciler::new(map.clone()))
-        .unwrap();
+    mutated.reconcile(RootReconciler::new(map.clone())).unwrap();
     doc.commit();
     let after = doc.oplog_frontiers();
-    assert_ne!(before, after, "oplog frontiers must advance after mid-string text edit");
+    assert_ne!(
+        before, after,
+        "oplog frontiers must advance after mid-string text edit"
+    );
 
-    let batch = doc.diff(&before, &after).expect("diff between adjacent frontiers");
+    let batch = doc
+        .diff(&before, &after)
+        .expect("diff between adjacent frontiers");
     let mut saw_text_retain = false;
     for (_cid, diff) in batch.iter() {
         if let Diff::Text(deltas) = diff {
             assert!(
-                deltas
-                    .iter()
-                    .any(|d| matches!(d, TextDelta::Retain { .. })),
+                deltas.iter().any(|d| matches!(d, TextDelta::Retain { .. })),
                 "text delta must retain chars (char-level LCS), got {deltas:?}",
             );
             assert!(
@@ -69,7 +70,10 @@ fn vertex_entity_roundtrip() {
             saw_text_retain = true;
         }
     }
-    assert!(saw_text_retain, "expected at least one Text diff in {batch:?}");
+    assert!(
+        saw_text_retain,
+        "expected at least one Text diff in {batch:?}"
+    );
 
     let hydrated_mutated = VertexEntity::hydrate_map(&map).unwrap();
     assert_eq!(hydrated_mutated, mutated);
@@ -108,9 +112,7 @@ fn edge_entity_roundtrip() {
         },
         ..original.clone()
     };
-    mutated
-        .reconcile(RootReconciler::new(map.clone()))
-        .unwrap();
+    mutated.reconcile(RootReconciler::new(map.clone())).unwrap();
     doc.commit();
     let hydrated_mutated = EdgeEntity::hydrate_map(&map).unwrap();
     assert_eq!(hydrated_mutated, mutated);
@@ -130,13 +132,17 @@ fn ordered_collection_roundtrip() {
     // 1) Append: empty → [n1, n2].
     let initial = OrderedCollection {
         items: vec![
-            TreeNode { node_id: "n1".into(), title: "Alpha".into() },
-            TreeNode { node_id: "n2".into(), title: "Beta".into() },
+            TreeNode {
+                node_id: "n1".into(),
+                title: "Alpha".into(),
+            },
+            TreeNode {
+                node_id: "n2".into(),
+                title: "Beta".into(),
+            },
         ],
     };
-    initial
-        .reconcile(RootReconciler::new(map.clone()))
-        .unwrap();
+    initial.reconcile(RootReconciler::new(map.clone())).unwrap();
     doc.commit();
     assert_eq!(OrderedCollection::hydrate_map(&map).unwrap(), initial);
 
@@ -146,7 +152,10 @@ fn ordered_collection_roundtrip() {
             .items
             .iter()
             .cloned()
-            .chain([TreeNode { node_id: "n3".into(), title: "Gamma".into() }])
+            .chain([TreeNode {
+                node_id: "n3".into(),
+                title: "Gamma".into(),
+            }])
             .collect(),
     };
     appended
@@ -157,10 +166,13 @@ fn ordered_collection_roundtrip() {
 
     // 3) Prepend n0: [n1, n2, n3] → [n0, n1, n2, n3].
     let prepended = OrderedCollection {
-        items: [TreeNode { node_id: "n0".into(), title: "Zero".into() }]
-            .into_iter()
-            .chain(appended.items.iter().cloned())
-            .collect(),
+        items: [TreeNode {
+            node_id: "n0".into(),
+            title: "Zero".into(),
+        }]
+        .into_iter()
+        .chain(appended.items.iter().cloned())
+        .collect(),
     };
     prepended
         .reconcile(RootReconciler::new(map.clone()))
@@ -175,7 +187,10 @@ fn ordered_collection_roundtrip() {
             .iter()
             .take(1)
             .cloned()
-            .chain([TreeNode { node_id: "n1a".into(), title: "Alpha-prime".into() }])
+            .chain([TreeNode {
+                node_id: "n1a".into(),
+                title: "Alpha-prime".into(),
+            }])
             .chain(prepended.items.iter().skip(1).cloned())
             .collect(),
     };
@@ -183,7 +198,10 @@ fn ordered_collection_roundtrip() {
         .reconcile(RootReconciler::new(map.clone()))
         .unwrap();
     doc.commit();
-    assert_eq!(OrderedCollection::hydrate_map(&map).unwrap(), middle_inserted);
+    assert_eq!(
+        OrderedCollection::hydrate_map(&map).unwrap(),
+        middle_inserted
+    );
     assert_eq!(middle_inserted.items.len(), 5);
 }
 
@@ -196,16 +214,34 @@ fn ordered_collection_roundtrip() {
 fn ordered_collection_reorder_preserves_identity() {
     let abc = OrderedCollection {
         items: vec![
-            TreeNode { node_id: "A".into(), title: "Alpha".into() },
-            TreeNode { node_id: "B".into(), title: "Beta".into() },
-            TreeNode { node_id: "C".into(), title: "Gamma".into() },
+            TreeNode {
+                node_id: "A".into(),
+                title: "Alpha".into(),
+            },
+            TreeNode {
+                node_id: "B".into(),
+                title: "Beta".into(),
+            },
+            TreeNode {
+                node_id: "C".into(),
+                title: "Gamma".into(),
+            },
         ],
     };
     let cab = OrderedCollection {
         items: vec![
-            TreeNode { node_id: "C".into(), title: "Gamma".into() },
-            TreeNode { node_id: "A".into(), title: "Alpha".into() },
-            TreeNode { node_id: "B".into(), title: "Beta".into() },
+            TreeNode {
+                node_id: "C".into(),
+                title: "Gamma".into(),
+            },
+            TreeNode {
+                node_id: "A".into(),
+                title: "Alpha".into(),
+            },
+            TreeNode {
+                node_id: "B".into(),
+                title: "Beta".into(),
+            },
         ],
     };
     let doc = LoroDoc::new();
@@ -222,7 +258,9 @@ fn ordered_collection_reorder_preserves_identity() {
     let f_after = doc.oplog_frontiers();
     assert_ne!(vv_before, vv_after, "oplog vv must advance after reorder");
 
-    let batch = doc.diff(&f_before, &f_after).expect("diff between adjacent frontiers");
+    let batch = doc
+        .diff(&f_before, &f_after)
+        .expect("diff between adjacent frontiers");
     // Walk every container delta in the batch. For the LoroMovableList, expect
     // at least one `ListDiffItem::Insert { is_move: true, .. }` (a Move op)
     // and zero `ListDiffItem::Insert { is_move: false, .. }` (a non-move
@@ -243,7 +281,10 @@ fn ordered_collection_reorder_preserves_identity() {
             }
         }
     }
-    assert!(saw_move, "expected at least one Move op (is_move=true), got batch: {batch:?}");
+    assert!(
+        saw_move,
+        "expected at least one Move op (is_move=true), got batch: {batch:?}"
+    );
     assert!(
         !saw_non_move_insert,
         "expected zero non-move Inserts (delete+insert pattern), got batch: {batch:?}",
@@ -266,7 +307,10 @@ fn ordered_collection_reorder_preserves_identity() {
 /// converge to the union of both field changes.
 #[test]
 fn tree_node_flat_roundtrip() {
-    let original = TreeNode { node_id: "n1".into(), title: "Alpha".into() };
+    let original = TreeNode {
+        node_id: "n1".into(),
+        title: "Alpha".into(),
+    };
     let doc = LoroDoc::new();
     let map = doc.get_map("root");
     original
@@ -302,7 +346,10 @@ fn tree_node_flat_roundtrip() {
     );
 
     // Peer A mutates `node_id`; `title` unchanged → no-op skip.
-    let a_mut = TreeNode { node_id: "n1A".into(), title: original.title.clone() };
+    let a_mut = TreeNode {
+        node_id: "n1A".into(),
+        title: original.title.clone(),
+    };
     a_mut
         .clone()
         .reconcile(RootReconciler::new(map_a.clone()))
@@ -310,7 +357,10 @@ fn tree_node_flat_roundtrip() {
     doc_a.commit();
 
     // Peer B mutates `title`; `node_id` unchanged → no-op skip.
-    let b_mut = TreeNode { node_id: original.node_id.clone(), title: "Bravo".into() };
+    let b_mut = TreeNode {
+        node_id: original.node_id.clone(),
+        title: "Bravo".into(),
+    };
     b_mut
         .clone()
         .reconcile(RootReconciler::new(map_b.clone()))
@@ -324,9 +374,20 @@ fn tree_node_flat_roundtrip() {
     doc_b.import(&a_to_b).unwrap();
 
     // Both peers converge to the union of field-level changes.
-    let merged = TreeNode { node_id: "n1A".into(), title: "Bravo".into() };
-    assert_eq!(TreeNode::hydrate_map(&map_a).unwrap(), merged, "peer A must converge");
-    assert_eq!(TreeNode::hydrate_map(&map_b).unwrap(), merged, "peer B must converge");
+    let merged = TreeNode {
+        node_id: "n1A".into(),
+        title: "Bravo".into(),
+    };
+    assert_eq!(
+        TreeNode::hydrate_map(&map_a).unwrap(),
+        merged,
+        "peer A must converge"
+    );
+    assert_eq!(
+        TreeNode::hydrate_map(&map_b).unwrap(),
+        merged,
+        "peer B must converge"
+    );
 }
 
 /// Directly asserts `<TreeNode as Reconcile>::key()` returns
@@ -336,7 +397,10 @@ fn tree_node_flat_roundtrip() {
 /// `lorosurgeon-0.2.1/src/reconcile/movable_list.rs:113-127`).
 #[test]
 fn tree_node_key_extraction() {
-    let tn = TreeNode { node_id: "n1".into(), title: "T".into() };
+    let tn = TreeNode {
+        node_id: "n1".into(),
+        title: "T".into(),
+    };
     assert_eq!(tn.key(), LoadKey::Found("n1".to_string()));
 
     // Reconcile into a LoroMap, then exercise the derived `hydrate_key`
@@ -369,7 +433,7 @@ fn loro_property_encoding_roundtrip() {
         ("Null", LoroProperty::Null, LoroValue::Null),
         ("Bool", LoroProperty::Bool(true), LoroValue::Bool(true)),
         ("Integer", LoroProperty::Integer(42), LoroValue::I64(42)),
-        ("Float", LoroProperty::Float(3.14), LoroValue::Double(3.14)),
+        ("Float", LoroProperty::Float(3.5), LoroValue::Double(3.5)),
         (
             "String",
             LoroProperty::String("hi".into()),

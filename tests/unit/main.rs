@@ -12,8 +12,10 @@
 //! - [`hydrate_checkpoint`]: `GrafeoLoroApp::hydrate`/`checkpoint` cold-boot round-trip (Phase 4 P4-L3).
 //! - [`builder_validation`]: `GrafeoLoroAppBuilder::build` config-validation rejection paths (Phase 4 P4-L3).
 
+mod builder_validation;
 mod compression;
 mod compression_payload;
+mod hydrate_checkpoint;
 mod parallel_hydrate;
 mod schema_roundtrip;
 mod telemetry;
@@ -21,5 +23,3 @@ mod tree_move;
 mod vector_embedding;
 mod vector_offload;
 mod vertex_builder;
-mod builder_validation;
-mod hydrate_checkpoint;

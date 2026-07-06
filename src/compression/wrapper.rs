@@ -3,7 +3,7 @@
 //! L3 deep implementation — codec calls filled; verified API citations inline.
 //! `zstd` binds to C zstd (no pure-Rust encoder exists in the ecosystem); `lz4_flex` is pure-Rust.
 
-use loro::{LoroDoc, ExportMode};
+use loro::{ExportMode, LoroDoc};
 
 use crate::config::CompressionType;
 use crate::error::{GrafeoLoroError, Result};
@@ -51,7 +51,10 @@ impl CompressedPayload {
                     .map_err(|e| GrafeoLoroError::Compression(e.to_string()))?
             }
         };
-        Ok(Self { compression: strategy, raw_data })
+        Ok(Self {
+            compression: strategy,
+            raw_data,
+        })
     }
 
     /// Decompress `raw_data` back to the original Loro bytes.

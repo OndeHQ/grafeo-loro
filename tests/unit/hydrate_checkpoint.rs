@@ -201,9 +201,7 @@ async fn cold_boot_roundtrip_loro_mode() {
     let event_count_before = app2.sync_engine().inbound_event_count();
     let filtered_count_before = app2.sync_engine().inbound_filtered_count();
 
-    app2.hydrate("test-graph")
-        .await
-        .expect("hydrate succeeds");
+    app2.hydrate("test-graph").await.expect("hydrate succeeds");
 
     // --- Phase 3: assertions on the hydrated state. ---
 
@@ -218,15 +216,15 @@ async fn cold_boot_roundtrip_loro_mode() {
     {
         let doc_guard = doc2.read();
         let v_map = doc_guard.get_map(ROOT_VERTICES);
-        let vertex = v_map.get(&loro_key).unwrap_or_else(|| {
-            panic!("hydrated LoroDoc should contain V/{loro_key:?}")
-        });
+        let vertex = v_map
+            .get(&loro_key)
+            .unwrap_or_else(|| panic!("hydrated LoroDoc should contain V/{loro_key:?}"));
         let node_map = match vertex {
             ValueOrContainer::Container(Container::Map(m)) => m,
             _ => panic!("V/{loro_key:?} should be a Map container, got {vertex:?}"),
         };
-        let hydrated = VertexEntity::hydrate_map(&node_map)
-            .expect("hydrate_map succeeds on recovered vertex");
+        let hydrated =
+            VertexEntity::hydrate_map(&node_map).expect("hydrate_map succeeds on recovered vertex");
         assert!(
             hydrated.labels.iter().any(|l| l == "Person"),
             "recovered vertex should have label 'Person'; got {:?}",

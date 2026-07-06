@@ -143,7 +143,11 @@ pub fn sync_tree_move_to_grafeo(
     //    If `old_parent == new_parent`, no edges change, so no cycle can be
     //    created — the pre-check is skipped.
     if old_parent == new_parent {
-        debug!(?node_id, ?new_parent, "tree move noop: old_parent == new_parent");
+        debug!(
+            ?node_id,
+            ?new_parent,
+            "tree move noop: old_parent == new_parent"
+        );
         return Ok(());
     }
 
@@ -165,7 +169,10 @@ pub fn sync_tree_move_to_grafeo(
     //    activate automatically). See the `# TOCTOU limitation` doc section
     //    above for the honest 0.5.42 disclosure.
     if would_create_cycle_in_tx(&session, node_id, new_parent) {
-        return Err(GrafeoLoroError::TreeMoveCreatesCycle { node_id, new_parent });
+        return Err(GrafeoLoroError::TreeMoveCreatesCycle {
+            node_id,
+            new_parent,
+        });
     }
 
     // 5. Resolve + delete old edge (best-effort; Q2). Walk `old_parent`'s
@@ -179,10 +186,19 @@ pub fn sync_tree_move_to_grafeo(
     if let Some(eid) = old_edge {
         let deleted = session.delete_edge(eid);
         if !deleted {
-            debug!(?eid, ?old_parent, ?node_id, "old_parent→node_id edge already absent during delete");
+            debug!(
+                ?eid,
+                ?old_parent,
+                ?node_id,
+                "old_parent→node_id edge already absent during delete"
+            );
         }
     } else {
-        debug!(?old_parent, ?node_id, "no old_parent→node_id CHILD edge to delete (root or stale)");
+        debug!(
+            ?old_parent,
+            ?node_id,
+            "no old_parent→node_id CHILD edge to delete (root or stale)"
+        );
     }
 
     // 6. Insert new edge (parent→child per architecture §7 line 265).
@@ -236,7 +252,10 @@ fn would_create_cycle_in_tx(
 ) -> bool {
     // Direct self-loop (trivial cycle).
     if node_id == new_parent {
-        debug!(?node_id, "cycle pre-check: node_id == new_parent (self-loop)");
+        debug!(
+            ?node_id,
+            "cycle pre-check: node_id == new_parent (self-loop)"
+        );
         return true;
     }
 
@@ -251,7 +270,12 @@ fn would_create_cycle_in_tx(
     while let Some(cur) = queue.pop_front() {
         for (parent_id, _edge_id) in session.get_neighbors_incoming(cur) {
             if parent_id == node_id {
-                debug!(?node_id, ?new_parent, ?cur, "cycle pre-check: node_id is ancestor of new_parent");
+                debug!(
+                    ?node_id,
+                    ?new_parent,
+                    ?cur,
+                    "cycle pre-check: node_id is ancestor of new_parent"
+                );
                 return true;
             }
             if visited.insert(parent_id) {

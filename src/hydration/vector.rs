@@ -1,10 +1,10 @@
+use crate::constants::{DEFAULT_EMBEDDING_DIM, EMBEDDING_PROPERTY, ORIGIN_LORO_BRIDGE};
+use crate::error::{GrafeoLoroError, Result};
+use crate::types::ids::NodeId;
+use grafeo::GrafeoDB;
 use std::sync::Arc;
 use std::sync::Once;
-use grafeo::GrafeoDB;
 use tracing::warn;
-use crate::types::ids::NodeId;
-use crate::error::{GrafeoLoroError, Result};
-use crate::constants::{DEFAULT_EMBEDDING_DIM, EMBEDDING_PROPERTY, ORIGIN_LORO_BRIDGE};
 
 /// Manages offloaded float-vector embeddings. Vectors are never written to
 /// Loro; they go direct to Grafeo's HNSW index.

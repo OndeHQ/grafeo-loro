@@ -31,9 +31,7 @@ pub enum LoroOp {
         properties: HashMap<String, GraphValue>,
     },
     /// Remove a vertex by Loro-side string key.
-    DeleteNode {
-        loro_key: String,
-    },
+    DeleteNode { loro_key: String },
     /// Remove an edge by (src, dst, label) Loro-side string keys.
     DeleteEdge {
         src_key: String,

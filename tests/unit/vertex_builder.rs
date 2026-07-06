@@ -93,8 +93,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use grafeo::GrafeoDB;
-use lorosurgeon::Hydrate;
 use loro::{Container, LoroDoc, ValueOrContainer};
+use lorosurgeon::Hydrate;
 use parking_lot::RwLock;
 
 use grafeo_loro::bridge::SyncEngine;
@@ -120,9 +120,9 @@ fn build_app() -> (GrafeoLoroApp, Arc<GrafeoDB>, Arc<RwLock<LoroDoc>>) {
 /// Build a fresh `GrafeoLoroApp` over an in-memory `GrafeoDB` with a 1-byte
 /// `max_property_size` limit, forcing `Session::create_node_with_props` to
 /// reject any property value larger than 1 byte (Q6 — atomicity mock).
-/// Verified: `Config::in_memory().with_max_property_size(1)` +
+/// Verified: `Config::in_memory().with_max_property_size(1)` and
 /// `GrafeoDB::with_config(config)` (`grafeo-engine-0.5.42/src/config.rs:425`
-/// + `:559` + `database/mod.rs:346`); `check_property_size` at
+/// and `:559` and `database/mod.rs:346`); `check_property_size` at
 /// `session/mod.rs:4631` rejects with `Err(Query::Execution(...))` when
 /// `value.estimated_size_bytes() > limit`.
 fn build_app_with_tiny_property_limit() -> (GrafeoLoroApp, Arc<GrafeoDB>, Arc<RwLock<LoroDoc>>) {
@@ -194,9 +194,9 @@ fn assert_loro_has_vertex(
 ) {
     let doc_guard = doc.read();
     let v_map = doc_guard.get_map(ROOT_VERTICES);
-    let vertex = v_map.get(loro_key).unwrap_or_else(|| {
-        panic!("Loro V[{loro_key:?}] should exist after commit()")
-    });
+    let vertex = v_map
+        .get(loro_key)
+        .unwrap_or_else(|| panic!("Loro V[{loro_key:?}] should exist after commit()"));
     let node_map = match vertex {
         ValueOrContainer::Container(Container::Map(m)) => m,
         _ => panic!("Loro V[{loro_key:?}] should be a Map container, got {vertex:?}"),
@@ -226,9 +226,10 @@ fn assert_loro_has_vertex(
         hydrated.properties.len()
     );
     for (k, expected_v) in expected_props {
-        let actual = hydrated.properties.get(*k).unwrap_or_else(|| {
-            panic!("Loro V[{loro_key:?}] missing property {k:?}")
-        });
+        let actual = hydrated
+            .properties
+            .get(*k)
+            .unwrap_or_else(|| panic!("Loro V[{loro_key:?}] missing property {k:?}"));
         let expected_loro = LoroProperty::try_from(expected_v.clone())
             .expect("expected_v should be a scalar GraphValue (Null/Bool/Integer/Float/String)");
         assert_eq!(
@@ -359,7 +360,10 @@ fn vertex_builder_multiple_properties() {
 #[test]
 fn vertex_builder_empty_vertex() {
     let (app, db, doc) = build_app();
-    let node_id = app.create_vertex().commit().expect("empty vertex commits ok");
+    let node_id = app
+        .create_vertex()
+        .commit()
+        .expect("empty vertex commits ok");
     let loro_key = app
         .maps()
         .node_key_map
@@ -449,7 +453,10 @@ fn vertex_builder_concurrent_commit() {
                         .get(&node_id)
                         .cloned()
                         .expect("BridgeMaps has binding for concurrent commit");
-                    collected.lock().expect("collected mutex poisoned").push((node_id, loro_key));
+                    collected
+                        .lock()
+                        .expect("collected mutex poisoned")
+                        .push((node_id, loro_key));
                 }
             })
         })

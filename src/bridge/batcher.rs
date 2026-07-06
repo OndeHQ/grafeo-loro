@@ -78,9 +78,9 @@ pub struct MutationBatcher {
     pub(crate) tracer: Option<SharedTracer>,
     /// Optional health probe (P5-L2 Devil M3 / Q10 — symmetric with `metrics`
     /// + `tracer`). `Some` in production; `None` in tests. `flush_inner` calls
-    /// `health.update_sync_ts()` after each successful commit so the inbound
-    /// flush path stamps `last_sync_ts` (architecture §23.3 — "last sync" =
-    /// both inbound flush AND outbound commit).
+    ///   `health.update_sync_ts()` after each successful commit so the inbound
+    ///   flush path stamps `last_sync_ts` (architecture §23.3 — "last sync" =
+    ///   both inbound flush AND outbound commit).
     pub(crate) health: Option<Arc<HealthProbe>>,
 }
 
@@ -96,6 +96,11 @@ impl MutationBatcher {
     /// `GrafeoLoroAppBuilder::build` threads `Some(Arc::clone(&metrics))` +
     /// `Some(Arc::clone(&tracer))` + `Some(Arc::clone(&health))` here (P5-L2
     /// wired the parameter list — bodies filled P5-L3).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "P5-L1 wiring — builder pattern with explicit telemetry params; refactor to BatcherConfig struct deferred to future phase"
+    )]
+    // TODO: refactor to BatcherConfig struct in future phase
     pub fn new(
         grafeo_db: Arc<GrafeoDB>,
         batch_size: usize,
@@ -257,11 +262,10 @@ impl MutationBatcher {
         // 2.2). Held across the `spawn_blocking` await so the span covers the
         // entire Grafeo commit latency. Optional — `None` in tests / dev mode
         // without telemetry configured.
-        let _batch_flush_span = self.tracer.as_ref().map(|t| {
-            t.as_ref()
-                .span_builder("batch_flush")
-                .start(t.as_ref())
-        });
+        let _batch_flush_span = self
+            .tracer
+            .as_ref()
+            .map(|t| t.as_ref().span_builder("batch_flush").start(t.as_ref()));
 
         // P5-L3: capture start time BEFORE `spawn_blocking` so `elapsed_ms`
         // includes the blocking-pool scheduling + queue delay (the timeout
@@ -292,11 +296,9 @@ impl MutationBatcher {
             // is the contract; hierarchy is reconstructed in Jaeger by name
             // when no Context is propagated).
             let epoch: EpochId = {
-                let _grafeo_commit_span = blocking_tracer.as_ref().map(|t| {
-                    t.as_ref()
-                        .span_builder("grafeo_commit")
-                        .start(t.as_ref())
-                });
+                let _grafeo_commit_span = blocking_tracer
+                    .as_ref()
+                    .map(|t| t.as_ref().span_builder("grafeo_commit").start(t.as_ref()));
                 prepared.commit()?
             };
             epochs.write().insert(epoch);

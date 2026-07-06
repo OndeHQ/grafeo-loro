@@ -151,7 +151,10 @@ fn apply_upsert_edge(
     properties: &HashMap<String, crate::types::values::GraphValue>,
     maps: &BridgeMaps,
 ) -> Result<()> {
-    let (src_id, dst_id) = match (maps.node_id_map.read().get(src_key), maps.node_id_map.read().get(dst_key)) {
+    let (src_id, dst_id) = match (
+        maps.node_id_map.read().get(src_key),
+        maps.node_id_map.read().get(dst_key),
+    ) {
         (Some(&s), Some(&d)) => (s, d),
         _ => {
             return Err(GrafeoLoroError::Bridge(format!(
@@ -203,11 +206,19 @@ fn apply_tree_move(
         None => return Ok(()),
     };
     // parent→child: EdgeKey = (parent, child, label) — P2T2-DEVIL R1.
-    let old_key: EdgeKey = (old_parent_key.to_string(), node_key.to_string(), TREE_EDGE_LABEL.to_string());
+    let old_key: EdgeKey = (
+        old_parent_key.to_string(),
+        node_key.to_string(),
+        TREE_EDGE_LABEL.to_string(),
+    );
     if let Some(id) = maps.remove_edge(&old_key) {
         session.delete_edge(id);
     }
-    let new_key: EdgeKey = (new_parent_key.to_string(), node_key.to_string(), TREE_EDGE_LABEL.to_string());
+    let new_key: EdgeKey = (
+        new_parent_key.to_string(),
+        node_key.to_string(),
+        TREE_EDGE_LABEL.to_string(),
+    );
     if maps.edge_id_map.read().get(&new_key).is_none() {
         // parent→child: create_edge(parent, child, label) — P2T2-DEVIL R1.
         let eid = session.create_edge(new_parent_id, node_id, TREE_EDGE_LABEL);

@@ -25,8 +25,8 @@
 
 use std::fmt;
 
-use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::KeyValue;
 
 /// Hydration mode for `record_hydration` attribute labelling (architecture
 /// §23.1 row 5 label `mode` ∈ {`"loro"`, `"grafeo"}`).
@@ -123,8 +123,10 @@ impl MetricsRegistry {
         // label `batch_size`. `u64` → `i64` cast because OTel `Value` does
         // not implement `From<u64>` (only `i64` / `f64` / `bool` / strings);
         // `batch_size` realistically stays well below `i64::MAX`.
-        self.batch_flush_duration
-            .record(duration_ms, &[KeyValue::new("batch_size", batch_size as i64)]);
+        self.batch_flush_duration.record(
+            duration_ms,
+            &[KeyValue::new("batch_size", batch_size as i64)],
+        );
     }
 
     /// Record a hydration run. Called from `GrafeoLoroApp::hydrate` after

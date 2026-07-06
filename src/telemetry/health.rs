@@ -34,14 +34,14 @@
 //! owner, always present in production). Tests can omit it via the
 //! `Option<Arc<HealthProbe>>` field type — Devil Q2 to confirm.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use parking_lot::RwLock;
-use loro::LoroDoc;
 use grafeo::GrafeoDB;
+use loro::LoroDoc;
+use parking_lot::RwLock;
 
 /// Wall-clock milliseconds since UNIX epoch.
 ///

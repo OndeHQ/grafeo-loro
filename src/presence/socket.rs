@@ -1,8 +1,13 @@
-use crate::types::presence::PresencePayload;
 use crate::error::Result;
+use crate::types::presence::PresencePayload;
 
 /// Ephemeral presence manager over a WebSocket channel. Never persists state.
 pub struct PresenceManager {
+    // TODO: Phase 6 T1 — wire `room_id` into broadcast() once body is implemented
+    #[allow(
+        dead_code,
+        reason = "Phase 6 T1 excluded by user; field needed once broadcast_presence is implemented"
+    )]
     room_id: String,
     // WebSocket connection state
 }

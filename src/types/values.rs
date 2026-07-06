@@ -1,10 +1,10 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 use lorosurgeon::{
-    Hydrate, Reconcile, Reconciler,
-    reconcile::NoKey,
     error::{HydrateError, ReconcileError},
+    reconcile::NoKey,
+    Hydrate, Reconcile, Reconciler,
 };
 
 use crate::error::{GrafeoLoroError, Result};
@@ -19,18 +19,14 @@ use crate::error::{GrafeoLoroError, Result};
 /// lookups. The manual impls are ~30 LOC.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[derive(Default)]
 pub enum LoroProperty {
+    #[default]
     Null,
     Bool(bool),
     Integer(i64),
     Float(f64),
     String(String),
-}
-
-impl Default for LoroProperty {
-    fn default() -> Self {
-        Self::Null
-    }
 }
 
 // Manual `Hydrate` overrides each scalar dispatcher so the default
@@ -194,11 +190,10 @@ pub fn gval_to_grafeo_value(val: GraphValue) -> grafeo::Value {
         GraphValue::Float(f) => GV::Float64(f),
         GraphValue::String(s) => GV::String(s.into()),
         GraphValue::Vector(v) => GV::Vector(v),
-        GraphValue::List(items) => {
-            GV::List(items.into_iter().map(gval_to_grafeo_value).collect())
-        }
+        GraphValue::List(items) => GV::List(items.into_iter().map(gval_to_grafeo_value).collect()),
         GraphValue::Map(m) => {
-            let mut bt: BTreeMap<grafeo_common::types::PropertyKey, grafeo::Value> = BTreeMap::new();
+            let mut bt: BTreeMap<grafeo_common::types::PropertyKey, grafeo::Value> =
+                BTreeMap::new();
             for (k, v) in m {
                 bt.insert(k.into(), gval_to_grafeo_value(v));
             }
@@ -254,7 +249,10 @@ mod tests {
 
     #[test]
     fn lval_to_gval_scalars() {
-        assert_eq!(lval_to_gval(loro::LoroValue::Null).unwrap(), GraphValue::Null);
+        assert_eq!(
+            lval_to_gval(loro::LoroValue::Null).unwrap(),
+            GraphValue::Null
+        );
         assert_eq!(
             lval_to_gval(loro::LoroValue::Bool(true)).unwrap(),
             GraphValue::Bool(true)
@@ -264,8 +262,8 @@ mod tests {
             GraphValue::Integer(42)
         );
         assert_eq!(
-            lval_to_gval(loro::LoroValue::Double(3.14)).unwrap(),
-            GraphValue::Float(3.14)
+            lval_to_gval(loro::LoroValue::Double(3.5)).unwrap(),
+            GraphValue::Float(3.5)
         );
         assert_eq!(
             lval_to_gval(loro::LoroValue::String("hi".into())).unwrap(),
@@ -319,10 +317,7 @@ mod tests {
         // Hunter MINOR 5: the original `gval_to_grafeo_roundtrip` test was
         // misnamed (it tested a 1-way mapping, not a roundtrip) and only
         // exercised 1 of 8 GraphValue variants. Renamed and expanded.
-        assert_eq!(
-            gval_to_grafeo_value(GraphValue::Null),
-            grafeo::Value::Null
-        );
+        assert_eq!(gval_to_grafeo_value(GraphValue::Null), grafeo::Value::Null);
         assert_eq!(
             gval_to_grafeo_value(GraphValue::Bool(true)),
             grafeo::Value::Bool(true)
@@ -332,8 +327,8 @@ mod tests {
             grafeo::Value::Int64(7)
         );
         assert_eq!(
-            gval_to_grafeo_value(GraphValue::Float(3.14)),
-            grafeo::Value::Float64(3.14)
+            gval_to_grafeo_value(GraphValue::Float(3.5)),
+            grafeo::Value::Float64(3.5)
         );
         assert_eq!(
             gval_to_grafeo_value(GraphValue::String("hi".to_string())),
@@ -346,13 +341,9 @@ mod tests {
         );
         // Nested list (recursive): GraphValue::List([Bool, Integer]) →
         // grafeo::Value::List([Bool, Int64]).
-        let list_in = GraphValue::List(vec![
-            GraphValue::Bool(false),
-            GraphValue::Integer(11),
-        ]);
-        let list_out = grafeo::Value::List(
-            vec![grafeo::Value::Bool(false), grafeo::Value::Int64(11)].into(),
-        );
+        let list_in = GraphValue::List(vec![GraphValue::Bool(false), GraphValue::Integer(11)]);
+        let list_out =
+            grafeo::Value::List(vec![grafeo::Value::Bool(false), grafeo::Value::Int64(11)].into());
         assert_eq!(gval_to_grafeo_value(list_in), list_out);
         // Nested map (recursive): {"k": Bool} → grafeo::Value::Map{"k": Bool}.
         let mut map_in = HashMap::new();

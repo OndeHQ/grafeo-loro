@@ -21,8 +21,14 @@ fn compression_lz4_roundtrip() {
     let payload = CompressedPayload::compress(input, CompressionType::Lz4)
         .expect("LZ4 compress is infallible in practice");
     assert_eq!(payload.compression, CompressionType::Lz4);
-    assert_ne!(payload.raw_data.as_slice(), &input[..], "LZ4 must transform input (else test is vacuous)");
-    let recovered = payload.decompress().expect("LZ4 decompress succeeds for valid payload");
+    assert_ne!(
+        payload.raw_data.as_slice(),
+        &input[..],
+        "LZ4 must transform input (else test is vacuous)"
+    );
+    let recovered = payload
+        .decompress()
+        .expect("LZ4 decompress succeeds for valid payload");
     assert_eq!(recovered.as_slice(), &input[..]);
 }
 
@@ -36,8 +42,14 @@ fn compression_zstd_roundtrip() {
     let payload = CompressedPayload::compress(input, CompressionType::Zstd)
         .expect("Zstd compress at level 3 succeeds for valid input");
     assert_eq!(payload.compression, CompressionType::Zstd);
-    assert_ne!(payload.raw_data.as_slice(), &input[..], "Zstd must transform input (else test is vacuous)");
-    let recovered = payload.decompress().expect("Zstd decompress succeeds for valid payload");
+    assert_ne!(
+        payload.raw_data.as_slice(),
+        &input[..],
+        "Zstd must transform input (else test is vacuous)"
+    );
+    let recovered = payload
+        .decompress()
+        .expect("Zstd decompress succeeds for valid payload");
     assert_eq!(recovered.as_slice(), &input[..]);
 }
 
@@ -83,8 +95,14 @@ fn compression_none_passthrough() {
     let payload = CompressedPayload::compress(input, CompressionType::None)
         .expect("None compress is infallible (pure clone)");
     assert_eq!(payload.compression, CompressionType::None);
-    assert_eq!(payload.raw_data.as_slice(), &input[..], "None arm stores bytes verbatim (no header)");
-    let recovered = payload.decompress().expect("None decompress is infallible (pure clone)");
+    assert_eq!(
+        payload.raw_data.as_slice(),
+        &input[..],
+        "None arm stores bytes verbatim (no header)"
+    );
+    let recovered = payload
+        .decompress()
+        .expect("None decompress is infallible (pure clone)");
     assert_eq!(recovered.as_slice(), &input[..]);
 }
 
@@ -96,13 +114,23 @@ fn compression_none_passthrough() {
 /// prepends a 4-byte zero size.
 #[test]
 fn compression_empty_input_roundtrip() {
-    for strategy in [CompressionType::None, CompressionType::Lz4, CompressionType::Zstd] {
+    for strategy in [
+        CompressionType::None,
+        CompressionType::Lz4,
+        CompressionType::Zstd,
+    ] {
         let payload = CompressedPayload::compress(b"", strategy)
             .unwrap_or_else(|e| panic!("compress(&[], {strategy:?}) failed: {e}"));
-        assert_eq!(payload.compression, strategy, "codec tag preserved for empty input");
+        assert_eq!(
+            payload.compression, strategy,
+            "codec tag preserved for empty input"
+        );
         let recovered = payload
             .decompress()
             .unwrap_or_else(|e| panic!("decompress() failed for {strategy:?}: {e}"));
-        assert_eq!(recovered, b"", "empty-input roundtrip must yield empty Vec for {strategy:?}");
+        assert_eq!(
+            recovered, b"",
+            "empty-input roundtrip must yield empty Vec for {strategy:?}"
+        );
     }
 }
