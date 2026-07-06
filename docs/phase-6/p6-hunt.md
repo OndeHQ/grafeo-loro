@@ -81,3 +81,16 @@
   - `GrafeoLoroAppBuilder::build` (README:114) — impl at `src/app.rs:1073`.
 - Compilation itself is the strongest proof: fuzz crate `cargo check PASS` (worklog line 265) means every imported symbol resolves. No hallucinated APIs.
 
+## Anti-Pattern #7: Happy-Path Bias
+
+**Hunt**: `rg 'Arbitrary::Err|if let Err|match .*Err\(|let _ =' fuzz/fuzz_targets/consistency.rs` + `rg 'fuzz_target!|arbitrary' fuzz/fuzz_targets/consistency.rs`
+
+**Verdict**: NOT FOUND — clean by inspection.
+
+- `fuzz_target!` entry (lines 781-789) explicitly handles `Arbitrary::Err` via `match FuzzInput::arbitrary(&mut u) { Ok(i) => i, Err(_) => return }` — early-return on malformed input, with comment citing "Devil happy-path bias note" from `docs/phase-6/fuzz-invariants.md`. NOT happy-path bias; this IS the defensive pattern.
+- 7 `let _ = ...` calls — all deliberate fire-and-forget with contextual justification:
+  - Line 315, 324: channel sends where receiver may be gone (legitimate).
+  - Line 407, 832, 838: Loro map ops on potentially-malformed keys — defensive testing of error paths.
+  - Line 818: `apply_loro_op(...)` with explicit comment "we log via `let _ =` and continue" — deliberate error-path testing.
+- No bare `.unwrap()` in the harness; all fallible ops use `expect("I<n>: ...")` or `let _ =`.
+
