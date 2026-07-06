@@ -4982,3 +4982,134 @@ Next steps for user:
 1. **REVOKE the GitHub PAT** `ghp_***` immediately at https://github.com/settings/tokens.
 2. Open PR `phase-3` → `phase-2` (or `phase-3` → `main` if phase-2 is already merged) for review.
 3. Phase 4 (Storage Backend & Lifecycle) is next per implementation-plan.md. New orchestrator session recommended.
+
+---
+
+# Phase 4 — Storage Backend & Lifecycle (Tasks 2, 3, 4 only — Task 1 S3 excluded by user)
+
+**$stn (current loop scope)**: `phase-4`
+**Branch**: `phase-4` (created off `phase-3` @ `3272017`)
+**Base commit**: `3272017 ORCH-P3T4-CLOSE: Phase 3 Task 4 complete — 54/54 tests pass; PHASE 3 COMPLETE (all 4 tasks)`
+**Repository path**: `/home/z/my-project/workspace/grafeo-loro`
+
+## Phase 4 Scope (Tasks 2, 3, 4 — Task 1 EXCLUDED by user)
+
+Per `docs/implementation-plan.md`:
+
+1. ~~Implement `storage::traits::StorageBackend` for S3~~ **EXCLUDED by user** — user said "all task not 1"
+2. **Implement `app::GrafeoLoroApp::hydrate`**
+   - Match on `SsotMode::Loro` vs `Grafeo`.
+   - Loro mode: Download base + deltas → import → parallel hydrate.
+   - Grafeo mode: Download tar.zst → extract → restore DB → hydrate Loro.
+3. **Implement `app::GrafeoLoroApp::checkpoint`**
+   - Loro mode: Export shallow snapshot → upload base → clear deltas.
+   - Grafeo mode: Backup DB → compress tar.zst → upload.
+4. **Implement `app::GrafeoLoroAppBuilder::build`**
+   - Validate config.
+   - Init LoroDoc, GrafeoDB, SyncEngine, Batcher.
+   - Spawn tokio tasks.
+
+### Validation
+- Integration test: Full cold boot → mutate → checkpoint → cold boot again.
+- Test: S3 network failure → graceful error, no corruption.
+
+## Loop Plan (Plonga-Plongo-Loop)
+
+Per `plonga-plongo-loop.md`:
+1. L1 scaffolding (contracts only — no logic)         ← Task ID: P4-L1
+2. Devil's advocate critique + solution                ← Task ID: P4-DEVIL
+3. Fixer (L2 evolving/reduction scaffolds — wiring)    ← Task ID: P4-L2
+4. L3 deep implementation (zero TODOs)                 ← Task ID: P4-L3
+5. Plenger hunter (find anti-patterns)                 ← Task ID: P4-HUNT
+6. Back to step 3 if issues found, else push $stn
+
+## Sub-Agent Compliance Rules (sub-agents-traits.md)
+
+1. Read `repomix.md` first (signature-based read-only context). Already regenerated at base commit.
+2. Prefer `grep -n` over individual file reads for context efficiency.
+3. ALWAYS `cd /home/z/my-project/workspace/grafeo-loro &&` before any git/cargo/repomix command — bash session resets cwd between calls.
+4. Push to `phase-4` branch on significant progress. Shell timeout often auto-wipes everything.
+5. Never create another branch.
+6. Never rebase in a way that drops/overwrites others' commits.
+7. Comply with `klemer-agents.md` layer rules:
+   - **L1**: Contracts only — interfaces, types, skeletons, empty method signatures. NO implementation logic.
+   - **L2**: Internal state + wire the entire execution path. Complex algorithms stay as `// TODO`.
+   - **L3**: Fill in TODOs. Zero unwritten logic, stubs, band-aids, or plenger-traits.
+8. Comply with `anti-plenger.md` decisions: pure functions; DRY/SRP/SSOT; YAGNI; perf+security; high cohesion/loose coupling; immutability; polymorphism over conditionals; observability; absolute idempotency; fewest LOC; deletion over addition; native-first; oneline code/doc first; never simplify the basics or explicit requests.
+9. Avoid `plenger-traits.md` anti-patterns: backward-compat slaves; tautology (green tests, broken system); context blindness (breaking global architecture); band-aids; bloat (DRY violations); hallucination (inventing libs/methods); happy-path bias; Goodhart's law (hardcoding to make tests green).
+
+## Environment
+
+- bun: canary (1.4.0-canary.1)
+- repomix: 1.16.0 (already ran, `repomix.md` at repo root, 425k tokens)
+- rust: 1.96.1 (minimal profile)
+- Token (rotated, safe to use): `<redacted>`
+- Repo URL: `https://github.com/OndeHQ/grafeo-loro`
+- Push URL: `https://x-access-token:<redacted>@github.com/OndeHQ/grafeo-loro.git`
+
+
+---
+
+Task ID: P4-L1
+Agent: L1 Scaffolding
+Task: Write contracts (interfaces/types/signatures only — NO logic) for Phase 4 Tasks 2, 3, 4. Task 1 (S3) excluded.
+
+Work Log:
+- Read worklog.md tail (Phase 4 setup section @ 4988-5049) for branch/scope/context. Confirmed on `phase-4` branch via `git branch --show-current`. Base commit: `3272017` (Phase 3 Task 4 close).
+- Read `docs/implementation-plan.md` Phase 4 section (lines 84-106): Task 2 = `hydrate` (Loro: download base+deltas → import → parallel hydrate; Grafeo: download tar.zst → extract → restore DB → hydrate Loro); Task 3 = `checkpoint` (Loro: shallow snapshot → upload base → clear deltas; Grafeo: backup DB → tar.zst → upload); Task 4 = `GrafeoLoroAppBuilder::build` (validate config → init LoroDoc/GrafeoDB/SyncEngine/Batcher → spawn tokio tasks).
+- Read `docs/grafeo-loro.architecture.md` §2 (`SsotMode` table), §4 Step A (cold startup) + Step D (session termination), §24.2 (quick-start example calling `builder().storage(...).ssot_mode(...).compression(...).batch_interval_ms(...).batch_max_size(...).build().await` → `app.hydrate("graph_123").await?` → `app.checkpoint("graph_123").await?`), §24.3 (`StorageBackend` trait).
+- Read existing `src/app.rs` end-to-end (605 lines): `GrafeoLoroApp` struct + `GrafeoLoroAppBuilder` struct + 6 setters + `build` + `checkpoint` all `unimplemented!()`. `builder()` itself also `unimplemented!()` but NOT in P4-L1 scope (only the 6 setters + `build` per task spec).
+- API verifications (all `grep -n` against `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/`):
+  - **Loro**: `LoroDoc::export(mode: ExportMode) -> Result<Vec<u8>, LoroEncodeError>` at `loro-1.13.6/src/lib.rs:1306`; `LoroDoc::import(&[u8]) -> Result<ImportStatus, LoroError>` at `:710`; `LoroDoc::new() -> Self` at `:137`; `LoroDoc::oplog_frontiers() -> Frontiers` at `:948`. `ExportMode::ShallowSnapshot(Cow<Frontiers>)` + `ExportMode::shallow_snapshot(frontiers: &Frontiers)` at `loro-internal-1.13.6/src/encoding.rs:53,108`. `ExportMode::updates(&VersionVector)` at `:80`. `LoroDoc::export` re-exported at `loro-1.13.6/src/lib.rs:56`.
+  - **Grafeo**: `GrafeoDB::new_in_memory() -> Self` at `grafeo-engine-0.5.42/src/database/mod.rs:267`; `GrafeoDB::open(path: impl AsRef<Path>) -> Result<Self>` at `:290`; `GrafeoDB::close() -> Result<()>` at `:2229`. `GrafeoDB::backup_full(&Path) -> Result<BackupSegment>` at `:2743` is gated behind `#[cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]` — `wal` is NOT in grafeo's default `embedded` feature set (grafeo declares `grafeo-engine = { default-features = false }` + `default = ["embedded"]` + `embedded` activates `lpg/gql/ai/algos/parallel/regex/jsonl-import/grafeo-file/arrow-export` but NOT `wal`). `GrafeoDB::checkpoint_to_file` at `:2827` is private (`fn`, not `pub fn`). Therefore tar-of-directory is the only Grafeo-SSOT path available without a feature-flag bump — flagged for P4-DEVIL.
+  - **zstd**: `zstd::stream::decode_all(&[u8]) -> Result<Vec<u8>, io::Error>` at `zstd-0.13.3/src/stream/functions.rs:8` (already used by `CompressedPayload::decompress` at `src/compression/wrapper.rs:66`).
+  - **Compression wrapper**: `CompressedPayload::compress(&[u8], CompressionType) -> Result<Self>` at `src/compression/wrapper.rs:23`; `CompressedPayload::decompress(&self) -> Result<Vec<u8>>` at `:48`; `LoroDocCompressionExt::export_compressed/export_compressed/import_compressed` at `:74-83`.
+  - **Hydration**: `parallel_hydrate_grafeo(&Arc<GrafeoDB>, &LoroDoc, &BridgeMaps) -> Result<()>` at `src/hydration/parallel.rs:40`. Preconditions at `:23-29`; idempotency assumption at `:39`.
+  - **SyncEngine**: `SyncEngine::new(grafeo_db, loro_doc) -> (Self, mpsc::Receiver, mpsc::Receiver)` at `src/bridge/sync_engine.rs:148`; `SyncEngine::spawn_all(self: Arc<Self>, inbound_rx, outbound_rx) -> Vec<JoinHandle<()>>` at `:403`; `SyncEngine::init_loro_subscriber` at `:204`.
+  - **VertexBuilder / from_sync_engine**: `GrafeoLoroApp::from_sync_engine(Arc<SyncEngine>) -> Self` at `src/app.rs:67` (doc says `loro_key_counter` starts at 0; cold-boot hydration re-seeds to `max(existing V/* keys) + 1`).
+  - **Existing constants**: `DEFAULT_BATCH_MS = 100`, `DEFAULT_BATCH_SIZE = 256`, `DEFAULT_CHUNK_SIZE = 256`, `DEFAULT_ZSTD_LEVEL = 3` at `src/constants.rs:22-32`.
+- Inspected `src/error.rs`: 10 existing variants cover all Phase 4 failure modes — `Loro(#[from] loro::LoroError)`, `Grafeo(#[from] grafeo::Error)`, `StorageIo(#[from] std::io::Error)`, `Compression(String)`, `ChannelClosed(String)`, `Config(String)`, `UnsupportedLoroType(String)`, `Bridge(String)`, `Hydrate(#[from] lorosurgeon::error::HydrateError)`, `TreeMoveCreatesCycle { node_id, new_parent }`. DRY analysis: `BuilderInvalid` → reuse `Config(String)` (its doc-comment already says "Configuration invalid"); `HydrationFailed`/`CheckpointFailed` → already covered by `StorageIo`/`Loro`/`Grafeo`/`Compression`/`Hydrate`/`Bridge` depending on the failure site. **No new error variants added.**
+- Edited `src/constants.rs`: added Phase 4 storage-key SSOT section (74 new lines) — `STORAGE_KEY_BASE_LORO = "base.loro"`, `STORAGE_KEY_DELTA_PREFIX = "delta-"`, `STORAGE_KEY_DELTA_SUFFIX = ".loro"`, `STORAGE_KEY_GRAFEO_TAR_ZST = "snapshot.tar.zst"`. Each constant has a doc-comment capturing the full key format (`format!("{graph_id}/{STORAGE_KEY_*}")`), the contents (raw bytes + codec), the producer/consumer methods (`hydrate`/`checkpoint`), the `StorageBackend::load` `NotFound`-as-fresh-graph contract, and any open questions for P4-DEVIL.
+- Edited `src/app.rs` (326 changed lines):
+  - **Replaced `checkpoint` body + doc-comment** (was 1-line `unimplemented!()` at line 129): added 73-line doc-comment covering `SsotMode::Loro` (6 steps: `oplog_frontiers` → `ExportMode::shallow_snapshot` → `CompressedPayload::compress` → `StorageBackend::save(STORAGE_KEY_BASE_LORO)` → `list(STORAGE_KEY_DELTA_PREFIX)` → `delete` each delta) + `SsotMode::Grafeo` (5 steps: `GrafeoDB::close` → tar directory → `CompressedPayload::compress` → `save(STORAGE_KEY_GRAFEO_TAR_ZST)` → `GrafeoDB::open` reopen) + Errors section + Idempotency section. Body now `unimplemented!("P4-L2 scope")`.
+  - **Added new `pub async fn hydrate(&self, graph_id: &str) -> Result<()>`** between `checkpoint` and `broadcast_presence`: 103-line doc-comment covering `SsotMode::Loro` (6 steps: `load(STORAGE_KEY_BASE_LORO)` with `NotFound`-as-fresh-graph → `CompressedPayload::decompress` → `LoroDoc::import` with `ImportStatus::pending` recovery → `list(STORAGE_KEY_DELTA_PREFIX)` + delta import loop → `parallel_hydrate_grafeo` → re-seed `loro_key_counter`) + `SsotMode::Grafeo` (6 steps: `load(STORAGE_KEY_GRAFEO_TAR_ZST)` with `NotFound`-as-fresh-graph → `zstd::stream::decode_all` → tar extraction → `GrafeoDB::open` → rebuild LoroDoc from Grafeo via `Reconcile::reconcile` per vertex/edge → re-seed `loro_key_counter`) + Preconditions section + Errors section + Idempotency section. Body `unimplemented!("P4-L2 scope")`.
+  - **Replaced 6 setter doc-comments + bodies** (`storage`, `ssot_mode`, `compression`, `sync_compression`, `batch_interval_ms`, `batch_max_size`): each now has a Phase 4 Task 4 scope doc-comment (citing the storage slot, the downstream consumer, the default value, and the contract — "Consumes `self`, returns `Self` with `self.<field> = <value>`; idempotent over the slot"). Bodies `unimplemented!("P4-L2 scope")`.
+  - **Replaced `build` doc-comment + body**: 47-line doc-comment covering the 7 orchestration steps (validate config → init LoroDoc → init GrafeoDB → init SyncEngine → init MutationBatcher (owned by SyncEngine::new) → spawn tokio tasks via `SyncEngine::spawn_all` → wrap into `GrafeoLoroApp::from_sync_engine`) + Errors section + Idempotency section. Body `unimplemented!("P4-L2 scope")`.
+  - Did NOT touch: `builder()` (not in P4-L1 scope per task spec — task lists only setters + `build`); `query` / `update_text` / `generate_embedding` / `broadcast_presence` / `shutdown` (other phases' scope); `VertexBuilder` (Phase 2 complete); `compensate_loro_vertex` helper (Phase 2 complete).
+- Ran `cargo check --message-format=short`: exit 0, 3 pre-existing lib warnings (unchanged from baseline — `GrafeoLoroAppBuilder` fields never read, `presence::socket::room_id` never read, `telemetry::health` fields never read), 0 errors, 0 new warnings from L1 work.
+- Ran `cargo check --all-targets`: exit 0, same 3 lib warnings duplicated in lib-test target (pre-existing), 0 errors.
+- Ran `cargo test --lib --no-run`: unittests binary compiles cleanly. (Did not run actual tests — L1 does not modify any logic; tests are out of L1 scope per `klemer-agents.md`.)
+- Committed: `git -c user.email="p4-l1@plonga-plongo" -c user.name="P4-L1" commit -m "P4-L1: Phase 4 contracts — hydrate/checkpoint/build signatures + storage key SSOT constants"` (will push next).
+
+Stage Summary:
+- Files touched:
+  - `src/constants.rs` (modified — +74 lines): added `STORAGE_KEY_BASE_LORO`, `STORAGE_KEY_DELTA_PREFIX`, `STORAGE_KEY_DELTA_SUFFIX`, `STORAGE_KEY_GRAFEO_TAR_ZST` constants + Phase 4 SSOT section header.
+  - `src/app.rs` (modified — +317 / -9 lines): replaced `checkpoint` body + doc-comment; added new `hydrate` method + doc-comment; replaced 6 setter bodies + doc-comments; replaced `build` body + doc-comment. All bodies now `unimplemented!("P4-L2 scope")`.
+  - `worklog.md` (modified — appended this entry).
+- New types/constants:
+  - `pub const STORAGE_KEY_BASE_LORO: &str = "base.loro"` — Loro-SSOT base snapshot key suffix.
+  - `pub const STORAGE_KEY_DELTA_PREFIX: &str = "delta-"` — Loro-SSOT delta key prefix (for `StorageBackend::list`).
+  - `pub const STORAGE_KEY_DELTA_SUFFIX: &str = ".loro"` — Loro-SSOT delta key suffix.
+  - `pub const STORAGE_KEY_GRAFEO_TAR_ZST: &str = "snapshot.tar.zst"` — Grafeo-SSOT tarball key suffix.
+  - No new types/structs (YAGNI — `hydrate`/`checkpoint` return `Result<()>` per architecture §24.2 quick-start example; no `HydrationStats`/`CheckpointStats` because the spec does not require them).
+  - No new error variants (DRY — existing `Config`/`StorageIo`/`Loro`/`Grafeo`/`Compression`/`Hydrate`/`Bridge` cover all Phase 4 failure modes).
+- API verifications performed (which crate symbols were grep-confirmed to exist):
+  - `loro-1.13.6/src/lib.rs`: `LoroDoc::new` (line 137), `LoroDoc::import` (line 710), `LoroDoc::import_with` (line 721), `LoroDoc::export` (line 1306), `LoroDoc::oplog_vv` (line 887), `LoroDoc::state_vv` (line 893), `LoroDoc::oplog_frontiers` (line 948), `LoroDoc::from_snapshot` (line 682), `pub use loro_internal::encoding::ExportMode` re-export (line 56).
+  - `loro-internal-1.13.6/src/encoding.rs`: `enum ExportMode<'a>` (line 53), `ExportMode::Snapshot` (line 55), `ExportMode::Updates { from }` (line 57), `ExportMode::ShallowSnapshot(Cow<Frontiers>)` (line 61), `ExportMode::snapshot()` (line 75), `ExportMode::updates(&VersionVector)` (line 80), `ExportMode::all_updates()` (line 94), `ExportMode::shallow_snapshot(&Frontiers)` (line 108).
+  - `grafeo-engine-0.5.42/src/database/mod.rs`: `GrafeoDB::new_in_memory` (line 267), `GrafeoDB::open` (line 290), `GrafeoDB::open_read_only` (line 319), `GrafeoDB::with_config` (line 346), `GrafeoDB::close` (line 2229), `GrafeoDB::backup_full` (line 2743 — `#[cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]`), `GrafeoDB::restore_to_epoch` (line 2813 — `#[cfg(all(feature = "wal", feature = "grafeo-file"))]`), `GrafeoDB::checkpoint_to_file` (line 2827 — private `fn`), `GrafeoDB::file_manager` (line 2853 — `#[cfg(feature = "grafeo-file")]`).
+  - `grafeo-0.5.42/Cargo.toml` + `grafeo-engine-0.5.42/Cargo.toml`: confirmed `grafeo = { default = ["embedded"] }` + `embedded` does NOT activate `wal`; confirmed `grafeo-engine = { default = ["lpg", "gql", "parallel", "wal", "grafeo-file", "spill", "mmap", "regex"] }` BUT grafeo declares `grafeo-engine = { version = "0.5.42", default-features = false }` so the `wal` feature is OFF when grafeo is used with defaults.
+  - `zstd-0.13.3/src/stream/functions.rs`: `decode_all` (line 8), `encode_all` (line 32) — both already used by `src/compression/wrapper.rs`.
+  - `src/compression/wrapper.rs`: `CompressedPayload::compress` (line 23), `CompressedPayload::decompress` (line 48), `LoroDocCompressionExt::export_compressed` (line 76), `LoroDocCompressionExt::import_compressed` (line 83).
+  - `src/hydration/parallel.rs`: `parallel_hydrate_grafeo` (line 40), Preconditions section (lines 23-29), Idempotency assumption (line 39).
+  - `src/bridge/sync_engine.rs`: `SyncEngine::new` (line 148), `SyncEngine::spawn_all` (line 403), `SyncEngine::init_loro_subscriber` (line 204).
+  - `src/app.rs`: `GrafeoLoroApp::from_sync_engine` (line 67), `VertexBuilder::commit` (line 378) — already Phase 2 complete.
+- Open questions for P4-DEVIL (8 flagged inline in doc-comments + listed here):
+  1. **Q1 (delta-key epoch source)**: The delta storage key is `format!("{graph_id}/{STORAGE_KEY_DELTA_PREFIX}{epoch}{STORAGE_KEY_DELTA_SUFFIX}")`. The `{epoch}` slot's source is ambiguous — should it be (a) grafeo's `transaction_manager.current_epoch()` (the commit epoch, monotonic per-DB), or (b) the Loro oplog counter (`LoroDoc::oplog_vv()`'s max peer counter)? Architecture §9 mentions the epoch side-channel but does not specify the delta-key epoch source. Resolving this affects both `checkpoint` (which epoch to embed) and `hydrate` (how to order/which to skip if already applied).
+  2. **Q2 (`tar` crate missing + GrafeoDB flush strategy)**: `Cargo.toml` does NOT include the `tar` crate. `GrafeoDB::backup_full`/`restore_to_epoch` are gated behind the `wal` feature which grafeo's default `embedded` set does NOT activate. `GrafeoDB::checkpoint_to_file` is private. The contract uses tar-of-directory + `GrafeoDB::close()` + `GrafeoDB::open()` — but `close()` is destructive (drops the handle). Three sub-questions: (a) add `tar = "0.4"` to `Cargo.toml` at L3? (b) add `grafeo = { version = "0.5", features = ["wal"] }` to enable `backup_full`/`restore_to_epoch`? (c) or use the `GrafeoDB::file_manager()` accessor (public, `#[cfg(feature = "grafeo-file")]`) to read the on-disk file directly without `close()`?
+  3. **Q3 (atomic base-overwrite + delta-clear)**: `checkpoint` overwrites the base snapshot then deletes the deltas. If `StorageBackend::save` succeeds but `delete` fails partway through, the deltas are orphaned (next `hydrate` re-imports them, double-applying changes already in the base). Should `checkpoint` (a) delete deltas BEFORE overwriting base (recoverable: redownload old base from a temp key), (b) use a temporary key + rename atomic pattern (requires `StorageBackend::rename` which is NOT in the trait), or (c) accept the orphan-delta risk and rely on Loro's `ImportStatus::pending` to deduplicate?
+  4. **Q4 (cross-method lock for `checkpoint` vs concurrent `hydrate`/mutation)**: The doc-comment notes "no cross-method lock at L1; L2 may add a `RwLock` on the graph-id slot". Should `GrafeoLoroApp` carry a `RwLock<HashSet<graph_id>>` for in-flight `checkpoint`/`hydrate` operations to serialize them? Or trust the orchestrator to not call them concurrently?
+  5. **Q5 (missing `grafeo_dir` builder setter)**: `GrafeoDB::open(path)` requires a directory path. `GrafeoLoroAppBuilder` does NOT expose a setter for it. `SsotMode::Grafeo` mode + production `GrafeoDB::open` both require it. Three options: (a) add `pub fn grafeo_dir(self, path: PathBuf) -> Self` to the builder, (b) always use `GrafeoDB::new_in_memory()` and snapshot via a different mechanism, (c) add a `grafeo_dir` field to `AppConfig`. Architecture §24.4 config table does NOT mention `grafeo_dir`.
+  6. **Q6 (Grafeo→Loro reconciliation path)**: `SsotMode::Grafeo`'s `hydrate` step 5 says "Rebuild the live `LoroDoc` from the restored Grafeo state by iterating the Grafeo vertex/edge tables and reconciling each into Loro". Architecture §4 Step A only mentions Loro→Grafeo hydration (the `parallel_hydrate_grafeo` path); the Grafeo→Loro direction is NOT specified. What's the canonical Grafeo→Loro path? Iterate `GrafeoDB`'s vertex table → `VertexEntity::reconcile(RootReconciler::new(node_map))` per vertex? Or a Grafeo CDC replay from epoch 0? This is a significant implementation gap.
+  7. **Q7 (MutationBatcher parameter wiring)**: `MutationBatcher::new` is called from `SyncEngine::new` at `src/bridge/sync_engine.rs:161` with `DEFAULT_BATCH_SIZE` + `DEFAULT_BATCH_MS` hardcoded. The builder's `batch_interval_ms` / `batch_max_size` setters exist but their values are NOT threaded into `SyncEngine::new` (signature would need widening). Should `SyncEngine::new` take the batch params as args, or should `MutationBatcher::new` be removed from `SyncEngine::new` and called separately by `build()`?
+  8. **Q8 (zero-value validation for batch params)**: Should `build()` reject `batch_interval_ms == 0` or `batch_max_size == 0`? Currently `Default` (100 / 256) is always sane, but a caller could explicitly set zero. YAGNI says no; defensive programming says yes. Flagged for Devil.
+- Commit hash: <will be filled in after commit — see git log>

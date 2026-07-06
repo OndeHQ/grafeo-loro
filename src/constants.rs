@@ -64,3 +64,78 @@ pub const OUTBOUND_POLL_MS: u64 = 50;
 // filter them out (echo prevention). Pruning keeps only epochs newer than
 // `last_polled_epoch - EPOCH_RETENTION` so the set does not grow unbounded.
 pub const EPOCH_RETENTION: u64 = 10_000;
+
+// ============================================================================
+// Phase 4 — Storage key SSOT (P4-L1)
+// ============================================================================
+//
+// Architecture §2 + §4 Step D + §24.3 (`StorageBackend::load/save/list/delete`
+// take opaque `&str` keys; the application owns the key-space convention).
+// These constants are the SSOT for the suffix portion of every storage key
+// produced/consumed by `app::GrafeoLoroApp::hydrate` / `checkpoint`
+// (P4T2-L2 / P4T3-L2). Call sites compose with a caller-supplied `graph_id`
+// via `format!("{graph_id}/{STORAGE_KEY_*}")` — see each method's doc-comment
+// for the exact composition pattern. Anti-plenger #2 DRY/SSOT: no call site
+// re-literalizes `"base.loro"`, `"snapshot.tar.zst"`, etc.
+
+/// Suffix of the Loro-SSOT mode base snapshot storage key. Full key:
+/// `format!("{graph_id}/{STORAGE_KEY_BASE_LORO}")` — e.g. `graph_123/base.loro`.
+///
+/// Contents: bytes from `LoroDoc::export(ExportMode::Snapshot)` (full state +
+/// history) on `checkpoint`, optionally wrapped via
+/// `CompressedPayload::compress(&bytes, CompressionType::Zstd)` (P3T1-L3 codec
+/// envelope). On `hydrate`, decompressed + `LoroDoc::import(&bytes)` (verified
+/// at `loro-1.13.6/src/lib.rs:710`).
+///
+/// `StorageBackend::load` returning `io::ErrorKind::NotFound` on this key is
+/// the "fresh graph" cold-boot path — `hydrate` initializes an empty `LoroDoc`
+/// and proceeds (P4T2-L2 contract).
+pub const STORAGE_KEY_BASE_LORO: &str = "base.loro";
+
+/// Prefix of the Loro-SSOT mode delta storage keys. Full key:
+/// `format!("{graph_id}/{STORAGE_KEY_DELTA_PREFIX}{epoch}{STORAGE_KEY_DELTA_SUFFIX}")`
+/// — e.g. `graph_123/delta-42.loro`.
+///
+/// Used as the `prefix` arg to `StorageBackend::list` for delta enumeration
+/// during `hydrate` (architecture §24.3 — "List keys matching a prefix (for
+/// delta enumeration in Loro SSOT mode)"). Each delta's body is
+/// `LoroDoc::export(ExportMode::updates(&from_vv))` (verified at
+/// `loro-internal-1.13.6/src/encoding.rs:80`), optionally compressed via
+/// `CompressedPayload::compress`.
+///
+/// The `{epoch}` slot in the key is the grafeo-side `EpochId` at the time the
+/// delta was produced (architecture §9 — epoch side-channel is the SSOT for
+/// commit ordering across the Loro↔Grafeo bridge). `P4-DEVIL Q1`: the exact
+/// epoch-source for the key (`bridge_origin_epochs` set vs. grafeo's
+/// `transaction_manager.current_epoch()`) is ambiguous in the spec — flagged
+/// for resolution before P4-L2 wiring.
+pub const STORAGE_KEY_DELTA_PREFIX: &str = "delta-";
+
+/// Suffix of the Loro-SSOT mode delta storage keys — see
+/// [`STORAGE_KEY_DELTA_PREFIX`].
+pub const STORAGE_KEY_DELTA_SUFFIX: &str = ".loro";
+
+/// Suffix of the Grafeo-SSOT mode tarball snapshot storage key. Full key:
+/// `format!("{graph_id}/{STORAGE_KEY_GRAFEO_TAR_ZST}")` — e.g.
+/// `graph_123/snapshot.tar.zst`.
+///
+/// Contents: tarball of the directory-backed `GrafeoDB` folder (post-flush),
+/// zstd-compressed via `CompressedPayload::compress(&tar_bytes,
+/// CompressionType::Zstd)`. On `hydrate`, `zstd::stream::decode_all`
+/// (verified at `zstd-0.13.3/src/stream/functions.rs:8`) + tar extraction +
+/// `GrafeoDB::open(extracted_dir)` (verified at
+/// `grafeo-engine-0.5.42/src/database/mod.rs:290`).
+///
+/// `StorageBackend::load` returning `io::ErrorKind::NotFound` on this key is
+/// the "fresh graph" cold-boot path — `hydrate` initializes an empty
+/// `GrafeoDB` (P4T2-L2 contract).
+///
+/// `P4-DEVIL Q2`: the `tar` crate is NOT yet in `Cargo.toml` — L3 must add
+/// it. `GrafeoDB::backup_full` / `restore_to_epoch` (at
+/// `grafeo-engine-0.5.42/src/database/mod.rs:2743` / `:2813`) are gated
+/// behind the `wal` feature which is NOT in grafeo-0.5.42's default
+/// `embedded` feature set (grafeo declares
+/// `grafeo-engine = { default-features = false }`); the tar-of-directory
+/// strategy is therefore the only Grafeo-SSOT path available without a
+/// feature-flag bump. Flagged for P4-DEVIL.
+pub const STORAGE_KEY_GRAFEO_TAR_ZST: &str = "snapshot.tar.zst";
