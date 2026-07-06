@@ -48,6 +48,15 @@ pub enum GrafeoLoroError {
         node_id: crate::types::ids::NodeId,
         new_parent: crate::types::ids::NodeId,
     },
+
+    /// Feature/method is planned for a future phase but not yet implemented.
+    /// Returned instead of panicking via `unimplemented!()` (Phase 6 T1).
+    #[error("not yet implemented: {0}")]
+    NotYetImplemented(String),
+
+    /// Malformed `%EPH` presence envelope (bad magic, truncated, serde failure).
+    #[error("invalid presence envelope: {0}")]
+    InvalidEnvelope(String),
 }
 
 pub type Result<T> = std::result::Result<T, GrafeoLoroError>;

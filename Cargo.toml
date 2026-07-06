@@ -29,6 +29,7 @@ lz4_flex = "0.11"
 # `zstd-sys` always compiles the C library via `cc`; defer pure-Rust evaluation to Phase 6 hardening if needed.
 zstd = "0.13"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 async-trait = "0.1"
 thiserror = "1"
 opentelemetry = { version = "0.23", features = ["metrics", "trace"] }
