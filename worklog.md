@@ -3998,3 +3998,92 @@ Stage Summary:
   4. **Sample range**: L2 hinted `[0.0, 1.0)` via `(next_u64() >> 11) as f32 / (1u64 << 53) as f32`. L3 may use `[-1.0, 1.0)` or any other range — the contract is just "deterministic + input-sensitive"; downstream Grafeo HNSW accepts any `f32` vector.
   5. **`GrafeoLoroApp::generate_embedding` (Phase 4+)**: L2 reannotated the orphan stub. L3 for Task 3 does NOT touch it. Task 4 / Phase 4 L1 will own wiring `app::generate_embedding → VectorOffloadManager::handle_text_update`.
   6. **NIT 1 silencer removal**: L3 MUST remove `#![allow(unused_imports)]` from `tests/unit/vector_embedding.rs` when filling test bodies (matches P3T1-L1 → P3T1-L3 trajectory).
+
+---
+Task ID: P3T3-L3
+Agent: L3 Deep Implementation
+Task: Implement generate_local_embedding (deterministic SplitMix64 stub) + 4 tests; zero stubs in Task 3 scope
+
+Work Log:
+- Confirmed on branch `p3-vector-embedding` at HEAD `02a47f7` (P3T3-L2 worklog commit). Working tree clean. Baseline: `cargo check --all-targets` = 0 errors / 4 pre-existing warnings; `cargo test --all` = 47 PASS + 5 IGNORED + 0 FAIL (4 P3T3-L1 scaffolds + 1 P3T2 benchmark).
+- Read mandatory framework files in order: `sub-agents-traits.md`, `klemer-agents.md` (L3 = "Fill in the final TODOs. Leave zero unwritten logic, stubs, band-aids"), `anti-plenger.md` (14 decisions), `plenger-traits.md` (8 anti-patterns), `repomix.md` usage guide.
+- Read worklog most-recent 4 entries in full: `ORCH-P3T3-SETUP` (:3641-3678), `P3T3-L1` (:3680-3772), `P3T3-DEVIL` (:3775-3873), `P3T3-L2` (:3876-3996). Confirmed scope = `generate_local_embedding` body ONLY (Task 4 owns `new` + `handle_text_update`). Skimmed `P3T1-L3` (:2403-2490) + `P3T2-L3` (:3165-3250) for L3 style/depth calibration (commit `b3bb5ef` + `db7042d` precedents — same L3 trajectory: replace `todo!()`/`// TODO(L3):` markers with real verified code + un-ignore tests + remove `#![allow(unused_imports)]` silencer).
+- Read L2 state of all 3 files: `src/hydration/vector.rs` (78 lines — `Once` + `warn!` skeleton + 14-line `// TODO(L3):` comment block + `todo!("L3: ...")` body), `tests/unit/vector_embedding.rs` (183 lines — `mod test_capture::WarnCounter` Layer wired; 4 `#[ignore]`'d scaffolds with `todo!()` bodies; `#![allow(unused_imports)]` silencer with `// TODO(L3)` reminder), `src/constants.rs:44` (`DEFAULT_EMBEDDING_DIM: usize = 384`).
+- Re-verified `crate::error::Result<T> = std::result::Result<T, GrafeoLoroError>` at `src/error.rs:53` — confirms `Ok(vec)` return type at L3 call site.
+- Re-verified `tracing::warn!` macro availability via `grep "tracing::warn!" src/bridge/*.rs` (30+ existing call sites) + `Cargo.toml:32` `tracing = "0.1"`.
+- Re-verified `std::sync::Once` stdlib (no dep needed).
+- Re-verified `tracing-subscriber = "0.3"` in `[dev-dependencies]` at `Cargo.toml:36-40` (L2 m4 Option A decision).
+
+### API verification
+- `crate::constants::DEFAULT_EMBEDDING_DIM: usize = 384` — verified at `src/constants.rs:44` (L1-added SSOT, cites `grafeo-engine-0.5.42/src/embedding/config.rs:18`).
+- `crate::error::{GrafeoLoroError, Result}` — verified at `src/error.rs:4-53`. Stub body returns `Ok(Vec<f32>)`; no error variants added (anti-plenger #5 Bloat — future ONNX failures route through existing `Config`/`Bridge` variants).
+- `tracing::warn!` macro — verified available via `grep "tracing::warn!" src/bridge/*.rs` (30+ call sites).
+- `std::sync::Once` — stdlib; `Once::call_once(&self, fn)` is the API used.
+- `tracing_subscriber::layer::SubscriberExt::with` — verified at `tracing-subscriber-0.3.23/src/layer/mod.rs:1502` (`fn with<L: Layer<Self>>(self, layer: L) -> Layered<L, Self>`). Requires `L: Layer<S>`.
+- `tracing_subscriber::Layer` blanket impls for `Box<L>` (line 1761) + `Option<L>` (line 1560) + `Vec<L>` (line 1776) — but NOT for `Arc<L>` (the L3 task spec's `Arc::new(WarnCounter::new())` body does NOT compile; see API discrepancy resolution below).
+- `tracing::subscriber::with_default<T, S: Subscriber + Send + Sync + 'static>(subscriber, fn)` — verified at `tracing-0.1.44/src/subscriber.rs:20`.
+- `tracing_subscriber::Layer::on_event(&self, &Event<'_>, Context<'_, S>)` — verified at `tracing-subscriber-0.3.23/src/layer/mod.rs:971` (default no-op; overridden by `WarnCounter`).
+- `Event::metadata() -> &Metadata<'_>` + `Metadata::level() -> &Level` — verified at `tracing-core-0.1.52/src/metadata.rs` + `tracing-core-0.1.52/src/event.rs`. `Level::WARN` equality check is sound (Level is `PartialEq`).
+- `AtomicUsize::fetch_add(1, Ordering::SeqCst)` + `AtomicUsize::load(Ordering::SeqCst)` — stdlib.
+
+### Implementation
+
+- `generate_local_embedding(text: &str) -> Result<Vec<f32>>` body (`src/hydration/vector.rs:81-101`):
+  1. `ONNX_WARN_ONCE.call_once(|| warn!("ONNX not integrated; returning deterministic dummy embedding"));` — module-top `static ONNX_WARN_ONCE: Once = Once::new();` (L2 wiring, kept at module-top per DEVIL NIT 1 lean — grep-findable, idiomatic).
+  2. `let seed: u64 = text.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));` — deterministic fold-seed. Anti-plenger #6 Immutability (`&str` byte iterator). Anti-plenger #9 Idempotency (same `text` → same `seed`).
+  3. `let mut rng = SplitMix64::new(seed);` + `let mut vec = Vec::with_capacity(DEFAULT_EMBEDDING_DIM);` + `for _ in 0..DEFAULT_EMBEDDING_DIM { vec.push(u64_to_f01(rng.next_u64())); }` — deterministic-per-input 384-dim vector. `Vec::with_capacity` avoids reallocation (anti-plenger #4 Performance).
+  4. `Ok(vec)` — `Result` envelope (anti-plenger #14 never simplify basics; real ONNX via `grafeo_engine::embedding::OnnxEmbeddingModel::embed` is fallible).
+
+- `SplitMix64` private struct (`src/hydration/vector.rs:46-60`) — hand-rolled PRNG, ~10 LOC. Reference: <https://prng.di.unimi.it/splitmix64.c>. Constants:
+  * `0x9E3779B97F4A7C15` — golden-ratio additive constant (`(2^64 / φ) rounded`).
+  * `0xBF58476D1CE4E5B9` — first xor-shift-multiply constant.
+  * `0x94D049BB133111EB` — second xor-shift-multiply constant.
+  * Shifts: 30, 27, 31 (per the SplitMix64 reference).
+  All arithmetic via `wrapping_*` (no overflow panic — anti-happy-path). Zero-seed safe: the first `next_u64` call adds the golden-ratio constant to the state, producing a non-zero state — empty input `""` (folds to `0u64`) produces a deterministic, non-degenerate first sample.
+
+- `u64_to_f01(x: u64) -> f32` private fn (`src/hydration/vector.rs:65-67`) — 1 LOC. Maps to `[0.0, 1.0)` using the top 24 bits (`(x >> 40) as f32 / (1u64 << 24) as f32`). Anti-plenger #10 Fewest LOC: float32 has a 24-bit mantissa, so the top 24 bits use the full precision available (no precision loss vs the 53-bit `f64` formula `(x >> 11) as f32 / (1u64 << 53) as f32` which actually overflows `f32` precision and produces aliasing).
+
+- Both helpers are private (`struct SplitMix64` without `pub`, `fn u64_to_f01` without `pub`) — anti-plenger #11 Deletion over addition (don't expose more than the single `pub fn generate_local_embedding` the contract requires). No nested `mod prng` — 2 helpers in the same file is high-cohesive (anti-plenger #3 High Cohesion).
+
+### Tests implemented (4) — `tests/unit/vector_embedding.rs`
+
+1. `generate_local_embedding_is_deterministic` — UN-IGNORED. Calls `generate_local_embedding("hello world")` twice, asserts `a == b`. Anti-plenger #9 Absolute Idempotency. Catches non-deterministic PRNG seeding (e.g. `Instant::now()` as seed) + accidental `&mut` capture in the `Once::call_once` closure. PASS.
+2. `generate_local_embedding_logs_onnx_warning` — KEPT `#[ignore]` with reason `"manual smoke: Once is process-global; run in isolation: cargo test --test unit vector_embedding -- --ignored generate_local_embedding_logs_onnx_warning --test-threads=1"`. Body installs a `WarnCounter` Layer via `tracing_subscriber::registry().with(counter.clone())` + `tracing::subscriber::with_default(...)`, calls `generate_local_embedding("test")`, asserts `counter.get() >= 1`. Reason for `#[ignore]`: `std::sync::Once` is process-global — other tests in the binary (1, 3, 4) ALSO call `generate_local_embedding`, so the warning may have already fired before this test runs under `cargo test --all`. Manual smoke in a fresh process (where `Once` is un-fired) PASSES — verified. Docstring documents the Once-global-state constraint + the exact manual-run command. PASS when run manually (verified).
+3. `generate_local_embedding_respects_input` — UN-IGNORED. Calls `generate_local_embedding("hello")` + `generate_local_embedding("world")`, asserts `a != b`. Anti-Goodhart: `assert_ne!` on the FULL `Vec<f32>`, not just on length. Catches the lazy `vec![0.0; N]` fixed-constant shortcut. PASS.
+4. `generate_local_embedding_dimension_is_default` — UN-IGNORED. Calls `generate_local_embedding("test")`, asserts `v.len() == DEFAULT_EMBEDDING_DIM`. Catches off-by-one or literal-drift between the function body and the SSOT constant. PASS.
+
+### Tests NOT implemented as specified (and why)
+
+- None — all 4 test bodies match the L3 task spec verbatim (modulo the `Arc<WarnCounter>` → `WarnCounter::clone()` API discrepancy, see API discrepancy resolution below).
+
+### Verification
+- `cargo check --all-targets` → **EXIT 0; 0 errors; 4 warnings (ALL pre-existing — 0 new)**. Warnings: (1) `app.rs:47` builder fields `storage/ssot_mode/compression/sync_compression/batch_interval_ms/batch_max_size` never read; (2) `hydration/vector.rs:12` `db` field never read (Task 4 will read it); (3) `presence/socket.rs:6` `room_id` never read; (4) `telemetry/health.rs:9` `doc/db/last_sync_ts` never read.
+- `cargo test --all --no-run` → EXIT 0; 3 test binaries emitted (`unittests`, `integration-…`, `unit-…`).
+- `cargo test --all` → **50 PASS + 0 FAIL + 2 IGNORED** (6 lib + 5 integration + 39 unit PASS; 2 ignored = 1 `vector_embedding::generate_local_embedding_logs_onnx_warning` manual smoke + 1 `parallel_hydrate::parallel_hydrate_10k_nodes_under_500ms` benchmark). Baseline 47 PASS + 5 IGNORED → 50 PASS + 2 IGNORED = 3 newly-un-ignored vector_embedding tests (1/3/4) + 1 still-ignored (2). Matches L3 spec expected count ✅.
+- `grep -nE "TODO\(L3\)|todo!|unimplemented!" src/hydration/vector.rs` → **2 matches**: `unimplemented!()` at line 23 (`VectorOffloadManager::new` — Task 4 scope) + `unimplemented!()` at line 32 (`VectorOffloadManager::handle_text_update` — Task 4 scope). **ZERO** `todo!()` and **ZERO** `// TODO(L3)` markers in `generate_local_embedding` body ✅ (Task 3 scope fully implemented).
+- `grep -rn "allow(unused_imports)" tests/unit/vector_embedding.rs` → **0 matches** ✅ (silencer removed).
+- `grep -nE "#\[ignore" tests/unit/vector_embedding.rs` → **1 attribute match** (line 157 — warning smoke test) + 2 docstring references (lines 8 + 146 — informational, not attribute) ✅.
+- Warning smoke test in isolation: `cargo test --test unit vector_embedding -- --ignored generate_local_embedding_logs_onnx_warning --test-threads=1 2>&1 | tail -5` → `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out` ✅. The `Once` is fresh (no other test in the process called `generate_local_embedding` first), the `WarnCounter` Layer captures the WARN event, assertion `counter.get() >= 1` passes.
+
+### Anti-plenger self-audit
+- **#1 Pure Functions**: `generate_local_embedding(&str) -> Result<Vec<f32>>` — pure (input → output, no global mutable state). The `Once`-guarded `warn!` is a side-effect but is OBSERVABILITY (#8) bounded to once-per-process to avoid log-spam under batch loops (#10). `SplitMix64::next_u64(&mut self)` mutates internal state but `SplitMix64` is local to the function call (not shared) — internal mutability only. ✓
+- **#2 DRY**: `SplitMix64` + `u64_to_f01` defined once at module scope. `DEFAULT_EMBEDDING_DIM` SSOT (no `384` literal anywhere). `tracing::warn!` macro reused (no wrapper helper — YAGNI). `WarnCounter` reused across tests via `Clone` (no test-local `Subscriber` reinvention). ✓
+- **#6 Immutability**: `text: &str` immutable. `SplitMix64` is `&mut self` but locally scoped + consumed within the function — no shared mutable state. `Vec<f32>` returned by value. ✓
+- **#9 Absolute Idempotency**: same `text` → byte-identical `Vec<f32>` (tested in `generate_local_embedding_is_deterministic`). Fold-seed is order-deterministic (bytes iterator preserves byte order). `SplitMix64::next_u64` is a pure function of state (no time/entropy). ✓
+- **#10 Fewest LOC**: `SplitMix64` is ~10 LOC (struct + impl + 1 method). `u64_to_f01` is 1 LOC. `generate_local_embedding` body is ~8 LOC. `WarnCounter` `Clone` is `#[derive]` (0 LOC). Total L3 addition: ~25 LOC across 2 files. ✓
+- **#11 Deletion over addition**: removed all `// TODO(L3):` comment lines (14-line block), the `let _ = (text, DEFAULT_EMBEDDING_DIM);` placeholder, the `todo!("L3: ...")` body, the `#![allow(unused_imports)]` silencer, the 3-line `// TODO(L3): remove the silencer...` reminder, 3 of 4 `#[ignore]` attributes (kept only the warning smoke). ✓
+- **#14 Never simplify basics**: `Result<Vec<f32>>` envelope preserved (real ONNX via `EmbeddingModel::embed` returns `Result<Vec<Vec<f32>>>` and is fallible). `Vec::with_capacity(DEFAULT_EMBEDDING_DIM)` (preallocation, not just `Vec::new`). `wrapping_*` arithmetic in `SplitMix64` (no overflow panic — defensive). `Ordering::SeqCst` on `WarnCounter` (strongest ordering — defensive; the `Once` semantics + `SeqCst` make the test deterministic under any thread topology). ✓
+
+### API discrepancy found and resolved
+- **`Arc<L>: Layer<S>` blanket impl is NOT present in `tracing-subscriber 0.3.23`**: the L3 task spec's example test body used `let counter = std::sync::Arc::new(WarnCounter::new()); let subscriber = registry().with(counter.clone());` — but the `with` method requires `L: Layer<Self>`, and `tracing-subscriber 0.3.23` only blanket-impls `Layer<S>` for `Box<L>` (`mod.rs:1761`), `Option<L>` (`mod.rs:1560`), `Vec<L>` (`mod.rs:1776`), `Identity` (`mod.rs:1903`), and `Layered<A, B, S>` — NOT for `Arc<L>`. RESOLVED by changing `WarnCounter` to use interior `Arc<AtomicUsize>` + `#[derive(Clone)]` — `WarnCounter::clone()` is a cheap Arc clone that shares the counter state, and `Layer<Registry> for WarnCounter` (the L2-wired impl) already satisfies the bound. The test body uses `counter.clone()` (not `Arc::clone(&counter)`) — same outcome, no extra `Arc` wrap. Anti-plenger #2 DRY (no duplicate `Layer for Arc<WarnCounter>` impl with delegation boilerplate) + #10 Fewest LOC (1 line of struct-field change vs ~10 LOC of delegation impl). Verified: `cargo check --all-targets` EXIT 0; `cargo test --all` 50 PASS / 0 FAIL / 2 IGNORED.
+
+Stage Summary:
+- Commit: `348f974` — "P3T3-L3: implement generate_local_embedding (SplitMix64 stub) + 4 tests; zero stubs in Task 3 scope" (2 files changed, 101 insertions, 69 deletions).
+- Push: **SUCCESS** — `git push https://ghp_***@github.com/OndeHQ/grafeo-loro.git p3-vector-embedding` → `02a47f7..348f974  p3-vector-embedding -> p3-vector-embedding`. Token never persisted to `.git/config` (verified post-push — remote URL is plain `https://github.com/OndeHQ/grafeo-loro.git`).
+- Tests: **50 PASS, 0 FAIL, 2 IGNORED** (1 warning smoke + 1 P3T2 benchmark). Matches L3 spec expected count.
+- Stubs remaining in Task 3 scope: **0** (`grep -nE "TODO\(L3\)|todo!|unimplemented!" src/hydration/vector.rs` → 2 matches, both `unimplemented!()` in `VectorOffloadManager::new` (line 23) + `handle_text_update` (line 32) — Task 4 scope, untouched per hard constraint).
+- Files touched:
+  1. `src/hydration/vector.rs` — 78 lines → 102 lines: added `SplitMix64` private struct (~10 LOC) + `u64_to_f01` private fn (1 LOC) + filled `generate_local_embedding` body (~8 LOC). Removed 14-line `// TODO(L3):` comment block + `let _ = (text, DEFAULT_EMBEDDING_DIM);` placeholder + `todo!("L3: ...")` body. Kept L2's `ONNX_WARN_ONCE` module-top `static` + the trimmed contract rustdoc. `VectorOffloadManager::new` + `handle_text_update` UNCHANGED (`unimplemented!()` — Task 4 scope).
+  2. `tests/unit/vector_embedding.rs` — 183 lines → 187 lines: removed `#![allow(unused_imports)]` silencer + the 3-line `// TODO(L3): remove the silencer...` reminder; changed `WarnCounter` to use interior `Arc<AtomicUsize>` + `#[derive(Clone)]` (API discrepancy resolution); filled 4 test bodies (1/3/4 un-ignored; 2 kept `#[ignore]` with new reason string); updated module-level doc (removed "L2 wires; L3 implements" framing — bodies are now filled); updated `mod test_capture` docstring (API discrepancy note added).
+- API discrepancy: `Arc<L>: Layer<S>` NOT blanket-impl'd in `tracing-subscriber 0.3.23` — resolved by making `WarnCounter` use interior `Arc<AtomicUsize>` + `#[derive(Clone)]` (no separate `Layer for Arc<WarnCounter>` impl needed; anti-plenger #2 DRY + #10 Fewest LOC).
+- Ready for HUNT: **YES** — zero stubs in Task 3 scope, 50/52 tests pass (2 `#[ignore]`'d with reasons), zero new warnings vs baseline 4, branch pushed.
