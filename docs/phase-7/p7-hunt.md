@@ -50,3 +50,26 @@ All asserts have descriptive failure messages with runtime context (epoch IDs, o
 **Verdict**: CLEAN.
 **Counts**: blockers 0, majors 0, minors 0, nits 0.
 
+## #3 Context Blindness — CLEAN
+
+**Hunt 1**: `rg -n 'set_viewing_epoch|clear_viewing_epoch' fuzz/fuzz_targets/consistency.rs` → I12 correctly:
+- L588: `read_session.set_viewing_epoch(e1)` (pin to old epoch)
+- L629: `read_session.clear_viewing_epoch()` (release override before final read)
+The override is scoped (4 lines of pinned reads between set and clear). No global state mutation leak.
+
+**Hunt 2**: `rg -n 'InvalidEnvelope' src/presence/socket.rs` → 9 distinct error paths:
+- L48: bad magic prefix
+- L54: buffer too short (truncated)
+- L60: insufficient bytes for room_id_len
+- L69: insufficient bytes for room_id
+- L76: room_id not valid UTF-8 (map_err)
+- L80: insufficient bytes for msg_type
+- L86: serde_json decode fail (map_err)
+- L98: build_eph_envelope payload encode failure path
+- L105: serde_json encode fail in build (map_err)
+
+Architecture §12 wire format (magic + u16 room_id_len + room_id + u8 msg_type + serde_json) is fully validated. No skipped error paths. No silent `.unwrap_or_default()` swallows.
+
+**Verdict**: CLEAN. grafeo MVCC model respected; production error surface comprehensive.
+**Counts**: blockers 0, majors 0, minors 0, nits 0.
+
