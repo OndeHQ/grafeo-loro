@@ -121,3 +121,23 @@ API surface verified. No fabricated methods.
 **Verdict**: CLEAN. Devil B1 critical hallucination risk eliminated.
 **Counts**: blockers 0, majors 0, minors 0, nits 0.
 
+## #7 Happy-Path Bias — CLEAN
+
+**Hunt 1**: `parse_eph_envelope` (`src/presence/socket.rs:46-88`) handles ALL 7 malformed cases:
+1. L47-52: buffer too short for magic
+2. L53-58: bad magic prefix (`XXXX` ≠ `agic`)
+3. L59-63: missing room_id_len (truncated after magic)
+4. L68-74: room_id segment truncated
+5. L75-77: room_id not valid UTF-8 (map_err)
+6. L79-83: unsupported msg_type (≠ `EPH_MSG_TYPE_PRESENCE`)
+7. L85-86: serde_json decode failure (map_err)
+
+Only 1 ok path (L87). All error paths return `GrafeoLoroError::InvalidEnvelope(...)` with specific reason strings. No silent `.unwrap_or_default()` swallows, no happy-path-only logic.
+
+**Hunt 2**: I12 vertex-existence edge case:
+- L600-601: `expect("I12: BridgeMaps missing node after write 1")` — explicit panic on missing node. Appropriate because the prior `apply_loro_op(...).expect("I12: apply_loro_op (write 1) failed")` (L580) already asserted the write succeeded; BridgeMaps missing node at this point is a genuine invariant violation (panic = correct response in fuzz target).
+- `set_viewing_epoch` returns `()` per grafeo 0.5.42 (verified #6) — no Result to handle, no silent failure possible.
+
+**Verdict**: CLEAN.
+**Counts**: blockers 0, majors 0, minors 0, nits 0.
+
