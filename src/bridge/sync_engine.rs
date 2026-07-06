@@ -122,6 +122,15 @@ pub struct SyncEngine {
     /// the previous snapshot-comparison approach was timing-dependent
     /// (Hunter MAJOR 3).
     pub(crate) inbound_event_count: Arc<AtomicU64>,
+    /// Counter incremented every time the subscriber's origin filter skips
+    /// an event (P2T3-L2R2 MAJOR 2 — `inbound_event_count` alone is
+    /// insufficient because `translate_diff_event` also silently skips
+    /// Container-ref diffs produced by `VertexBuilder::commit`'s
+    /// `ensure_mergeable_map` write, so a filter regression would NOT
+    /// increment `inbound_event_count`). This counter directly measures
+    /// filter activity: 0 means the filter never fired (regression), ≥1
+    /// means the filter caught at least one echo event.
+    pub(crate) inbound_filtered_count: Arc<AtomicU64>,
     /// Shutdown broadcast — workers subscribe and exit on `trigger()`
     /// (replaces `tokio_util::CancellationToken`, Devil NIT N16).
     pub(crate) shutdown_tx: broadcast::Sender<()>,
@@ -147,6 +156,7 @@ impl SyncEngine {
         let bridge_origin_epochs = Arc::new(RwLock::new(HashSet::new()));
         let maps = Arc::new(BridgeMaps::new());
         let inbound_event_count = Arc::new(AtomicU64::new(0));
+        let inbound_filtered_count = Arc::new(AtomicU64::new(0));
 
         let batcher = Arc::new(MutationBatcher::new(
             grafeo_db.clone(),
@@ -167,6 +177,7 @@ impl SyncEngine {
             maps,
             batcher,
             inbound_event_count,
+            inbound_filtered_count,
             shutdown_tx,
         };
         (engine, inbound_rx, outbound_rx)
@@ -193,6 +204,7 @@ impl SyncEngine {
     pub fn init_loro_subscriber(&self) -> Result<()> {
         let inbound_tx = self.inbound_tx.clone();
         let inbound_event_count = self.inbound_event_count.clone();
+        let inbound_filtered_count = self.inbound_filtered_count.clone();
         // `subscribe_root(&self, Subscriber)` — read guard suffices.
         let doc = self.loro_doc.read();
 
@@ -212,7 +224,15 @@ impl SyncEngine {
             // commit origin (the constant is only used as advisory
             // `PreparedCommit::set_metadata`, which is dropped on commit),
             // so the extension is a no-op for existing tests.
+            //
+            // P2T3-L2R2 MAJOR 2: increment `inbound_filtered_count` so tests
+            // can directly observe filter activity. `inbound_event_count`
+            // alone is insufficient — `translate_diff_event` also silently
+            // skips Container-ref diffs (the diff shape produced by
+            // `ensure_mergeable_map` in `commit()`), so a filter regression
+            // would NOT increment `inbound_event_count`.
             if event.origin == ORIGIN_GRAFEO_BRIDGE || event.origin == ORIGIN_LORO_BRIDGE {
+                inbound_filtered_count.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             let ops = translate_diff_event(&event);
@@ -422,6 +442,19 @@ impl SyncEngine {
     /// snapshot-comparison check).
     pub fn inbound_event_count(&self) -> u64 {
         self.inbound_event_count.load(Ordering::Relaxed)
+    }
+
+    /// Number of Loro subscriber events that the origin filter has skipped
+    /// since engine construction (P2T3-L2R2 MAJOR 2). Each time the filter
+    /// `return`s early (origin matches `ORIGIN_GRAFEO_BRIDGE` or
+    /// `ORIGIN_LORO_BRIDGE`), this counter increments. Tests use this to
+    /// directly observe filter activity — `inbound_event_count` alone is
+    /// insufficient because `translate_diff_event` also silently skips
+    /// Container-ref diffs (the diff shape produced by `commit()`'s
+    /// `ensure_mergeable_map`), so a filter regression would NOT increment
+    /// `inbound_event_count`. A non-zero value here proves the filter fired.
+    pub fn inbound_filtered_count(&self) -> u64 {
+        self.inbound_filtered_count.load(Ordering::Relaxed)
     }
 }
 

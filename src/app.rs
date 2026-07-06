@@ -77,6 +77,16 @@ impl GrafeoLoroApp {
         self.sync_engine.maps()
     }
 
+    /// Access the underlying [`SyncEngine`]. Exposed (P2T3-L2R2 MAJOR 2) so
+    /// integration tests can install the Loro subscriber + inspect
+    /// `inbound_event_count` to verify the B1 echo-prevention filter —
+    /// previously the filter was dead code in the test suite (P2T3-HUNT
+    /// MAJOR 2). Future embedding scenarios may also use this to drive the
+    /// engine directly.
+    pub fn sync_engine(&self) -> &Arc<SyncEngine> {
+        &self.sync_engine
+    }
+
     /// Begin a fluent vertex-upsert transaction.
     ///
     /// Wiring only: clones the engine handle + the shared counter and returns

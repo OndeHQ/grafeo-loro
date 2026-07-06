@@ -612,3 +612,84 @@ fn vertex_builder_rejects_list_property() {
         "BridgeMaps::node_key_map must be empty after strict-reject"
     );
 }
+
+/// B1 inbound filter must prevent `commit()`'s Loro write from echoing
+/// through the subscriber (P2T3-HUNT MAJOR 2 — previously the filter was
+/// dead code in the test suite: unit tests didn't install a subscriber, and
+/// integration tests didn't call `commit()`).
+///
+/// Test flow:
+/// 1. Build `GrafeoLoroApp` + install the Loro subscriber (no workers — we
+///    only need the synchronous filter, not the async drain path).
+/// 2. Snapshot `inbound_event_count` + `inbound_filtered_count` BEFORE
+///    `commit()`.
+/// 3. Call `commit()` — this fires `doc.commit()` synchronously, which
+///    invokes the subscriber handler. The handler MUST filter the event
+///    (origin = `ORIGIN_LORO_BRIDGE`) and return early WITHOUT calling
+///    `inbound_tx.try_send(...)`. The filter increments
+///    `inbound_filtered_count` (P2T3-L2R2 MAJOR 2 — `inbound_event_count`
+///    alone is insufficient because `translate_diff_event` also silently
+///    skips Container-ref diffs, so a filter regression would NOT increment
+///    `inbound_event_count`).
+/// 4. Assert `inbound_filtered_count` INCREMENTED (filter actually fired —
+///    this is the primary regression-catching assertion).
+/// 5. Assert `inbound_event_count` is UNCHANGED (defense-in-depth — no echo
+///    reached the inbound channel even if the translator ever learns to
+///    handle Container refs).
+/// 6. Assert `BridgeMaps::node_id_map.len() == 1` (defense-in-depth — only
+///    the binding `commit()`'s step 5 inserted; no duplicate).
+#[test]
+fn vertex_builder_commit_does_not_echo_through_subscriber() {
+    let (app, _db, _doc) = build_app();
+    // Install the subscriber (no workers — the filter is synchronous).
+    app.sync_engine()
+        .init_loro_subscriber()
+        .expect("subscriber installed");
+    let event_count_before = app.sync_engine().inbound_event_count();
+    let filtered_count_before = app.sync_engine().inbound_filtered_count();
+    let _node_id = app
+        .create_vertex()
+        .with_label("Person")
+        .with_property("name", GraphValue::String("Alix".into()))
+        .commit()
+        .expect("commit succeeds");
+    let event_count_after = app.sync_engine().inbound_event_count();
+    let filtered_count_after = app.sync_engine().inbound_filtered_count();
+
+    // PRIMARY assertion: filter actually fired. If this fails with
+    // `filtered_count_after == filtered_count_before`, the B1 filter
+    // regression has occurred (the `|| event.origin == ORIGIN_LORO_BRIDGE`
+    // clause was removed or broken). Verify by temporarily commenting out
+    // the clause in `src/bridge/sync_engine.rs:init_loro_subscriber` — this
+    // assertion will then fail.
+    assert!(
+        filtered_count_after > filtered_count_before,
+        "B1 filter MUST fire on commit()'s ORIGIN_LORO_BRIDGE-tagged Loro write; \
+         filtered_count_before={filtered_count_before}, \
+         filtered_count_after={filtered_count_after} (filter regression — the \
+         `|| event.origin == ORIGIN_LORO_BRIDGE` clause is missing or broken)"
+    );
+
+    // Defense-in-depth: no echo reached the inbound channel. (Note: this
+    // assertion alone is INSUFFICIENT to catch a filter regression because
+    // `translate_diff_event` also silently skips Container-ref diffs. The
+    // `filtered_count` assertion above is the real regression catcher.)
+    assert_eq!(
+        event_count_after, event_count_before,
+        "no echo should reach the inbound channel; event_count_before={event_count_before}, \
+         event_count_after={event_count_after}"
+    );
+
+    // Defense-in-depth: exactly 1 binding recorded (commit's step 5). A
+    // duplicate would indicate an echo re-created the node.
+    assert_eq!(
+        app.maps().node_id_map.read().len(),
+        1,
+        "BridgeMaps::node_id_map should have exactly 1 binding after commit (no echo re-creation)"
+    );
+    assert_eq!(
+        app.maps().node_key_map.read().len(),
+        1,
+        "BridgeMaps::node_key_map should have exactly 1 binding (forward+inverse in lock-step)"
+    );
+}
