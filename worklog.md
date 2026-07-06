@@ -4246,3 +4246,46 @@ Stage Summary:
 - `phase-3` branch will be fast-forwarded to `p3-vector-embedding` HEAD after this commit.
 
 Next: Phase 3 Task 4 (`VectorOffloadManager::handle_text_update` — generate embedding → direct Grafeo upsert, bypass Loro). This is the FINAL Phase 3 task.
+
+---
+Task ID: ORCH-P3T4-SETUP
+Agent: Orchestrator (Super Z)
+Task: Open Plonga-Plongo-Loop for Phase 3 Task 4 (VectorOffloadManager::handle_text_update); spawn L1
+
+Work Log:
+- Merged `p3-vector-embedding` into `phase-3` (fast-forward); pushed `phase-3` to origin (`d141bad..93d81b9`).
+- Created `p3-vector-offload` branch from `phase-3` HEAD (`93d81b9`).
+- Phase 3 Task 4 scope (per docs/implementation-plan.md §Phase 3 Task 4):
+  1. **Implement `VectorOffloadManager::handle_text_update`**
+     - Generate embedding (calls `generate_local_embedding` from Task 3).
+     - Direct Grafeo upsert (bypass Loro — vectors never go into the CRDT).
+  2. Also `VectorOffloadManager::new` (currently `unimplemented!()`).
+- Validation gate (Phase 3 §Validation): "Test: Vector never written to Loro container." Task 4 owns this.
+- Existing skeleton (`src/hydration/vector.rs`):
+  - `VectorOffloadManager { db: Arc<GrafeoDB> }` + `new(db)` + `handle_text_update(node_id, text)` — both `unimplemented!()`.
+  - `generate_local_embedding` is FULLY IMPLEMENTED (Task 3) — returns `Result<Vec<f32>>`.
+- grafeo 0.5.42 API for vector write (verified at `~/.cargo/registry/src/*/grafeo-engine-0.5.42/src/`):
+  - `GrafeoDB::session_with_cdc(bool) -> Session` (database/mod.rs:1728)
+  - `Session::begin_transaction(&mut self) -> Result<()>` (session/mod.rs:3883)
+  - `Session::set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()>` (session/mod.rs:5012)
+  - `grafeo::Value::Vector(std::sync::Arc<[f32]>)` — the vector value variant (grafeo-common types)
+  - `Session::prepare_commit() -> Result<PreparedCommit<'_>>` (session/mod.rs:4496)
+  - `PreparedCommit::set_metadata(k, v)` + `PreparedCommit::commit() -> Result<EpochId>` (transaction/prepared.rs:107,124)
+  - `GrafeoDB::create_vector_index(label, property, dims, metric, m, ef_construction, quantization) -> Result<()>` (database/index.rs:104) — needed to create the HNSW index BEFORE vector_search can work; may or may not be needed for Task 4 (depends on whether the test asserts searchability or just upsert).
+- The "bypass Loro" requirement: `handle_text_update` writes directly to Grafeo via `Session`, NOT through `apply_loro_op` (which would route through BridgeMaps + Loro). The vector is NEVER written to any Loro container. This is the spec's key invariant.
+- Validation test: "Vector never written to Loro container." Strategy: after `handle_text_update`, inspect the LoroDoc (via `get_deep_value()` or per-container check) and assert no vector data is present. L1 should scaffold this test.
+
+Loop Plan for this $stn (`p3-vector-offload`):
+1. L1 scaffolding (contracts/types/signatures only) ← `Task ID: P3T4-L1`
+2. Devil's advocate critique ← `Task ID: P3T4-DEVIL`
+3. Fixer (L2 wiring) ← `Task ID: P3T4-L2`
+4. L3 deep implementation ← `Task ID: P3T4-L3`
+5. Plenger hunter ← `Task ID: P3T4-HUNT`
+6. Loop back to step 3 if MAJORs found, else push $stn and close.
+
+Stage Summary:
+- `phase-3` branch pushed (aggregates Tasks 1+2+3).
+- $stn for this loop = `p3-vector-offload` (branch created, currently == phase-3 HEAD `93d81b9`).
+- Baseline: 0 errors / 4 pre-existing warnings / 50 tests passing (carried over from Phase 3 Task 3 close).
+- This is the FINAL Phase 3 task. After close, Phase 3 is complete.
+- Next: spawn P3T4-L1 subagent.
