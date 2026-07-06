@@ -60,3 +60,24 @@
 - `EncFuzzValue`/`EncFuzzOp` in gen_corpus.rs are acknowledged mirror types of `FuzzValue`/`FuzzOp` (per `#[allow]` reason "mirror of FuzzValue; all variants kept for parity"). Justified by asymmetric needs: `FuzzValue` derives `Arbitrary` (decoder for libfuzzer input); `EncFuzzValue` is writer-only (for deterministic generator). **NIT**: could potentially be unified via a single type deriving both `Arbitrary` + a serialization trait, but the `Arbitrary` derive's byte format usually differs from a hand-written encoder, so the split is pragmatic.
 - `convert_fuzz_op` (consistency.rs:148) converts `FuzzOp` (fuzz-internal enum with `peer_count`/`bail_after_ops` fields) → `LoroOp` (production type). Legitimate adapter — NOT a DRY violation. `src/bridge::apply_loro_op` takes `LoroOp`, not `FuzzOp`, so the fuzz harness needs this adapter.
 
+## Anti-Pattern #6: Hallucination
+
+**Hunt**: `rg '^use (grafeo|loro|libfuzzer|grafeo_loro)' fuzz/fuzz_targets/consistency.rs` + `rg 'pub (fn|struct|enum) (...)' src/` + `rg 'GrafeoLoroApp::|AppConfig::|GrafeoLoroAppBuilder::|GrafeoDB::' README.md`
+
+**Verdict**: NOT FOUND — clean by inspection.
+
+- 10 fuzz imports verified against `src/`:
+  - `grafeo::GrafeoDB`, `loro::LoroDoc`, `libfuzzer_sys::fuzz_target` — external crates.
+  - `grafeo_loro::bridge::{apply_loro_op, BridgeMaps}` — exists at `src/bridge/grafeo_tx.rs:27,93`.
+  - `grafeo_loro::compression::CompressedPayload` — `src/compression/wrapper.rs:25`.
+  - `grafeo_loro::config::CompressionType` — `src/config.rs:9`.
+  - `grafeo_loro::types::events::LoroOp` — `src/types/events.rs:14`.
+  - `grafeo_loro::types::values::GraphValue` — `src/types/values.rs:72`.
+  - `grafeo_loro::types::{EpochId, PresencePayload}` — PresencePayload at `src/types/presence.rs:5`; EpochId compiles (fuzz cargo check PASS per worklog line 265).
+  - `grafeo_loro::VectorOffloadManager` — `src/hydration/vector.rs:11`, re-exported at `src/lib.rs:31`.
+- README API references verified:
+  - `GrafeoLoroApp::builder()` (README:11, 20) — `src/app.rs:169`.
+  - `GrafeoDB::new_in_memory()` (README:106) — external `grafeo` crate API, used throughout tests.
+  - `GrafeoLoroAppBuilder::build` (README:114) — impl at `src/app.rs:1073`.
+- Compilation itself is the strongest proof: fuzz crate `cargo check PASS` (worklog line 265) means every imported symbol resolves. No hallucinated APIs.
+
