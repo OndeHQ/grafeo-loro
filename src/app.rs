@@ -165,6 +165,20 @@ impl Default for GrafeoLoroAppBuilder {
     }
 }
 
+/// Runtime-resource bundle for [`GrafeoLoroApp::from_sync_engine_with_telemetry`].
+/// Groups the 7 non-core construction params (SSOT mode, storage, compression,
+/// telemetry handles, worker handles) into a single struct — replaces the
+/// prior 8-arg signature (P7 `too_many_arguments` refactor, anti-plenger #5).
+pub struct AppTelemetryConfig {
+    pub ssot_mode: SsotMode,
+    pub storage: Option<Arc<dyn StorageBackend>>,
+    pub compression: CompressionType,
+    pub metrics: Option<Arc<MetricsRegistry>>,
+    pub health: Option<Arc<HealthProbe>>,
+    pub tracer: Option<SharedTracer>,
+    pub worker_handles: Option<Vec<JoinHandle<()>>>,
+}
+
 impl GrafeoLoroApp {
     /// Entry point for the fluent builder.
     pub fn builder() -> GrafeoLoroAppBuilder {
@@ -245,31 +259,20 @@ impl GrafeoLoroApp {
     ///
     /// Production `build()` is the sole caller (P5-L2 territory — replaces
     /// the prior `from_sync_engine_with_config` call at the end of `build`).
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "P5-L2 wiring — full app construction with all telemetry params; refactor to AppConfig struct deferred to future phase"
-    )]
-    // TODO: refactor to AppConfig struct in future phase
     pub fn from_sync_engine_with_telemetry(
         sync_engine: Arc<SyncEngine>,
-        ssot_mode: SsotMode,
-        storage: Option<Arc<dyn StorageBackend>>,
-        compression: CompressionType,
-        metrics: Option<Arc<MetricsRegistry>>,
-        health: Option<Arc<HealthProbe>>,
-        tracer: Option<SharedTracer>,
-        worker_handles: Option<Vec<JoinHandle<()>>>,
+        config: AppTelemetryConfig,
     ) -> Self {
         Self {
             sync_engine,
             loro_key_counter: Arc::new(AtomicU64::new(0)),
-            ssot_mode,
-            storage,
-            compression,
-            metrics,
-            health,
-            tracer,
-            worker_handles,
+            ssot_mode: config.ssot_mode,
+            storage: config.storage,
+            compression: config.compression,
+            metrics: config.metrics,
+            health: config.health,
+            tracer: config.tracer,
+            worker_handles: config.worker_handles,
         }
     }
 
@@ -1439,13 +1442,15 @@ impl GrafeoLoroAppBuilder {
         //    the app struct).
         Ok(GrafeoLoroApp::from_sync_engine_with_telemetry(
             engine,
-            self.ssot_mode,
-            Some(storage),
-            self.compression,
-            metrics,
-            health,
-            tracer,
-            Some(worker_handles),
+            AppTelemetryConfig {
+                ssot_mode: self.ssot_mode,
+                storage: Some(storage),
+                compression: self.compression,
+                metrics,
+                health,
+                tracer,
+                worker_handles: Some(worker_handles),
+            },
         ))
     }
 }
