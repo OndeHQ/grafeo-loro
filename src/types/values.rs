@@ -117,6 +117,23 @@ impl From<&str> for GraphValue {
     }
 }
 
+/// `LoroProperty` → `GraphValue` (scalar subset only; `LoroProperty` has no
+/// `Vector`/`Map`/`List` variants). Used by `parallel_hydrate_grafeo` to convert
+/// `VertexEntity::properties` (`HashMap<String, LoroProperty>`) into
+/// `LoroOp::UpsertNode::properties` (`HashMap<String, GraphValue>`) — the 5
+/// variants map 1:1. Inverse of `TryFrom<GraphValue> for LoroProperty` above.
+impl From<LoroProperty> for GraphValue {
+    fn from(p: LoroProperty) -> Self {
+        match p {
+            LoroProperty::Null => GraphValue::Null,
+            LoroProperty::Bool(b) => GraphValue::Bool(b),
+            LoroProperty::Integer(i) => GraphValue::Integer(i),
+            LoroProperty::Float(f) => GraphValue::Float(f),
+            LoroProperty::String(s) => GraphValue::String(s),
+        }
+    }
+}
+
 /// Total-on-scalar-subset conversion used by `VertexBuilder::commit` step 2 to
 /// build a Loro-side `VertexEntity`. The scalar variants map 1:1; the
 /// `Vector`/`Map`/`List` variants (which have no `LoroProperty` representation)
