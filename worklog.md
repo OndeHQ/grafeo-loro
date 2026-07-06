@@ -372,3 +372,61 @@ Stage Summary:
 - Branch off phase-1 @ e079e47
 - Discrepancy flagged for L1: Cargo.toml pins `lorosurgeon = "0.2"` but architecture doc §27 (deps) says `lorosurgeon = "0.3"`. L1 should verify which version actually resolves and whether API differs.
 - Next: spawn L1 scaffolder (Task ID `P2-L1`) to verify derives compile + write roundtrip test scaffolds (no bodies).
+
+---
+Task ID: P2-L1
+Agent: L1 Scaffolder
+Task: Wire lorosurgeon derives (Phase 2 Task 1) — contracts only
+
+Work Log:
+- Read worklog end-to-end: Phase 1 fully complete (10/10 tests, 0 ignored; zero TODOs in src/bridge, src/types, src/error, src/constants). 41 `unimplemented!()` remain in non-Phase-1 modules (app, compression, hydration, presence, schema/tree, telemetry) as pre-existing L1 skeletons — out of Phase 1 scope. Orchestrator (ORCH-P2-SETUP) initialized Phase 2 and flagged the `lorosurgeon = "0.2"` vs `"0.3"` discrepancy for L1 to resolve.
+- Confirmed branch `p2-derives` (already on it).
+- Read `docs/implementation-plan.md` Phase 2 Task 1 spec: verify `VertexEntity`/`EdgeEntity`/`OrderedCollection` compile + test roundtrip Rust → Loro container → Rust.
+- Read `docs/grafeo-loro.architecture.md` §6 (VertexEntity + EdgeEntity), §7 (OrderedCollection + TreeNode), §27 line 1071 (`lorosurgeon = "0.3"`).
+- Read `src/schema/{mod,vertex,edge,tree}.rs`: all 4 entities already carry `#[derive(Debug, Clone, PartialEq, Hydrate, Reconcile)]` with the mandated field attributes (`#[loro(text)]` on `VertexEntity::description`, `#[loro(movable)]` on `OrderedCollection::items`, `#[key]` on `TreeNode::node_id`). `LoroProperty` (in `src/types/values.rs`) has manual `Hydrate`/`Reconcile` impls from Phase 1 L2-R2 (emits bare scalars, no tagged-union wrap).
+- Ran `cargo check --all-targets` baseline: **exit 0, 5 distinct lib warnings (all pre-existing dead-code from Phase 1 unimplemented!() skeletons), 0 errors.** The schema derives compile.
+- Investigated version discrepancy:
+  - `cargo tree -i lorosurgeon` → `lorosurgeon v0.2.1` is what `Cargo.toml = "0.2"` resolves to.
+  - `Cargo.lock` confirms `lorosurgeon v0.2.1` and `lorosurgeon-derive v0.2.1`.
+  - `cargo info lorosurgeon` → "version: 0.2.1", "crates.io: https://crates.io/crates/lorosurgeon/0.2.1".
+  - `cargo search lorosurgeon` → `lorosurgeon = "0.2.1"` (the latest published version).
+  - **There is NO `0.3` published on crates.io.** The architecture doc §27 line 1071 is aspirational/wrong; `Cargo.toml`'s `0.2` is correct. Flagged for Devil — the doc should be corrected, NOT the version bumped.
+- Verified all mandated attributes exist in resolved `lorosurgeon-derive-0.2.1/src/attrs.rs`:
+  - `#[key]` (field-level) ✓ — sets `FieldAttrs::is_key`
+  - `#[loro(text)]` (field-level) ✓ — sets `FieldAttrs::text` (uses `LoroText` with char-level LCS)
+  - `#[loro(movable)]` (field-level) ✓ — sets `FieldAttrs::movable` (uses `LoroMovableList` with `mov()`/`set()`)
+  - Plus: `#[loro(root = "...")]` (container-level, generates `DocSync`), `#[loro(rename)]`, `#[loro(json)]`, `#[loro(default)]`, `#[loro(default = "fn")]`, `#[loro(with = "mod")]`, `#[loro(hydrate = "fn")]`, `#[loro(reconcile = "fn")]`, `#[loro(flatten)]`.
+- Read `lorosurgeon-0.2.1/src/lib.rs` doc: confirms `Vec<T>` + `#[loro(movable)]` + items with `#[key]` enables identity-preserving keyed list diffing (matches architecture §7 contract). `Vec<T>` plain uses Myers LCS (matches `VertexEntity::labels: Vec<String>` semantics). `HashMap<String, V>` puts entries + deletes stale keys (matches `properties: HashMap<String, LoroProperty>`).
+- Read `lorosurgeon-0.2.1/src/doc_sync.rs`: `DocSync` trait requires `#[loro(root = "key")]` on the container — NOT applied to any of the 4 entities per architecture §6/§7. So roundtrip tests MUST use the lower-level `RootReconciler::new(map)` + `T::hydrate_map(&map)` pattern (the one used in `lorosurgeon-0.2.1/tests/integration.rs`), NOT `to_doc()`/`from_doc()`. Documented this in the scaffold doc comments so L3 doesn't reach for the wrong API.
+- Confirmed no helper types are needed for the roundtrip pattern — `loro::LoroDoc` + `lorosurgeon::RootReconciler` + `lorosurgeon::Hydrate` trait cover everything. No `LoroDoc`-binding helper to declare at L1.
+- Created `tests/unit/` directory (did not previously exist; `tests/` had only `integration/`).
+- Created `tests/unit/main.rs`: 6-line aggregator mirroring `tests/integration/main.rs` layout (`mod schema_roundtrip;` + module doc).
+- Created `tests/unit/schema_roundtrip.rs`: 4 `#[test] #[ignore = "P2-L1 scaffold: L3 implements the body"]` functions with `todo!()` bodies + `PhantomData` references to the schema types (so the imports are exercised and the contract is self-documenting). Doc comments describe the exact roundtrip pattern each test must implement.
+  - `vertex_entity_roundtrip()` — exercises `#[loro(text)]`
+  - `edge_entity_roundtrip()` — plain HashMap roundtrip
+  - `ordered_collection_roundtrip()` — exercises `#[loro(movable)]` (L3 should also assert `mov()` identity preservation)
+  - `tree_node_roundtrip()` — exercises `#[key]` (L3 should also assert `<TreeNode as Reconcile>::key()` returns `LoadKey::Found(node_id)`)
+- Ran `cargo check --all-targets` after scaffolds: exit 0, same 5 pre-existing lib warnings, **0 new warnings from `tests/unit/`**. Confirmed via `cargo test --no-run --all`: all 3 test binaries compile (`unittests src/lib.rs`, `tests/integration/main.rs` → `integration-...`, `tests/unit/main.rs` → `unit-...`).
+- Did NOT touch: `VertexBuilder` (Phase 2 Task 3, L3 scope), `sync_tree_move_to_grafeo` body (Phase 2 Task 2, L3 scope), assertion/reconciliation logic (L3 scope), `Cargo.toml` version pin (correct as-is).
+
+Stage Summary:
+- Compile status: `cargo check --all-targets` exit 0, 0 errors, 5 pre-existing lib dead-code warnings (unchanged from Phase 1 baseline), 0 new warnings from L1 work.
+- Version finding: `lorosurgeon v0.2.1` is the latest published version on crates.io. **`0.3` does NOT exist.** Architecture doc §27 line 1071 (`lorosurgeon = "0.3"`) is aspirational/wrong; `Cargo.toml`'s `"0.2"` (resolves to `0.2.1`) is correct. All mandated attributes (`#[key]`, `#[loro(text)]`, `#[loro(movable)]`) are present in 0.2.1's `attrs.rs`. **No version bump; doc should be corrected.**
+- Files touched:
+  - `tests/unit/main.rs` (new, 6 lines) — test-crate aggregator mirroring `tests/integration/main.rs`.
+  - `tests/unit/schema_roundtrip.rs` (new, 64 lines) — 4 `#[ignore]` test scaffolds with `todo!()` bodies.
+  - `worklog.md` (appended) — this entry.
+  - No source changes — all derives already compile from Phase 1.
+- Test scaffolds:
+  - `fn vertex_entity_roundtrip()` — exercises `#[loro(text)]` on `VertexEntity::description`.
+  - `fn edge_entity_roundtrip()` — plain `HashMap<String, LoroProperty>` roundtrip.
+  - `fn ordered_collection_roundtrip()` — exercises `#[loro(movable)]` on `OrderedCollection::items`.
+  - `fn tree_node_roundtrip()` — exercises `#[key]` on `TreeNode::node_id`.
+  - All 4 use `#[test] #[ignore]` + `todo!()` bodies per Phase 1 L1 convention.
+- Open questions for Devil:
+  1. **Architecture doc version drift (NIT)**: `docs/grafeo-loro.architecture.md` line 1071 says `lorosurgeon = "0.3"` but only `0.2.1` is published. Either (a) update the doc to `"0.2"`, or (b) confirm with upstream that 0.3 is imminent and pin a pre-release. Recommending (a) — DO NOT bump Cargo.toml to a non-existent version.
+  2. **Architecture §7 type-name divergence (MINOR)**: doc shows `OrderedCollection { items: Vec<PlaylistItem> }` with `PlaylistItem { #[key] track_id: String, title: String }`. Code has `OrderedCollection { items: Vec<TreeNode> }` with `TreeNode { #[key] node_id: String, title: String }`. The Phase 2 task description explicitly mandates `TreeNode`/`node_id`, so the code is authoritative — but the doc should be updated for SSOT consistency. Out of L1 scope; flagged.
+  3. **No `#[loro(root)]` on entities (MINOR)**: architecture §6/§7 deliberately omits `#[loro(root = "...")]` on `VertexEntity`/`EdgeEntity`/`OrderedCollection`. This means the `DocSync` trait's `to_doc()`/`from_doc()` convenience is unavailable — roundtrips must use `RootReconciler::new(map)` + `T::hydrate_map(&map)` directly. Acceptable for a graph store where multiple entities share a single `LoroDoc` under different root keys (`V`, `E`, `T_CHILD` per `constants.rs`), but L3 implementers should be aware the convenience API is intentionally not used here.
+  4. **`Vec<String>` for `VertexEntity::labels` (NIT)**: per lorosurgeon lib.rs, plain `Vec<T>` (no `#[loro(movable)]`) uses Myers LCS diffing — produces minimal insert/delete ops. This is fine for `labels`, but if labels are ever reordered by drag-drop in the UI, identity is NOT preserved (each item is just a positional string). Acceptable since labels are a set semantically; flagged for awareness.
+  5. **`sync_tree_move_to_grafeo` skeleton in `src/schema/tree.rs` (MINOR)**: it has an `unimplemented!()` body (Phase 1 L1 non-Phase-1 skeleton). Phase 2 Task 2 will implement it. L1 for Task 1 deliberately did NOT touch it — out of scope.
+- Commit hash: `a8786c5` (on top of `d697ab2` which committed the orchestrator's setup worklog entry).
