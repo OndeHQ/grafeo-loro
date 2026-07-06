@@ -58,9 +58,10 @@ use crate::types::{GraphValue, LoroProperty, NodeId, PresencePayload};
 /// tests). Production `build()` populates them via
 /// [`Self::from_sync_engine_with_telemetry`].
 ///
-/// All methods other than [`Self::create_vertex`] + [`Self::maps`] remain
-/// `unimplemented!()` (Phase 3-5 scope). See each method's doc-comment for
-/// the owning phase.
+/// Most methods are implemented; 7 return `Err(GrafeoLoroError::NotYetImplemented(...))`
+/// for future-phase scope (`query`, `update_text`, `generate_embedding`,
+/// `broadcast_presence`, `SsotMode::Grafeo` checkpoint/hydrate arms,
+/// `PresenceManager::broadcast`). See `GrafeoLoroError::NotYetImplemented`.
 pub struct GrafeoLoroApp {
     /// Bidirectional sync engine. SSOT for `LoroDoc` + `GrafeoDB` + `BridgeMaps`
     /// + epoch side-channel. `commit()` accesses them via `pub(crate)` fields.

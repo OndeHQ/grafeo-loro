@@ -1,9 +1,7 @@
 //! Health probe (Phase 5 Task 3).
 //!
-//! # L1 contract layer (P5-L1)
-//!
-//! All method bodies are `unimplemented!()`. The struct shape mirrors
-//! architecture §23.3 exactly:
+//! Fully implemented in P5-L3 (Loro lock probe, Grafeo dummy query, sync
+//! staleness). The struct shape mirrors architecture §23.3 exactly:
 //!
 //! ```text,ignore
 //! pub struct HealthProbe {

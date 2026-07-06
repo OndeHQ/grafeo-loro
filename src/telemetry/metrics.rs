@@ -1,10 +1,7 @@
 //! OpenTelemetry metrics registry (Phase 5 Task 2).
 //!
-//! # L1 contract layer (P5-L1)
-//!
-//! All method bodies are `unimplemented!()` — L2 wires the OpenTelemetry SDK
-//! calls, L3 fills the algorithm bodies. The struct fields are the five
-//! instruments specified in architecture §23.1:
+//! Fully implemented in P5-L3 (OpenTelemetry SDK wiring + algorithm bodies).
+//! The struct fields are the five instruments specified in architecture §23.1:
 //!
 //! | Field | Instrument | Architecture ref |
 //! |-------|-----------|-----------------|
