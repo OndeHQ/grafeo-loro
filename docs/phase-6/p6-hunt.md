@@ -180,3 +180,23 @@
 - This is honest tech-debt documentation with a clear trigger (T1 completion), NOT permanent rot-hiding. The trigger is conditional on a future phase (T1 was user-excluded for P6), but the deferral is technically correct (can't instrument a panicking body).
 - **NIT**: to guard against permanent rot, the note could add a "re-evaluate when T1 is scoped" reminder. Currently relies on the reader to follow up. Low-priority.
 
+## L3 Risk R5: T5 seed corpus determinism
+
+**Hunt**: `cd fuzz && cargo run --bin gen_corpus` (×2) + `sha256sum fuzz/corpus/consistency/*.bin` after each run.
+
+**Resolution**: REFUTED — idempotent.
+
+- `gen_corpus` runs successfully (5 files written, no errors).
+- SHA-256 hashes identical across 2 consecutive runs (and identical to the committed files):
+
+| File | SHA-256 (Run 1) | SHA-256 (Run 2) | Match |
+|---|---|---|---|
+| `empty.bin` | `1e2b14f4...` | `1e2b14f4...` | ✓ |
+| `single_upsert.bin` | `9accf6fb...` | `9accf6fb...` | ✓ |
+| `all_variants.bin` | `3521b886...` | `3521b886...` | ✓ |
+| `cycle_attempt.bin` | `ba6009f7...` | `ba6009f7...` | ✓ |
+| `large_batch.bin` | `09c1a013...` | `09c1a013...` | ✓ |
+
+- `git status` clean after both runs — gen_corpus output is byte-identical to the committed corpus (no diff produced). This satisfies anti-plenger #9 (Absolute Idempotency).
+- File sizes match worklog: 12B, 76B, 192B, 141B, 12446B.
+
