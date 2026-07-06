@@ -7,10 +7,12 @@
 //! - [`compression`]: `compression::wrapper` codec roundtrip scaffolds (Phase 3 Task 1).
 //! - [`parallel_hydrate`]: `hydration::parallel::parallel_hydrate_grafeo` scaffolds (Phase 3 Task 2).
 //! - [`vector_embedding`]: `hydration::vector::generate_local_embedding` stub scaffolds (Phase 3 Task 3).
+//! - [`vector_offload`]: `hydration::vector::VectorOffloadManager::{new, handle_text_update}` scaffolds (Phase 3 Task 4).
 
 mod compression;
 mod parallel_hydrate;
 mod schema_roundtrip;
 mod tree_move;
 mod vector_embedding;
+mod vector_offload;
 mod vertex_builder;

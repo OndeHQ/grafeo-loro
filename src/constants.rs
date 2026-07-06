@@ -43,6 +43,17 @@ pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
 /// share 384, so the SSOT is forward-compatible for the foreseeable roadmap.
 pub const DEFAULT_EMBEDDING_DIM: usize = 384;
 
+/// Grafeo node property key under which `VectorOffloadManager::handle_text_update`
+/// (Phase 3 Task 4) stores the `Value::Vector(Arc<[f32]>)` produced by
+/// `generate_local_embedding`. Named here as SSOT so the manager, the test
+/// scaffolds, and any future `vector_search` call site (Phase 5+) agree on a
+/// single key literal — anti-plenger #2 DRY/SSOT. Value `"embedding"` matches
+/// grafeo-engine's own example docstring at
+/// `grafeo-engine-0.5.42/src/database/index.rs:91` ("property containing vector
+/// embeddings (e.g., `\"embedding\"`)"), so it is also the convention grafeo
+/// tooling expects when auto-creating HNSW indexes.
+pub const EMBEDDING_PROPERTY: &str = "embedding";
+
 // Outbound CDC poller cadence (Grafeo→Loro path). Grafeo 0.5.42 CDC is
 // poll-based: the outbound worker calls `session.changes_between(start, end)`
 // on this interval. 50 ms ≈ 20 polls/sec — low latency without burning CPU.

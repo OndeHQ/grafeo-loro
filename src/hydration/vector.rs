@@ -4,7 +4,7 @@ use grafeo::GrafeoDB;
 use tracing::warn;
 use crate::types::ids::NodeId;
 use crate::error::Result;
-use crate::constants::DEFAULT_EMBEDDING_DIM;
+use crate::constants::{DEFAULT_EMBEDDING_DIM, EMBEDDING_PROPERTY, ORIGIN_LORO_BRIDGE};
 
 /// Manages offloaded float-vector embeddings. Vectors are never written to
 /// Loro; they go direct to Grafeo's HNSW index.
@@ -15,20 +15,68 @@ pub struct VectorOffloadManager {
 impl VectorOffloadManager {
     /// Construct with a shared Grafeo handle.
     ///
-    /// Stub — Task 4 owns the body (decides whether to spin up a background
-    /// ONNX worker, preload `OnnxEmbeddingModel`, register with the inbound
-    /// subscriber, etc.).
+    /// L1 decision 1: trivial `Self { db }`. ONNX model preload is Phase 6
+    /// (stub stays on the deterministic SplitMix64 dummy). Vector index
+    /// creation is a schema concern (`GrafeoDB::create_vector_index` at
+    /// `database/index.rs:104`), not a manager concern — callers/index-owner
+    /// create the HNSW index BEFORE calling `handle_text_update`.
     pub fn new(db: Arc<GrafeoDB>) -> Self {
-        let _ = db;
-        unimplemented!()
+        Self { db }
     }
 
-    /// Detects text update, generates embedding, writes direct to Grafeo.
+    /// Generate embedding for `text` via `generate_local_embedding` (Task 3),
+    /// then write it direct to Grafeo as `Value::Vector(Arc<[f32]>)` on the
+    /// node's `EMBEDDING_PROPERTY` slot — bypassing Loro entirely.
     ///
-    /// Stub — Task 4 owns the body (calls `generate_local_embedding`, writes
-    /// the resulting `Vec<f32>` to Grafeo's vector index, never to Loro).
+    /// # Loro bypass invariant (spec validation gate)
+    ///
+    /// This function NEVER calls `LoroDoc::*`, `LoroMap::*`, `RootReconciler`,
+    /// or any other Loro write API. The embedding lives ONLY in Grafeo. The
+    /// test `vector_offload_never_writes_to_loro` asserts this by inspecting
+    /// `LoroDoc::get_deep_value()` post-call and verifying no `LoroValue::List`
+    /// of `DEFAULT_EMBEDDING_DIM` floats is present anywhere.
+    ///
+    /// # Transaction lifecycle (L1 decision 7 — matches `parallel_hydrate_grafeo` + `VertexBuilder::commit`)
+    ///
+    /// 1. `db.session_with_cdc(false)` — CDC off suppresses outbound echoes
+    ///    (matches `parallel_hydrate_grafeo:57` + `app.rs:443`).
+    /// 2. `session.begin_transaction()` — SI isolation (single property write,
+    ///    no read-then-write race — Serializable not needed).
+    /// 3. `session.set_node_property(node_id, EMBEDDING_PROPERTY, Value::Vector(arc))`
+    ///    — verified at `grafeo-engine-0.5.42/src/session/mod.rs:5012` (takes
+    ///    `&self`); the underlying `crud.rs:359` extracts vector data and
+    ///    auto-inserts into any matching HNSW index (created by the caller).
+    /// 4. `session.prepare_commit()?.set_metadata(ORIGIN_LORO_BRIDGE, ORIGIN_LORO_BRIDGE).commit()?`
+    ///    — origin tag is advisory-only per Devil Gap 1 (dropped on `commit()`
+    ///    per `transaction/prepared.rs:124-128`); retained for advisory
+    ///    logging consistency with `parallel_hydrate_grafeo:104-106`.
+    ///
+    /// # `Vec<f32>` → `Arc<[f32]>` conversion (L1 decision 5)
+    ///
+    /// `Arc::<[f32]>::from(vec)` where `vec: Vec<f32>` — `From<Vec<T>> for
+    /// Arc<[T]>` is in `std::sync` (stable since 1.54). L3 may also use
+    /// `vec.into()` (inferred) — equivalent.
+    ///
+    /// # Errors
+    ///
+    /// - `GrafeoLoroError::Grafeo` if `begin_transaction` / `set_node_property`
+    ///   / `prepare_commit` / `commit` fails (existing `#[from] grafeo::Error`
+    ///   impl handles all — no new variant per anti-plenger #5 Bloat).
+    /// - `generate_local_embedding` error (stub returns `Ok`; real ONNX may
+    ///   fail via `Config`/`Bridge` per Task 3 contract) propagates via `?`.
+    ///
+    /// # Origin tag (L1 decision 3 — `ORIGIN_LORO_BRIDGE`)
+    ///
+    /// The vector write IS conceptually a Loro-side update routed directly to
+    /// Grafeo (bypassing Loro's CRDT). Using `ORIGIN_LORO_BRIDGE` keeps the
+    /// origin vocabulary at 2 tags (`grafeo-bridge` / `loro-bridge`) — no new
+    /// `ORIGIN_VECTOR_OFFLOAD` constant, no `bridge::origin` change (anti-
+    /// plenger #11 deletion over addition). The outbound worker filters via
+    /// the epoch side-channel (Devil Gap 1), not origin strings, so the tag is
+    /// advisory — but consistency with `parallel_hydrate_grafeo` matters for
+    /// log-readability.
     pub async fn handle_text_update(&self, node_id: NodeId, text: &str) -> Result<()> {
-        let _ = (node_id, text);
+        let _ = (node_id, text, EMBEDDING_PROPERTY, ORIGIN_LORO_BRIDGE, self.db.clone());
         unimplemented!()
     }
 }
