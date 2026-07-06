@@ -1,7 +1,7 @@
 {
   "$schema": "https://repomix.com/schemas/latest/schema.json",
   "input": {
-    "maxFileSize": 52428800
+    "maxFileSize": 1048576
   },
   "output": {
     "filePath": "repomix.md",
@@ -13,18 +13,18 @@
     "removeComments": false,
     "removeEmptyLines": false,
     "compress": false,
-    "topFilesLength": 5,
+    "topFilesLength": 0,
     "showLineNumbers": false,
-    "truncateBase64": false,
-    "copyToClipboard": true,
-    "includeFullDirectoryStructure": true,
-    "tokenCountTree": true,
+    "truncateBase64": true,
+    "copyToClipboard": false,
+    "includeFullDirectoryStructure": false,
+    "tokenCountTree": false,
     "git": {
       "sortByChanges": true,
       "sortByChangesMaxCommits": 100,
       "includeDiffs": false,
       "includeLogs": false,
-      "includeLogsCount": 50
+      "includeLogsCount": 1
     }
   },
   "include": [],
@@ -32,7 +32,16 @@
     "useGitignore": true,
     "useDotIgnore": true,
     "useDefaultPatterns": true,
-    "customPatterns": []
+    "customPatterns": [
+      "Cargo.lock",
+      "**/*.lock",
+      "worklog.md",
+      "docs/critiques/**",
+      "docs/critiques/*",
+      ".github/**",
+      ".vscode/**",
+      ".idea/**"
+    ]
   },
   "security": {
     "enableSecurityCheck": true
