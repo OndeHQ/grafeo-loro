@@ -1784,3 +1784,115 @@ Stage Summary:
   5. MINOR 1: Test file uses literal `"V"` instead of `ROOT_VERTICES` constant (DRY violation; fix is import + replace 5 occurrences).
 - Critique artifact: docs/critiques/p2t3-hunt.md
 - Commit hash: (will be created after `git add` + `git commit` of this worklog append + critique artifact)
+
+---
+
+## P2T3-L2R2 — L2 Fixer (Round 2)
+
+**Task ID**: P2T3-L2R2
+**Agent**: L2 Fixer (Round 2)
+**Branch**: `p2-vertex-builder`
+**Target**: Resolve P2T3-HUNT's 4 MAJORs + 4 MINORs + 2 NITs (verdict: LOOP BACK TO FIXER)
+**Base commit**: `b54525f` (P2T3-HUNT critique)
+**Final commit**: `d71fa3c`
+
+### Work Log
+
+- **MAJOR 1 — `prepared.commit()` failure leaves stale `BridgeMaps` binding** (`src/app.rs:449-468`)
+  - Added `self.sync_engine.maps().remove_node(&loro_key);` AFTER `compensate_loro_vertex` in the step 6 error arm. `BridgeMaps::remove_node` already existed at `src/bridge/grafeo_tx.rs:52-56` (added in Phase 1) — verified via `rg -n "remove_node" src/bridge/grafeo_tx.rs`. The helper deletes from BOTH `node_id_map` AND `node_key_map` atomically (lock-step), satisfying anti-plenger rule #9 (Absolute Idempotency).
+  - Combined with **MINOR 4** in the same commit: replaced the misleading "`prepared` was consumed by `commit()`; on Err it auto-rolled back via `Drop`" comment with the actual mechanism — `prepared.commit()` sets `finalized = true` BEFORE calling `session.commit()` (`transaction/prepared.rs:124-129`), so `PreparedCommit::Drop` is a NO-OP. The actual Grafeo rollback happens inside `session.commit()` → `commit_inner()`'s catch block (`session/mod.rs:4014-4036`).
+  - Commit: `34c31f3`
+
+- **MAJOR 3 — `session.prepare_commit()?` does NOT compensate Loro** (`src/app.rs:447-465`)
+  - Converted `let mut prepared = session.prepare_commit()?;` to a `match` with `Err` arm calling `compensate_loro_vertex` + `self.sync_engine.maps().remove_node(&loro_key)` + `return Err(grafeo_err)`. Same atomicity contract as MAJOR 1 — step 5's `apply_loro_op` inserted a binding that points to a phantom NodeId after `prepare_commit` failure + Session::Drop rollback.
+  - Note: the spec's proposed pattern showed `drop(session)` inside the match Err arm, but that conflicts with the `&mut` borrow held by `PreparedCommit<'_>` in the Ok arm (`E0505`). The fix uses `return Err(grafeo_err)` which triggers Session::Drop on function exit (same auto-rollback effect). Documented in the comment.
+  - Commit: `469d3e5`
+
+- **MAJOR 4 — `session.begin_transaction()?` does NOT compensate Loro** (`src/app.rs:427-432`)
+  - Converted `session.begin_transaction()?;` to `if let Err(raw_err) = session.begin_transaction() { ... }` with `compensate_loro_vertex` on Err. Step 5 (`apply_loro_op`) hasn't run yet at this point, so NO BridgeMaps cleanup needed — just Loro compensation.
+  - Commit: `3202c2b`
+
+- **MAJOR 2 — B1 inbound filter is dead code in the test suite** (multi-file)
+  - Added `pub fn sync_engine(&self) -> &Arc<SyncEngine>` accessor on `GrafeoLoroApp` (`src/app.rs:80-88`), exposing the engine so external tests can install the subscriber + inspect counters. Consistent with the existing `pub fn maps(&self)` accessor pattern.
+  - Added a new counter `inbound_filtered_count: Arc<AtomicU64>` to `SyncEngine` (`src/bridge/sync_engine.rs:125-133`) + accessor `pub fn inbound_filtered_count(&self) -> u64` (`src/bridge/sync_engine.rs:447-458`). The counter increments every time the origin filter `return`s early. **Rationale**: `inbound_event_count` alone is INSUFFICIENT to catch a filter regression because `translate_diff_event` ALSO silently skips Container-ref diffs (the diff shape produced by `commit()`'s `ensure_mergeable_map` write) — verified empirically: removing the `|| event.origin == ORIGIN_LORO_BRIDGE` filter clause does NOT increment `inbound_event_count` (translator skips Container refs at `sync_engine.rs:484-489`). The new counter directly measures filter activity, making the test a real regression catcher.
+  - Updated `init_loro_subscriber` (`src/bridge/sync_engine.rs:234-237`) to increment `inbound_filtered_count` when the filter fires.
+  - Added new test `vertex_builder_commit_does_not_echo_through_subscriber` (`tests/unit/vertex_builder.rs:641-695`) that:
+    1. Builds app + installs subscriber (no workers).
+    2. Snapshots `inbound_event_count` + `inbound_filtered_count` BEFORE `commit()`.
+    3. Calls `commit()` with 1 label + 1 property.
+    4. PRIMARY assertion: `inbound_filtered_count` INCREMENTED (filter actually fired).
+    5. Defense-in-depth: `inbound_event_count` UNCHANGED + `BridgeMaps::node_id_map.len() == 1` + `BridgeMaps::node_key_map.len() == 1`.
+  - **REGRESSION VERIFICATION**: temporarily commented out the `|| event.origin == ORIGIN_LORO_BRIDGE` clause → test FAILED with `B1 filter MUST fire on commit()'s ORIGIN_LORO_BRIDGE-tagged Loro write; filtered_count_before=0, filtered_count_after=0` → restored the clause → test PASSED. The test genuinely catches a filter regression.
+  - Commit: `b6caeb9`
+
+- **MINOR 1 — Test file uses literal `"V"` instead of `ROOT_VERTICES` constant** (`tests/unit/vertex_builder.rs`)
+  - Added `use grafeo_loro::constants::ROOT_VERTICES;` import. Replaced 5 code-path occurrences of `doc_guard.get_map("V")` with `doc_guard.get_map(ROOT_VERTICES)` at lines 196, 246, 534, 568, 601 (verified `ROOT_VERTICES` is `pub` at `src/constants.rs:6`). Left 2 doc-comment occurrences (`//! let v_map = doc.read().get_map("V");` at line 37 + `/// doc.read().get_map("V").get(...)` at line 111) as literal `"V"` because they are `no_run` doctest examples that don't import the constant.
+  - Commit: `f7ab35f`
+
+- **MINOR 3 — `compensate_loro_vertex` does not call `doc.commit()` on `v_map.delete()` failure** (`src/app.rs:553-576`)
+  - Added defensive `doc.commit()` in the `Err(e)` arm of the `v_map.delete(loro_key)` match. This clears the pending `ORIGIN_LORO_BRIDGE` origin tag so a subsequent Loro write that doesn't call `set_next_commit_origin` would not inherit it and be silently filtered by the B1 filter. In Phase 2 all Loro writes set their own origin, so this is defensive (cost: 1 extra `commit()` call which is a no-op on doc state since `delete` failed before mutating anything).
+  - Commit: `d71fa3c`
+
+- **MINOR 2 — TOCTOU between step 5 (`apply_loro_op` inserts binding) and step 7 (`node_id_map.get(&loro_key)`)** — **DEFERRED**
+  - Rationale: theoretical race requiring another thread to delete the binding between insert and read. In Phase 2 only `compensate_loro_vertex` deletes bindings, and it runs in the SAME thread on error paths (not concurrently). Concurrent `commit()` calls target different `loro_key`s (AtomicU64 counter), so no cross-commit collision. The error path propagates `Err(Bridge(...))` safely. Defer per YAGNI — the proposed fix (changing `apply_loro_op` to return the `NodeId`) is a larger refactor with no concrete benefit for Phase 2's single-threaded commit flow.
+
+- **MINOR 4 — Misleading comment at `src/app.rs:450-452`** — **FIXED** (combined with MAJOR 1 commit `34c31f3`)
+  - Replaced the misleading "auto-rolled back via `Drop`" comment with the actual mechanism (see MAJOR 1 details above).
+
+- **NIT 1 — Worklog citation `gval_to_grafeo_value` at `values.rs:146` is inaccurate** — **DEFERRED**
+  - The worklog is an append-only historical record; editing past entries would falsify history. The correct citation is `src/types/values.rs:171` (verified by `rg -n "fn gval_to_grafeo_value" src/types/values.rs`). The P2T3-HUNT critique already noted this in §0.4 + NIT 1. No code change needed.
+
+- **NIT 2 — L3 doc-comment cites `Container` enum at `lib.rs:3636` (off-by-one; actual `:3637`)** — **DEFERRED**
+  - Same rationale as NIT 1 — historical worklog citation, append-only. The actual `pub enum Container {` is at `loro-1.13.6/src/lib.rs:3637` (verified). The P2T3-HUNT critique already noted this in §0.4 + NIT 2. No code change needed.
+
+### Stage Summary
+
+- **Hunter findings addressed**:
+  - **MAJOR 1**: FIXED — `maps.remove_node(&loro_key)` added to step 6 error arm (`src/app.rs:467`)
+  - **MAJOR 2**: FIXED — new test `vertex_builder_commit_does_not_echo_through_subscriber` + `sync_engine()` accessor + `inbound_filtered_count` counter; regression-verified by removing the filter clause and confirming test FAILS
+  - **MAJOR 3**: FIXED — `prepare_commit()?` → `match` with compensate + remove_node on Err (`src/app.rs:453-465`)
+  - **MAJOR 4**: FIXED — `begin_transaction()?` → `if let Err` with compensate on Err (`src/app.rs:428-432`)
+  - **MINOR 1**: FIXED — 5 literal `"V"` → `ROOT_VERTICES` in tests + import added
+  - **MINOR 2**: DEFERRED — TOCTOU is theoretical for Phase 2's single-threaded commit flow; error propagates safely; refactor cost > benefit
+  - **MINOR 3**: FIXED — defensive `doc.commit()` on `v_map.delete()` failure clears pending origin tag
+  - **MINOR 4**: FIXED — misleading comment corrected (combined with MAJOR 1 commit)
+  - **NIT 1**: DEFERRED — historical worklog citation, append-only; correct location noted here
+  - **NIT 2**: DEFERRED — historical worklog citation, append-only; correct location noted here
+
+- **Files touched**:
+  - `src/app.rs` — MAJOR 1+4, MAJOR 3, MINOR 3, MINOR 4 (atomicity contract cleanup on all 4 failure paths + defensive origin-tag clear + comment fix)
+  - `src/bridge/sync_engine.rs` — MAJOR 2 (`inbound_filtered_count` counter + accessor + filter increments it)
+  - `tests/unit/vertex_builder.rs` — MAJOR 2 (new B1 filter echo test) + MINOR 1 (`ROOT_VERTICES` constant)
+
+- **Compile status**: `cargo check --all-targets` → exit 0, **5 warnings (all pre-existing baseline)**, 0 errors, **0 NEW warnings**. Baseline warnings: `app.rs:47` (builder fields never read), `hydration/vector.rs:9` (db field), `hydration/vector.rs:27` (generate_local_embedding fn), `presence/socket.rs:6` (room_id field), `telemetry/health.rs:9` (doc/db/last_sync_ts fields) — all identical to P2T3-HUNT's baseline run.
+
+- **Test status**: `cargo test --all` → **35 PASS + 0 FAIL + 0 IGNORED** (6 lib + 5 integration + 24 unit + 0 doctests). Up from 34/34 (added 1 new test `vertex_builder_commit_does_not_echo_through_subscriber`).
+
+- **B1 filter actually tested now?** **YES**. The new test's PRIMARY assertion is `filtered_count_after > filtered_count_before` (filter actually fired). Verified by temporarily commenting out the `|| event.origin == ORIGIN_LORO_BRIDGE` clause in `src/bridge/sync_engine.rs:234` → test FAILED with `B1 filter MUST fire on commit()'s ORIGIN_LORO_BRIDGE-tagged Loro write; filtered_count_before=0, filtered_count_after=0` → restored the clause → test PASSED. The test genuinely catches a filter regression (Goodhart risk resolved).
+
+- **Atomicity contract fully honored on all 4 failure paths?** **YES**:
+  1. Step 4 `begin_transaction()` Err → compensate Loro (`src/app.rs:428-432`, MAJOR 4)
+  2. Step 5 `apply_loro_op` Err → compensate Loro + drop session (existing `src/app.rs:445-449`; BridgeMaps binding doesn't exist yet because `apply_upsert_node` only inserts on success — verified at `grafeo_tx.rs:141-142`)
+  3. Step 6a `prepare_commit()` Err → compensate Loro + remove BridgeMaps binding + drop session (`src/app.rs:453-465`, MAJOR 3)
+  4. Step 6b `prepared.commit()` Err → compensate Loro + remove BridgeMaps binding (`src/app.rs:449-468`, MAJOR 1)
+
+- **Anti-plenger rule compliance**:
+  - #1 (Pure Functions): all error arms are pure (no global side effects beyond the documented Loro/Grafeo/BridgeMaps cleanup).
+  - #2 (DRY): `compensate_loro_vertex` helper reused by all 3 Grafeo-failure arms; `BridgeMaps::remove_node` SSOT (existing helper, no new code).
+  - #9 (Absolute Idempotency): `BridgeMaps::remove_node` deletes from BOTH maps atomically; `compensate_loro_vertex`'s `doc.commit()` is idempotent (no-op if nothing changed).
+  - #10 (Same logic, fewest LOC): MAJOR 1 fix is 1 LOC; MAJOR 3 + 4 are ~5 LOC each; MINOR 3 is 1 LOC.
+
+- **Commit hash**: `d71fa3c` (final commit on `p2-vertex-builder`)
+
+### Commits in this L2-R2 round (oldest → newest)
+
+1. `34c31f3` — P2T3-L2R2: MAJOR 1 + MINOR 4 — remove BridgeMaps binding on commit failure + fix misleading rollback comment
+2. `469d3e5` — P2T3-L2R2: MAJOR 3 — prepare_commit failure compensates Loro + removes BridgeMaps binding
+3. `3202c2b` — P2T3-L2R2: MAJOR 4 — begin_transaction failure compensates Loro
+4. `b6caeb9` — P2T3-L2R2: MAJOR 2 — add B1 filter echo-prevention test + sync_engine accessor + inbound_filtered_count counter
+5. `f7ab35f` — P2T3-L2R2: MINOR 1 — use ROOT_VERTICES constant in tests (5 occurrences)
+6. `d71fa3c` — P2T3-L2R2: MINOR 3 — defensive doc.commit() on compensate delete failure (clear pending origin tag)
+
+### Push-readiness self-assessment
+
+All 4 MAJORs (atomicity contract violations) FIXED with surgical changes (~30 LOC total across `src/app.rs`). MAJOR 2's B1 filter test is regression-verified. The 4 MINORs are addressed (3 FIXED, 1 DEFERRED with rationale). The 2 NITs are DEFERRED (historical worklog citations; correct locations noted in this entry). Compile + test status green: 0 errors, 0 new warnings, 35/35 PASS, 0 ignored. Ready for next hunter round or push.
