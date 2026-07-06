@@ -444,7 +444,25 @@ impl VertexBuilder {
         //    epoch side-channel (Phase 1) is the real echo-prevention
         //    mechanism on the outbound path (not exercised here since
         //    `session_with_cdc(false)` emits no CDC event).
-        let mut prepared = session.prepare_commit()?;
+        //
+        //    On `prepare_commit()` Err (theoretical — only fails on
+        //    `InvalidState` which is impossible after `begin_transaction`
+        //    succeeded), compensate Loro AND remove the BridgeMaps binding
+        //    that step 5's `apply_loro_op` inserted, then drop `session` to
+        //    auto-rollback the Grafeo tx (L2-R2 MAJOR 3 + atomicity contract).
+        let mut prepared = match session.prepare_commit() {
+            Ok(p) => p,
+            Err(raw_err) => {
+                let grafeo_err: GrafeoLoroError = raw_err.into();
+                compensate_loro_vertex(&self.sync_engine, &loro_key, &grafeo_err, &self.labels, &self.properties);
+                self.sync_engine.maps().remove_node(&loro_key);
+                // `session` is dropped on `return` (auto-rollback Grafeo tx
+                // via Session::Drop at session/mod.rs:5372-5383). Explicit
+                // `drop(session)` here would conflict with the `&mut` borrow
+                // held by `PreparedCommit<'_>` in the Ok arm.
+                return Err(grafeo_err);
+            }
+        };
         prepared.set_metadata("origin", ORIGIN_LORO_BRIDGE);
         if let Err(raw_err) = prepared.commit() {
             // `prepared.commit()` sets `finalized = true` BEFORE calling
