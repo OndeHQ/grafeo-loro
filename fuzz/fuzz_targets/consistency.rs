@@ -281,7 +281,7 @@ fn check_i3a_no_panic_in_apply_loro_op(state: &FuzzState, requested_ops: u64) {
 /// `prepared.commit()`) panics, the `JoinHandle::await` returns `Err(JoinError)`
 /// and we assert that didn't happen.
 fn check_i3b_no_panic_in_batcher_run(db: &Arc<GrafeoDB>, maps: &Arc<BridgeMaps>, ops: &[FuzzOp]) {
-    use grafeo_loro::bridge::MutationBatcher;
+    use grafeo_loro::bridge::{BatcherConfig, MutationBatcher};
     use tokio::sync::{broadcast, mpsc};
 
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -301,14 +301,16 @@ fn check_i3b_no_panic_in_batcher_run(db: &Arc<GrafeoDB>, maps: &Arc<BridgeMaps>,
         let (shutdown_tx, _) = broadcast::channel(1);
         let batcher = Arc::new(MutationBatcher::new(
             db.clone(),
-            256,
-            100,
-            bridge_origin_epochs,
-            maps.clone(),
-            shutdown_tx.clone(),
-            None,
-            None,
-            None,
+            BatcherConfig {
+                batch_size: 256,
+                batch_ms: 100,
+                bridge_origin_epochs,
+                maps: maps.clone(),
+                shutdown_tx: shutdown_tx.clone(),
+                metrics: None,
+                tracer: None,
+                health: None,
+            },
         ));
         let (tx, rx) = mpsc::channel::<LoroOp>(1024);
         for op in ops {

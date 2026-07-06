@@ -85,6 +85,20 @@ pub struct MutationBatcher {
     pub(crate) health: Option<Arc<HealthProbe>>,
 }
 
+/// Configuration bundle for [`MutationBatcher::new`]. Groups the 8 non-core
+/// construction params into a single struct — replaces the prior 9-arg
+/// signature (P7 `too_many_arguments` refactor, anti-plenger #5).
+pub struct BatcherConfig {
+    pub batch_size: usize,
+    pub batch_ms: u64,
+    pub bridge_origin_epochs: Arc<RwLock<HashSet<EpochId>>>,
+    pub maps: Arc<BridgeMaps>,
+    pub shutdown_tx: broadcast::Sender<()>,
+    pub metrics: Option<Arc<MetricsRegistry>>,
+    pub tracer: Option<SharedTracer>,
+    pub health: Option<Arc<HealthProbe>>,
+}
+
 impl MutationBatcher {
     /// Construct a batcher with explicit tuning. Shared `bridge_origin_epochs`
     /// and `maps` are owned by the parent `SyncEngine` and passed in by `Arc`
@@ -97,43 +111,25 @@ impl MutationBatcher {
     /// `GrafeoLoroAppBuilder::build` threads `Some(Arc::clone(&metrics))` +
     /// `Some(Arc::clone(&tracer))` + `Some(Arc::clone(&health))` here (P5-L2
     /// wired the parameter list — bodies filled P5-L3).
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "P5-L1 wiring — builder pattern with explicit telemetry params; refactor to BatcherConfig struct deferred to future phase"
-    )]
-    // TODO: refactor to BatcherConfig struct in future phase
-    pub fn new(
-        grafeo_db: Arc<GrafeoDB>,
-        batch_size: usize,
-        batch_ms: u64,
-        bridge_origin_epochs: Arc<RwLock<HashSet<EpochId>>>,
-        maps: Arc<BridgeMaps>,
-        shutdown_tx: broadcast::Sender<()>,
-        metrics: Option<Arc<MetricsRegistry>>,
-        tracer: Option<SharedTracer>,
-        health: Option<Arc<HealthProbe>>,
-    ) -> Self {
+    pub fn new(grafeo_db: Arc<GrafeoDB>, config: BatcherConfig) -> Self {
         Self {
             grafeo_db,
             buffer: Mutex::new(Vec::new()),
-            batch_size,
-            batch_ms,
-            bridge_origin_epochs,
-            maps,
-            shutdown_tx,
-            metrics,
-            tracer,
-            health,
+            batch_size: config.batch_size,
+            batch_ms: config.batch_ms,
+            bridge_origin_epochs: config.bridge_origin_epochs,
+            maps: config.maps,
+            shutdown_tx: config.shutdown_tx,
+            metrics: config.metrics,
+            tracer: config.tracer,
+            health: config.health,
         }
     }
 
     /// Construct a batcher using [`DEFAULT_BATCH_SIZE`] and [`DEFAULT_BATCH_MS`].
     ///
-    /// # Phase 5 Task 4 wiring (P5-L1)
-    ///
-    /// Mirrors [`Self::new`] signature: takes `metrics` + `tracer` + `health`
-    /// as the last three params. Callers that do not configure telemetry pass
-    /// `None, None, None`.
+    /// Convenience wrapper around [`Self::new`] with default batch sizing.
+    /// Callers that do not configure telemetry pass `None` for metrics/tracer/health.
     pub fn with_defaults(
         grafeo_db: Arc<GrafeoDB>,
         bridge_origin_epochs: Arc<RwLock<HashSet<EpochId>>>,
@@ -145,14 +141,16 @@ impl MutationBatcher {
     ) -> Self {
         Self::new(
             grafeo_db,
-            DEFAULT_BATCH_SIZE,
-            DEFAULT_BATCH_MS,
-            bridge_origin_epochs,
-            maps,
-            shutdown_tx,
-            metrics,
-            tracer,
-            health,
+            BatcherConfig {
+                batch_size: DEFAULT_BATCH_SIZE,
+                batch_ms: DEFAULT_BATCH_MS,
+                bridge_origin_epochs,
+                maps,
+                shutdown_tx,
+                metrics,
+                tracer,
+                health,
+            },
         )
     }
 

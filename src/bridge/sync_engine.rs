@@ -61,7 +61,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tracing::instrument;
 
-use crate::bridge::batcher::MutationBatcher;
+use crate::bridge::batcher::{BatcherConfig, MutationBatcher};
 use crate::bridge::grafeo_tx::{BridgeMaps, EdgeKey};
 use crate::constants::EPOCH_RETENTION;
 use crate::constants::{
@@ -296,14 +296,16 @@ impl SyncEngine {
 
         let batcher = Arc::new(MutationBatcher::new(
             grafeo_db.clone(),
-            batch_size,
-            batch_ms,
-            bridge_origin_epochs.clone(),
-            maps.clone(),
-            shutdown_tx.clone(),
-            metrics.clone(),
-            tracer.clone(),
-            health.clone(),
+            BatcherConfig {
+                batch_size,
+                batch_ms,
+                bridge_origin_epochs: bridge_origin_epochs.clone(),
+                maps: maps.clone(),
+                shutdown_tx: shutdown_tx.clone(),
+                metrics: metrics.clone(),
+                tracer: tracer.clone(),
+                health: health.clone(),
+            },
         ));
 
         let engine = Self {
