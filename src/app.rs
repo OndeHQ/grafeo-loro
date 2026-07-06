@@ -167,6 +167,27 @@ impl GrafeoLoroApp {
         &self.sync_engine
     }
 
+    /// Snapshot of the process-local `loro_key_counter` (P4-L3 — test hook for
+    /// verifying cold-boot re-seed). The counter is `Arc<AtomicU64>` internally
+    /// so concurrent `VertexBuilder::commit` calls may increment it between
+    /// snapshot + read; tests that need determinism must serialize `commit`
+    /// against this snapshot (anti-plenger #7 — defensive).
+    pub fn loro_key_counter(&self) -> u64 {
+        self.loro_key_counter.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot of the builder-configured SSOT mode (P4-L3 — test hook for
+    /// verifying `GrafeoLoroAppBuilder::build` threads the slot through).
+    pub fn ssot_mode(&self) -> SsotMode {
+        self.ssot_mode
+    }
+
+    /// Snapshot of the builder-configured compression codec (P4-L3 — test hook
+    /// for verifying `GrafeoLoroAppBuilder::build` threads the slot through).
+    pub fn compression(&self) -> CompressionType {
+        self.compression
+    }
+
     /// Begin a fluent vertex-upsert transaction.
     ///
     /// Wiring only: clones the engine handle + the shared counter and returns
