@@ -12,7 +12,7 @@
     "files": true,
     "removeComments": false,
     "removeEmptyLines": false,
-    "compress": false,
+    "compress": true,
     "topFilesLength": 0,
     "showLineNumbers": false,
     "truncateBase64": true,
@@ -27,20 +27,23 @@
       "includeLogsCount": 1
     }
   },
-  "include": [],
+  "include": [
+    "**/*.rs"
+  ],
   "ignore": {
     "useGitignore": true,
     "useDotIgnore": true,
     "useDefaultPatterns": true,
     "customPatterns": [
+      "target/**",
+      ".git/**",
       "Cargo.lock",
       "**/*.lock",
+      "**/*.md",
+      "**/*.toml",
+      "**/*.json",
       "worklog.md",
-      "docs/critiques/**",
-      "docs/critiques/*",
-      ".github/**",
-      ".vscode/**",
-      ".idea/**"
+      "docs/**"
     ]
   },
   "security": {
