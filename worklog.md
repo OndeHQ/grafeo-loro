@@ -5576,7 +5576,7 @@ Stage Summary:
 - **Zero new warnings** introduced; 2 pre-existing warnings unchanged.
 - **70/70 tests still pass** (6 lib + 5 integration + 59 unit + 2 ignored = exact P4 baseline).
 - **Cargo.toml deps: NONE added** — all wiring uses existing `opentelemetry = "0.23"` (features `metrics` + `trace`) + `tracing = "0.1"` + `parking_lot = "0.12"` + `tokio` (already present). Devil need NOT approve any dep changes.
-- Commit hash: <to be filled after commit>
+- Commit hash: `5a03a14` (full: `5a03a1493d453da207fd79bea7272faeb0fb816b`) — pushed to `phase-5`
 - Open questions for P5-DEVIL:
   Q1: Field type — `GrafeoLoroApp.metrics` is `Option<Arc<MetricsRegistry>>` (L1 decision: preserve backward compat with 4-arg `from_sync_engine_with_config` test API). Spec said `Arc<MetricsRegistry>` (non-Option). Confirm Option is acceptable, OR require `Arc<MetricsRegistry>` (would force updating existing tests to construct a no-op registry).
   Q2: `HealthProbe.doc` field type is `Arc<RwLock<LoroDoc>>` (matches architecture §23.3 sketch). Alternative: `Weak<RwLock<LoroDoc>>` to avoid preventing doc drop on shutdown. Confirm Arc is correct (the app owns the doc anyway via `SyncEngine.loro_doc`, so Weak would always be upgradeable in practice — but Arc is simpler + matches architecture).
