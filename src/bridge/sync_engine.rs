@@ -460,7 +460,7 @@ impl SyncEngine {
     #[instrument(skip(self), level = "info")]
     #[allow(
         clippy::async_yields_async,
-        reason = "spawn_*_worker fns return tokio::task::JoinHandle by design — caller awaits the handle, not the spawn call"
+        reason = "spawn_*_worker returns tokio::task::JoinHandle by design — caller awaits the handle, not the spawn call. Permanent design choice, not a TODO."
     )]
     pub async fn spawn_inbound_worker(
         self: Arc<Self>,
@@ -554,7 +554,7 @@ impl SyncEngine {
     #[instrument(skip(self), level = "info")]
     #[allow(
         clippy::async_yields_async,
-        reason = "spawn_*_worker fns return tokio::task::JoinHandle by design — caller awaits the handle, not the spawn call"
+        reason = "spawn_*_worker returns tokio::task::JoinHandle by design — caller awaits the handle, not the spawn call. Permanent design choice, not a TODO."
     )]
     pub async fn spawn_outbound_worker(
         self: Arc<Self>,
@@ -662,7 +662,7 @@ impl SyncEngine {
     #[instrument(skip(self), level = "info")]
     #[allow(
         clippy::async_yields_async,
-        reason = "spawn_*_worker fns return tokio::task::JoinHandle by design — caller awaits the handle, not the spawn call"
+        reason = "spawn_*_worker returns tokio::task::JoinHandle by design — caller awaits the handle, not the spawn call. Permanent design choice, not a TODO."
     )]
     pub async fn spawn_cdc_poller(self: Arc<Self>) -> JoinHandle<()> {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
