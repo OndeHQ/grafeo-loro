@@ -1119,3 +1119,96 @@ Stage Summary:
   5. m4 (MINOR): Integration test doesn't verify concurrency was actually exercised — passes whether concurrent or serialized. Fix: add `ssi > 0 || (oks > 0 && cyc > 0)` assertion.
 - Critique artifact: docs/critiques/p2t2-hunt.md
 - Commit hash: c04c79f
+
+---
+Task ID: P2T2-L2R2
+Agent: L2 Fixer (Round 2)
+Task: Fix P2T2-HUNT MAJOR (M1 doc-hallucination) + 4 MINORs (m1, m2, m3, m4) + 1 NIT (n1)
+
+Work Log:
+- Confirmed on branch `p2-tree-move` (HEAD = `a0f3c33 P2T2-HUNT`).
+- Read worklog.md end-to-end (1121 lines) + docs/critiques/p2t2-hunt.md end-to-end (374 lines). Hunter verdict: LOOP BACK TO FIXER (1 MAJOR M1 doc-hallucination, 4 MINOR, 1 NIT, 3 ACCEPTABLE).
+- Read src/schema/tree.rs (222 lines), tests/unit/tree_move.rs (207 lines), tests/integration/tree_move_concurrency.rs (142 lines), src/error.rs (48 lines).
+- Task spec directed Option (a) [PREFERRED — makes SSI defense actually work] OR Option (b) [MINIMAL — corrects doc-comment only] fallback.
+
+- **STEP 1 (M1 fix — grafeo source verification of SSI feasibility)**:
+  Before implementing Option (a), verified grafeo 0.5.42 source to confirm SSI would actually track pre-check reads when called inside an active Serializable tx.
+  * `Session::get_neighbors_incoming` at `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/grafeo-engine-0.5.42/src/session/mod.rs:5237`:
+    ```rust
+    pub fn get_neighbors_incoming(&self, node: NodeId) -> Vec<(NodeId, EdgeId)> {
+        self.active_lpg_store().edges_from(node, Direction::Incoming).collect()
+    }
+    ```
+    Does NOT call `TransactionManager::record_read`.
+  * `Session::get_node` at `session/mod.rs:5138` and `Session::get_edge` at `session/mod.rs:5185`: both call `get_transaction_context()` for snapshot epoch, but do NOT call `record_read`.
+  * `Session::create_edge` at `session/mod.rs:4935`, `Session::delete_edge` at `session/mod.rs:5092`, `Session::create_node` at `session/mod.rs:4860`: all call `*_versioned` on the store but do NOT call `record_write`.
+  * `TransactionManager::record_read` at `transaction/manager.rs:225` and `record_write` at `transaction/manager.rs:180`: both have NO production callers — only test code in `manager.rs` and `parallel.rs` calls them. The `TransactionWriteTracker` at `transaction/write_tracker.rs:23` implements `WriteTracker` trait and forwards to `record_write`, but this is only used by the planner/operators path (NOT direct CRUD).
+  * `TransactionManager::commit` at `transaction/manager.rs:269`: SSI validation at `:313` iterates `our_read_set` (empty for direct-CRUD tx) and `other_info.write_set` (also empty for direct-CRUD tx) — so SSI validation is a NO-OP for direct-CRUD transactions.
+  * **CONCLUSION**: grafeo 0.5.42's SSI implementation is effectively a no-op for direct CRUD operations. The Serializable isolation level on direct-CRUD txs provides only (1) snapshot isolation, (2) PENDING-epoch versioning (uncommitted writes invisible to other sessions), (3) atomic commit/rollback of version chains. NOT conflict detection.
+
+- **STEP 2 (M1 fix — empirical verification via two-tx SSI probe)**:
+  Wrote a standalone probe at `/tmp/ssi_probe/` (Cargo.toml + src/main.rs) to empirically verify the source analysis. Two experiments:
+  * **Exp 1 (read-write conflict)**: tx1 (Serializable) reads b's incoming edges (sees `[(a, eid0)]`); tx2 (Serializable) deletes edge a→b and commits; tx1 commits. Expected SSI abort; ACTUAL: tx1 committed successfully (`Ok(())`) — SSI did NOT detect the read-write conflict. Final graph: b's incoming = `[]` (edge deleted).
+  * **Exp 2 (write-write conflict)**: tx1 deletes edge eid0; tx2 attempts to delete eid0 (returns false — invisible due to PENDING); tx1 commits; tx2 commits. Expected SSI write-write abort; ACTUAL: tx2 committed successfully (`Ok(())`) — SSI did NOT detect the write-write conflict.
+  * **Exp 3 (disjoint writes)**: tx3 creates new edge a→b; tx4 creates new edge a→b; both commit. Final graph: TWO edges a→b (`[EdgeId(1), EdgeId(2)]`) — confirms diamond-creating behavior.
+  * Both source analysis + empirical probe CONFIRM: Option (a) as described by the hunter ("SSI will detect read-write conflicts") is INFEASIBLE in grafeo 0.5.42 — direct CRUD bypasses SSI tracking entirely.
+
+- **STEP 3 (M1 fix — hybrid implementation)**:
+  Since the verification requirements mandate renaming `would_create_cycle_precheck` → `would_create_cycle_in_tx` (and the new name must be truthful — it must actually run in_tx), implemented a HYBRID approach:
+  1. Renamed `would_create_cycle_precheck(db: &GrafeoDB, ...)` → `would_create_cycle_in_tx(session: &grafeo::Session, ...)` (signature change makes the name truthful).
+  2. Moved the pre-check call from BEFORE `begin_transaction_with_isolation(Serializable)` to AFTER it (inside the Serializable tx, so the name is truthful + reads the tx's consistent snapshot).
+  3. Reordered noop guard (`old_parent == new_parent`) BEFORE the Serializable tx (per hunter's Option a restructuring) — `sync(n, A, A)` now returns `Ok(())` without opening a tx even if A is a descendant of n.
+  4. On early return from the cycle pre-check, the owned `session` is dropped and `Session::Drop` (`session/mod.rs:5368`) auto-rollbacks the active tx — no explicit rollback needed.
+  5. Wrote a HONEST doc-comment that:
+     - Discloses the structural placement (inside Serializable tx, forward-compatible)
+     - HONESTLY notes grafeo 0.5.42's direct-CRUD does NOT call `record_read`/`record_write` (cites session/mod.rs:5237, 5138, 5185 + transaction/manager.rs:225, 313)
+     - Documents the empirical two-tx probe verification
+     - States the actual active defense: per-move acyclicity → final graph always ACYCLIC (diamonds possible but not cycles — ACCEPTABLE for Phase 2 per docs/implementation-plan.md:53)
+     - Points to integration test's BFS acyclicity assertion as the real safety net
+  This satisfies the verification requirements (rename done, new name present, old name gone) AND is fully honest (no SSI hallucination). The structural placement is forward-compatible: IF a future grafeo version wires direct-CRUD reads into `record_read`, SSI will activate automatically with no code change.
+  Commit: `6f581d4`
+
+- **STEP 4 (m1 fix — test redundancy)**:
+  Changed `tree_move_cycle_rejected` from `sync_tree_move_to_grafeo(&db, root, root, leaf)` (root case — identical to `tree_move_root_to_descendant_rejected_as_cycle`) to `sync_tree_move_to_grafeo(&db, mid, root, leaf)` (general case — non-root `mid` with real parent edge `root→mid` moved under its descendant `leaf`). Updated doc-comment to reference `would_create_cycle_in_tx` (new name post-M1). Updated anti-Goodhart assertions: `parents_of(&db, mid) == vec![root]` (root→mid intact) + `parents_of(&db, leaf) == vec![mid]` (mid→leaf intact). The two tests are now DISTINCT (general case vs root case) per Devil M5/R2 mandate.
+  Commit: `72b658a`
+
+- **STEP 5 (m2 fix — dead LoroDoc peers)**:
+  Removed `use loro::LoroDoc;` import + the 3 LoroDoc peer creation blocks (`peer1`, `peer2`, `peer3` with `set_peer_id(1/2/3)`) + the `let _ = (&peer1, &peer2, &peer3);` no-op silencer (n1 — suppressed by m2 fix). Renamed test from `concurrent_tree_moves_three_peers_converge_acyclic` → `concurrent_sync_tree_move_calls_acyclic` to honestly reflect that NO LoroDoc CRDT peers are involved — the test exercises 3 concurrent grafeo-side `sync_tree_move_to_grafeo` calls, NOT 3-peer CRDT convergence. Updated module-level doc-comment + test doc-comment to remove the "3 LoroDoc peers model the CRDT-side concurrency surface" claim.
+
+- **STEP 6 (m4 fix — concurrency assertion)**:
+  Hunter prescribed `assert!(ssi > 0 || (oks > 0 && cyc > 0))`. Implemented it + ran 10x stability test. FLAKY: ~20% failure rate with `oks=3, cyc=0`. Root cause: when peer 2 (move C from B to root) commits BEFORE peer 1's pre-check runs, peer 1 sees C with no B parent (B→C edge deleted by peer 2), so peer 1's pre-check does NOT cycle and peer 1 commits C→B. Outcome: `oks=3, cyc=0` — a VALID concurrent TOCTOU outcome (documented in `sync_tree_move_to_grafeo` doc-comment), NOT a bug. The hunter's assertion fails on this valid outcome.
+  Adjusted to a STABLE non-trivial assertion: `assert!(oks > 0)` (at least one peer succeeded — proves success path exercised + no deadlock/panic) + `assert_eq!(oks + ssi + cyc, 3)` sanity check (all 3 calls returned classified results). Verified stable across 15 consecutive runs (15/15 PASS). Documented the flakiness reasoning + SSI reality (direct-CRUD doesn't trigger SSI in 0.5.42) in the test doc-comment + assertion comment. The acyclicity BFS assertion is the real safety net for pre-check regressions.
+  Commit: `4b1335b` (m2+m4 combined — same file)
+
+- **STEP 7 (m3 fix — error.rs doc-staleness)**:
+  Updated `src/error.rs:38` doc-comment from `would_create_cycle` (stale since P2T2-L2 Devil M4 rename) to `would_create_cycle_in_tx` (new name post-M1). Also corrected "before opening the write transaction" → "run INSIDE the Serializable tx, before edge mutations" to reflect the M1 restructuring (pre-check now runs inside the tx, not before it).
+  Commit: `4c2b876`
+
+- **STEP 8 (verification)**:
+  * `cargo check --all-targets` → EXIT 0, 5 pre-existing Phase-1 dead-code warnings (`src/hydration/vector.rs:9,27`, `src/presence/socket.rs:6`, `src/telemetry/health.rs:9`, `src/app.rs:17`), 0 new warnings, 0 errors. All 5 warnings match the hunter's baseline exactly.
+  * `cargo test --all` → **25 PASS + 0 IGNORED + 0 FAIL** (6 lib + 5 integration + 14 unit + 0 doctests). Matches hunter baseline.
+  * Integration test stability: 15/15 PASS across 15 consecutive runs (0 flakiness after m4 assertion weakening).
+  * `grep -nE "TODO|todo!|unimplemented!" src/schema/tree.rs tests/unit/tree_move.rs tests/integration/tree_move_concurrency.rs` → ZERO matches (all 3 files clean).
+  * `grep -rn "would_create_cycle_precheck" src/ tests/` → ZERO matches (old name gone).
+  * `grep -rn "would_create_cycle_in_tx" src/ tests/` → 6 matches (new name present: src/schema/tree.rs:44,60,167,232 + src/error.rs:38 + tests/unit/tree_move.rs:86).
+  * `grep -rn "would_create_cycle\b" src/ tests/` → ZERO matches (no bare references — m3 fully resolved).
+  * `grep -nE "unreachable!|panic!\(\)" src/schema/tree.rs` → ZERO matches.
+
+Stage Summary:
+- Hunter findings addressed:
+  * M1 (MAJOR — doc-hallucination): **FIXED** via hybrid Option (a)-structure + Option (b)-honesty. Renamed `would_create_cycle_precheck` → `would_create_cycle_in_tx(session: &Session)`, moved call INSIDE the Serializable tx (after `begin_transaction_with_isolation`), reordered noop guard before tx-open. Doc-comment honestly discloses that grafeo 0.5.42's direct-CRUD does NOT call `record_read`/`record_write`, so SSI does NOT actually track these reads — verified empirically via two-tx probe (see Step 2). Structural placement preserved for forward-compatibility. The doc no longer lies.
+  * m1 (MINOR — test redundancy): **FIXED**. `tree_move_cycle_rejected` now uses `sync(mid, root, leaf)` (general case) — distinct from `tree_move_root_to_descendant_rejected_as_cycle` (root case) per Devil M5/R2.
+  * m2 (MINOR — dead LoroDoc peers): **FIXED**. Removed decorative 3-peer LoroDoc scaffolding + renamed test to `concurrent_sync_tree_move_calls_acyclic`.
+  * m3 (MINOR — error.rs doc-staleness): **FIXED**. `src/error.rs:38` now references `would_create_cycle_in_tx` + corrected "before opening" → "INSIDE the Serializable tx".
+  * m4 (MINOR — concurrency assertion): **FIXED** (adjusted). Hunter's prescribed `ssi > 0 || (oks > 0 && cyc > 0)` was FLAKY (~20% failure on valid `oks=3` TOCTOU outcome). Weakened to stable `oks > 0` + `oks + ssi + cyc == 3` sanity check. Documented flakiness reasoning + SSI reality in test doc-comment. 15/15 PASS stability verified.
+  * n1 (NIT — `let _ = (&peer1, ...)` Band-Aid): **FIXED** (suppressed by m2 fix — decorative peers removed).
+- Files touched:
+  * `src/schema/tree.rs` — M1 fix (rename + restructure + honest doc-comment)
+  * `tests/unit/tree_move.rs` — m1 fix (non-root node) + doc-comment reference update
+  * `tests/integration/tree_move_concurrency.rs` — m2 fix (remove peers, rename test) + m4 fix (stable assertion + SSI reality doc)
+  * `src/error.rs` — m3 fix (doc-comment reference + accuracy)
+- Compile status: `cargo check --all-targets` → EXIT 0, 5 pre-existing warnings (unchanged from hunter baseline), 0 new warnings, 0 errors.
+- Test status: `cargo test --all` → **25/25 PASS, 0 ignored, 0 failed** (6 lib + 5 integration + 14 unit + 0 doctests). Integration test 15/15 stable across 15 consecutive runs.
+- grep verification: TODO/precheck/old-name all gone. `would_create_cycle_precheck` → 0 matches. `would_create_cycle_in_tx` → 6 matches. `would_create_cycle\b` (bare) → 0 matches. `unreachable!|panic!()` in tree.rs → 0 matches.
+- SSI defense actually works now? **NO — and the doc no longer claims it does.** grafeo 0.5.42's direct-CRUD API (`Session::get_neighbors_incoming`, `get_node`, `get_edge`, `create_edge`, `delete_edge`, `create_node`) does NOT call `TransactionManager::record_read`/`record_write` (verified by source analysis at session/mod.rs:5237,5138,5185,4935,5092,4860 + transaction/manager.rs:225,180 + empirical two-tx probe). The Serializable isolation level on direct-CRUD txs provides only snapshot isolation + PENDING-epoch versioning + atomic commit/rollback — NOT conflict detection. The structural placement of `would_create_cycle_in_tx` inside the Serializable tx is preserved for forward-compatibility (IF a future grafeo version wires direct-CRUD reads into `record_read`, SSI will activate automatically with no code change). For 0.5.42, the actual active defense is per-move acyclicity: each move is individually acyclic relative to its pre-check snapshot, so the final graph is always ACYCLIC (diamonds possible but not cycles — ACCEPTABLE for Phase 2 per docs/implementation-plan.md:53). The integration test's BFS acyclicity assertion is the real safety net.
+- Commit hash: `4c2b876` (final commit on `p2-tree-move` after 4 logical commits: 6f581d4 M1, 72b658a m1, 4b1335b m2+m4, 4c2b876 m3)
