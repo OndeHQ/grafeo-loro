@@ -5113,3 +5113,49 @@ Stage Summary:
   7. **Q7 (MutationBatcher parameter wiring)**: `MutationBatcher::new` is called from `SyncEngine::new` at `src/bridge/sync_engine.rs:161` with `DEFAULT_BATCH_SIZE` + `DEFAULT_BATCH_MS` hardcoded. The builder's `batch_interval_ms` / `batch_max_size` setters exist but their values are NOT threaded into `SyncEngine::new` (signature would need widening). Should `SyncEngine::new` take the batch params as args, or should `MutationBatcher::new` be removed from `SyncEngine::new` and called separately by `build()`?
   8. **Q8 (zero-value validation for batch params)**: Should `build()` reject `batch_interval_ms == 0` or `batch_max_size == 0`? Currently `Default` (100 / 256) is always sane, but a caller could explicitly set zero. YAGNI says no; defensive programming says yes. Flagged for Devil.
 - Commit hash: <will be filled in after commit — see git log>
+
+---
+Task ID: P4-DEVIL
+Agent: Devil's Advocate
+Task: Critique P4-L1 scaffolding; resolve Q1-Q8; identify missed issues; check docs alignment.
+
+Work Log:
+- Step 1: Read worklog Phase 4 setup section (lines 4988-5116) for branch/scope/context. Confirmed on `phase-4` branch via `git branch --show-current`. Latest commit was `818d5c5` from P4-L1. Read all 8 L1 open questions (Q1-Q8) inline.
+- Step 2: Read existing `docs/critiques/p2t3-l1-devil.md` (662 lines) + `docs/critiques/p2t3-hunt.md` (582 lines) for voice/format reference. Found an in-progress `docs/critiques/p4-l1-devil.md` (846 lines, untracked) — a previous P4-DEVIL run had produced a complete critique but never committed it. Reviewed it end-to-end.
+- Step 3: Independent anti-hallucination verification of every key citation in the critique against actual crate source under `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/`:
+  - **B1 (BLOCKER) verified**: `GrafeoDB::open` at `grafeo-engine-0.5.42/src/database/mod.rs:290` is `#[cfg(feature = "wal")]`-gated (gate at :289). `GrafeoDB::with_config` at :346 is NOT gated. `GrafeoDB::backup_full` at :2743 is `#[cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]`. `GrafeoDB::restore_to_epoch` at :2813 is `#[cfg(all(feature = "wal", feature = "grafeo-file"))]`. `GrafeoDB::checkpoint_to_file` at :2827 is private (`fn`, not `pub fn`). `GrafeoDB::file_manager` at :2853 is `#[cfg(feature = "grafeo-file")]`. All four `pub fn` + cfg claims verified.
+  - **B2 (BLOCKER) verified**: `src/bridge/sync_engine.rs:97` declares `pub(crate) grafeo_db: Arc<GrafeoDB>` — immutable `Arc`, cannot be rebound in place after `SsotMode::Grafeo` restore.
+  - **Q1 verified**: `GrafeoDB::current_epoch(&self) -> EpochId` is PUBLIC at `grafeo-engine-0.5.42/src/database/crud.rs:258`. Already used at `src/bridge/sync_engine.rs:352,361`. Decision: deferred (moot — Phase 4 has no delta-write path).
+  - **Q3 / M2 verified**: `ImportStatus.pending: Option<VersionRange>` at `loro-internal-1.13.6/src/encoding.rs:230` (missing-dep tracking, NOT dedup). The actual dedup mechanism is `OpLog::trim_the_known_part_of_change` at `loro-internal-1.13.6/src/oplog.rs:350` — strips the known prefix of incoming changes. L1's Q3 option (c) "rely on `ImportStatus::pending` to deduplicate" was INCORRECTLY ATTRIBUTED — Devil corrected to `trim_the_known_part_of_change`.
+  - **Q6 verified**: `GrafeoDB::graph_store(&self) -> Arc<dyn GraphStoreSearch>` at `grafeo-engine-0.5.42/src/database/mod.rs:2120` (PUBLIC, NOT feature-gated). `<GraphStore as>::node_ids() -> Vec<NodeId>` at `grafeo-core-0.5.42/src/graph/traits.rs:130`, `<GraphStore as>::get_node(id) -> Option<Node>` at :48, `<GraphStore as>::edges_from(node, direction) -> Vec<(NodeId, EdgeId)>` at :116, `<GraphStore as>::get_edge(id) -> Option<Edge>` at :51. All PUBLIC. `RootReconciler::new(LoroMap)` at `lorosurgeon-0.2.1/src/reconcile.rs:298`. Decision: implement `parallel_hydrate_loro` as mirror of `parallel_hydrate_grafeo`.
+  - **Q7 verified**: `SyncEngine::new` at `src/bridge/sync_engine.rs:148` takes `(Arc<GrafeoDB>, Arc<RwLock<LoroDoc>>)`. `MutationBatcher::new` called from `:161` with `DEFAULT_BATCH_SIZE` + `DEFAULT_BATCH_MS` hardcoded. `MutationBatcher::with_defaults` at `src/bridge/batcher.rs:93` is precedent. `grep -rn "SyncEngine::new\b" tests/` shows 6 real callers (4 in `tests/integration/sync_echo.rs` + 2 in `tests/unit/vertex_builder.rs`); a 7th grep match in `tests/unit/parallel_hydrate.rs:316` is a doc-comment, not a call. Devil corrected the "7 test sites" claim to "6 test sites". Decision: add `SyncEngine::with_batch_config(db, doc, batch_size, batch_ms)` constructor; refactor `new` to delegate to private `new_inner`.
+  - **M10 verified**: `SyncEngine::init_loro_subscriber` at `src/bridge/sync_engine.rs:204`; called inside `spawn_all` at `:410`. So `build().await?` activates the subscriber BEFORE `hydrate("graph_123").await?` runs. `LoroDoc::import` at `loro-1.13.6/src/lib.rs:710` vs `import_with(&bytes, origin)` at `:721`. B1 filter at `src/bridge/sync_engine.rs:234` skips `ORIGIN_GRAFEO_BRIDGE || ORIGIN_LORO_BRIDGE`. `LoroDoc::set_next_commit_origin(&self, &str)` at `loro-1.13.6/src/lib.rs:626`. Decision: use `import_with(ORIGIN_LORO_BRIDGE)` for `SsotMode::Loro` hydrate; use `set_next_commit_origin(ORIGIN_LORO_BRIDGE)` before `doc.commit()` in `parallel_hydrate_loro`.
+- Step 4: Reviewed existing critique for completeness — all 8 questions answered with concrete decisions + L3 implementation hints; 2 BLOCKERs + 10 MAJORs + 4 MINORs + 3 NITs + 22-item L2/L3 action checklist + architecture alignment audit (implementation-plan + grafeo-loro.architecture.md + project-structure) + verifications section with all grep commands. Self-assessment section at end confirms anti-plenger / anti-Goodhart / hallucination checks.
+- Step 5: Fixed one minor inaccuracy — Q7 rationale claimed "7 test sites" but actual `grep -rn "SyncEngine::new\b" tests/` shows 6 real callers + 1 doc-comment. Replaced line 221 with corrected count.
+- Step 6: Verified no PAT leakage — `grep -c "ghp_" docs/critiques/p4-l1-devil.md` returns 0. Critique file is safe to commit.
+- Step 7: Committed `docs/critiques/p4-l1-devil.md` (846 lines) as `a49b892` and pushed to `phase-4` branch. Push succeeded: `818d5c5..a49b892  phase-4 -> phase-4`.
+- Step 8: Appended this worklog entry.
+
+Stage Summary:
+- Critique file: `docs/critiques/p4-l1-devil.md` (846 lines)
+- BLOCKERs: 2 —
+  - B1: `GrafeoDB::open` is `#[cfg(feature = "wal")]`-gated at `grafeo-engine-0.5.42/src/database/mod.rs:289`; L1's checkpoint/hydrate doc-comments cite `GrafeoDB::open(path)` (line 290) as if always-available. Phase 4 Cargo.toml has `grafeo = "0.5"` WITHOUT `wal` feature — L3's literal call won't compile.
+  - B2: `SyncEngine.grafeo_db: Arc<GrafeoDB>` (immutable `Arc` at `src/bridge/sync_engine.rs:97`) cannot be rebound after `SsotMode::Grafeo` restore; `Arc<RwLock<Arc<GrafeoDB>>>` or `ArcSwap` refactor needed (~30 call sites).
+- MAJORs: 10 —
+  - M1: `SsotMode::Loro` delta-WRITE path missing — `hydrate` enumerates a delta key-space that no method populates (Phase 4 gap, not blocker).
+  - M2: L1's Q3 option (c) mis-attributes dedup to `ImportStatus::pending` — real mechanism is `OpLog::trim_the_known_part_of_change` (`loro-internal-1.13.6/src/oplog.rs:350`).
+  - M3: `GrafeoDB::close(&self)` takes `&self` not `self` — does NOT drop the handle. L1's checkpoint doc-comment implies destructive close.
+  - M4: Q6 `parallel_hydrate_loro` mirror path concrete (all APIs verified public) — Devil provides 60-line code shape for L3.
+  - M5: `Cargo.toml` has NO `tar` dependency — L3 needs `tar = "0.4"` IF Q2 option (a) is chosen.
+  - M6: `SsotMode::Grafeo` hydrate step 5 precondition (subscriber inactive OR origin-tagged) not documented — same echo-prevention as P3T2-DEVIL M3 but applied to the Grafeo→Loro direction.
+  - M7: Architecture §4 Step A lacks `SsotMode::Grafeo` cold-start path — doc gap flagged for orchestrator.
+  - M8: `GrafeoLoroApp` struct has NO `ssot_mode` / `storage` / `compression` fields — `hydrate`/`checkpoint` cannot dispatch on them. L2 must add fields + a `from_sync_engine_with_config` constructor.
+  - M9: Architecture §24.4 config table missing `grafeo_dir` row — doc gap.
+  - M10: Architecture §24.2 quick-start `build → hydrate` ordering contradicts `build`'s step 6 `spawn_all` (subscriber active before `hydrate` runs). Devil decision: use `LoroDoc::import_with(ORIGIN_LORO_BRIDGE)` + `set_next_commit_origin(ORIGIN_LORO_BRIDGE)` to route through the B1 filter.
+- MINORs: 4 — m1 (`STORAGE_KEY_GRAFEO_TAR_ZST` doc-comment missing wal caveat); m2 (wire format for `CompressedPayload` — 1-byte codec tag + raw bytes); m3 (`hydrate` doc-comment says "non-empty `pending`" should be "`pending.is_some()`"); m4 (checkpoint step 5 implies mutable grafeo_db field that doesn't exist).
+- NITs: 3 — n1 (`STORAGE_KEY_BASE_LORO` doc cites `import` at :710, should be `import_with` at :721); n2 (`GrafeoDB::open` citations missing `#[cfg]` gate mention); n3 (`STORAGE_KEY_DELTA_PREFIX` doc still says "flagged for resolution" — Q1 is now resolved).
+- L2/L3 action checklist length: 22 items (2 BLOCKER + 10 MAJOR + 4 MINOR + 3 NIT + 3 orchestrator doc updates).
+- All 8 L1 open questions (Q1-Q8) have CONCRETE decisions with rationale + L3 implementation hints. None require deferral (Q1 is "deferred as moot for Phase 4" but the decision itself is concrete).
+- Devil RECOMMENDS Q2 option (d): defer `SsotMode::Grafeo` to Phase 5 (B1 + B2 combined cost too high for Phase 4's mock-storage scope). If orchestrator rejects deferral, fall back to Q2 option (a) + B2 refactor.
+- No blockers prevent L2 from proceeding — Q2 option (d) leaves `SsotMode::Loro` path fully implementable; the `SsotMode::Grafeo` arms return `unimplemented!("P5: ...")` per Devil recommendation.
+- Commit hash: `a49b892` (pushed to `phase-4`)
