@@ -5794,3 +5794,93 @@ Stage Summary:
 - cargo test: 82 passed / 0 failed / 2 ignored (matches baseline)
 - Commit hash: <to be filled after commit>
 - Phase 5 loop closed: 70 → 82 tests (+12), 8/8 plenger categories clean, ready for Phase 6 (Hardening & Docs)
+
+---
+
+## Phase 5 Loop Close — Orchestrator Summary
+
+**$stn**: `phase-5`
+**Range**: `9cdc60b..3fc58c0` (9 commits across 7 agents + 2 fix iterations)
+**Outcome**: ✅ **PROCEED_TO_PUSH** — all validation gates green; branch pushed to `origin/phase-5`.
+
+### Loop Iterations Completed
+
+| Task ID | Agent | Commit | Outcome |
+|---|---|---|---|
+| P5-L1 | L1 Scaffolding | `5a03a14` + `8baf278` | Contracts for `MetricsRegistry`/`HealthProbe`/`traces` + wiring contact points in `app`/`sync_engine`/`batcher`/`parallel`. 17 open questions for Devil. |
+| P5-DEVIL | Devil's Advocate | `289450b` + `dcf95fc` | 0 BLOCKER + 4 MAJOR + 2 MINOR + 2 NIT; 17/17 questions ruled. Critical: `GrafeoDB::execute()` does NOT exist — correct API is `db.session().execute(...)`. Verdict: PROCEED_TO_L2. |
+| P5-L2 | Fixer + L2 Wiring | `8e965f1` | All 4 MAJOR + 2 MINOR addressed (M1 API fix + arch patch, M2 grafeo_commit grandchild span marker, M3 health field on SyncEngine+Batcher + 7-arg with_telemetry, M4 create_outbound_sync_span, m1 HydrationMode enum, m2 auto-construction wiring). 22 TODO(P5-L2) resolved; 34 TODO(P5-L3) added. 70/70 tests still pass. |
+| P5-L3 | L3 Deep Implementation | `1b5e7a6` | 34/34 TODOs filled. 12 new tests added. 0 new `unimplemented!()` in production. `MetricsRegistry::init` + `HealthProbe::{new,update_sync_ts,check}` + 4 `create_*_span` helpers + bridge/batcher/hydration/app wiring + `shutdown()` body implemented. 82/82 tests pass. |
+| P5-HUNT-1 | Plenger Hunter (R1) | `17f9992` | 0 BLOCKER + 2 MAJOR + 1 MINOR + 2 NIT; 6/8 plenger categories clean. MAJOR 1: `inbound_events` double-counted. MAJOR 2: missing arch §23.1 labels. Verdict: L2_REENTRY. |
+| P5-L2-2 | Fixer Round 2 | `6cc144f` | All 3 findings fixed. MAJOR 1: removed batcher.rs:317 double-count line. MAJOR 2: added `origin` + `event_type` labels via pure `match` expressions on `LoroOp` + `grafeo::cdc::EntityId` (verified variants — 0 hallucinations). MINOR 1: parking_lot doc corrected. 82/82 tests still pass. |
+| P5-HUNT-2 | Plenger Hunter (R2) | `3fc58c0` | All fixes verified. 0 new plenger-traits introduced. 8/8 plenger categories clean. Verdict: PROCEED_TO_PUSH. |
+
+### Final Validation
+
+```
+cargo check --all-targets:  PASS  (0 errors, 1 pre-existing warning: presence::socket::room_id dead_code — Phase 5 Task 1 skipped per user)
+cargo test --all:           PASS  (82 passed, 0 failed, 2 ignored — 6 lib + 5 integration + 71 unit + 0 doctest)
+rg "unimplemented!()" src/:  8 pre-existing (Phase 3/4/5+ deferred — out of P5 scope; 0 NEW from P5)
+rg "TODO(P5-L3)" src/:      0 matches
+rg "inbound_events\.add\(op_count" src/:  0 matches (MAJOR 1 fixed)
+rg "&\[\]" src/bridge/sync_engine.rs | grep inbound|outbound:  0 matches (MAJOR 2 fixed)
+rg "ghp_" docs/critiques/ worklog.md:  0 matches (no PAT leakage)
+git status:                 clean
+remote sync:                phase-5 pushed to origin (3fc58c0)
+```
+
+### Phase 5 Scope Delivered (per `docs/implementation-plan.md`, Task 1 EXCLUDED)
+
+✅ **Task 2 — `telemetry::metrics::MetricsRegistry`**
+- `init(meter)`: builds `inbound_events`, `outbound_events`, `echo_filtered` (Counter<u64>) + `batch_flush_duration`, `hydration_duration` (Histogram<f64>) via `meter.u64_counter(name).with_unit(...).init()` + `meter.f64_histogram(name).with_unit(...).init()`.
+- `record_batch_flush(duration_ms, batch_size)`: records histogram + counter with `batch_size` attribute.
+- `record_hydration(duration_ms, mode: HydrationMode)`: records histogram with `mode` attribute (via `HydrationMode::Display` — `"loro"` / `"grafeo"`).
+
+✅ **Task 3 — `telemetry::health::HealthProbe::check`**
+- `new(doc, db)`: stores Arc handles + initializes `last_sync_ts` to current wall-clock ms.
+- `update_sync_ts()`: stamps current ms (Relaxed atomic).
+- `check(max_staleness_ms)`: probes (a) Loro doc read accessibility via `try_read()` (parking_lot — no poison), (b) Grafeo dummy query via `db.session().execute("MATCH (n) RETURN count(n) LIMIT 1")` (Devil M1 API correction applied), (c) `last_sync_ts` age. Returns `HealthStatus { overall, components }`.
+
+✅ **Task 4 — Wire telemetry into bridge/batcher/hydration**
+- `traces.rs`: 4 span creators implemented (`cold_start_hydration`, `inbound_sync_loop`, `outbound_sync_loop`, `hybrid_query` — names match arch §23.2 exactly).
+- `SyncEngine` workers: `init_loro_subscriber` (echo_filtered counter at origin filter, with `origin=loro` + `event_type` labels), `spawn_inbound_worker` (inbound_sync_loop parent span + inbound_events counter per-op with `origin=loro` + `event_type=vertex|edge|tree` derived from `LoroOp` variant + health.update_sync_ts after commit), `spawn_outbound_worker` (outbound_sync_loop parent span + outbound_events counter per-CDC with `origin=grafeo` + `event_type=vertex|edge|triple|other` derived from `EntityId` variant + health.update_sync_ts after Loro commit), `spawn_cdc_poller` (echo_filtered counter at origin filter, outbound direction).
+- `MutationBatcher::flush_inner`: `batch_flush` parent span + `grafeo_commit` grandchild span around `commit()` + `record_batch_flush(duration_ms, batch_size)` + `health.update_sync_ts()` (NO double-count of inbound_events per Devil Q12).
+- `hydration/parallel.rs`: `parallel_hydrate_grafeo` accepts `Option<&Arc<MetricsRegistry>>` + `Option<&SharedTracer>` (cold_start_hydration parent span + per-chunk child spans).
+- `app.rs::hydrate`: wrapped in `cold_start_hydration` span + calls `record_hydration(duration_ms, HydrationMode::from(ssot_mode))` after completion.
+- `app.rs::build`: auto-constructs `MetricsRegistry`, `HealthProbe`, `SharedTracer` via `Option::or_else` if builder slots are `None` (Devil Q14/Q16/Q17).
+- `app.rs::shutdown`: implemented per 5-step doc-comment sketch — `sync_engine.shutdown()` → drain `worker_handles` (NO auto-checkpoint per Devil Q15) → flush telemetry exporters via `global::shutdown_meter_provider()` + `global::shutdown_tracer_provider()` → GrafeoDB drops on scope exit.
+
+❌ **Task 1 — `presence::socket::PresenceManager`**: EXCLUDED by user request ("all task not 1")
+
+### P4-HUNT Forward-Compat Items — Status
+
+- **BA-1** (MINOR): `hydrate` delta-load `continue` swallows ALL `storage.load` errors — NOT touched in Phase 5 (no delta-write path added). Still deferred.
+- **DRY-1** (MINOR): `InMemoryStorage` impl duplicated across 2 test files — NOT refactored (no new storage-dependent tests added in P5). Still deferred.
+- **CB-1** (MINOR): `build()` discards `Vec<JoinHandle<()>>` — ✅ ADDRESSED. `GrafeoLoroApp` now has `worker_handles: Option<Vec<JoinHandle<()>>>` field; `build()` preserves them from `spawn_all`; `shutdown()` drains them.
+
+### Phase 5 Validation Requirements (per `docs/implementation-plan.md`)
+
+- ✅ Test: Health probe detects stale sync > 5s — `test_health_probe_check_returns_false_when_sync_stale` in `tests/unit/telemetry.rs`.
+- ❌ Test: Presence payload < 256 bytes — N/A (Task 1 skipped per user).
+- 📝 Manual: Jaeger trace shows full sync pipeline — span names emitted per arch §23.2 (`cold_start_hydration` → `parallel_hydrate_grafeo` → `hydrate_chunk`; `inbound_sync_loop` → `batch_flush` → `grafeo_commit`; `outbound_sync_loop` → `receive_cdc_event`). Caveat: OTel `Context` is NOT propagated across `tokio::spawn`/`spawn_blocking` boundaries — spans may appear as root in Jaeger rather than nested. Span names + Jaeger name-search reconstructs the hierarchy for human inspection. Documented for Phase 6 (NIT 2).
+
+### Deferred to Phase 6 (Hardening & Docs)
+
+- **NIT 1**: OTel meter provider global lifecycle (graceful shutdown sequence).
+- **NIT 2**: Actual OTel parent-child span linking across `tokio::spawn` boundaries (requires `Context::with_span(span).attach()` plumbing through worker closures).
+- **NIT 3**: Arch doc clarification on `event_type="other"` fallback semantics for `EntityId` `#[non_exhaustive]` variants.
+- **Optional**: 1 test using `opentelemetry_sdk::SdkMeterProvider` + test `MetricReader` to assert labels are recorded (HUNT-1 suggested).
+- **Pre-existing 8 `unimplemented!()`**: `config.rs:31` (Phase 4), `presence/socket.rs` ×4 (Phase 5 Task 1), `app.rs:353/359/371` (Phase 3/4+ scope — `query`/`update_text`/`generate_embedding`), `app.rs:571/966` (SsotMode::Grafeo wal-feature deferred), `app.rs:977` (`broadcast_presence` — Task 1).
+
+### Loop Status
+
+**Loop iteration 1 + fix iteration complete.** Per `plonga-plongo-loop.md` step 7: "Push $stn" — DONE.
+
+Branch `phase-5` is the new head at `3fc58c0`. Phase 6 (Hardening & Docs) is the next user-decided scope per `docs/implementation-plan.md`. User will decide whether to proceed to a new session loop for Phase 6 or stop here.
+
+---
+
+## Orchestrator Final Note
+
+Phase 5 (Tasks 2/3/4) delivered in 1 L1 + 1 DEVIL + 2 L2 (R1 + R2) + 1 L3 + 2 HUNT (R1 + R2) = 7 agents, 9 commits, 82/82 tests passing. The Plonga-Plongo loop correctly caught a double-counting MAJOR + missing-label MAJOR in HUNT-1, which Fixer R2 + HUNT-2 then resolved. All anti-plenger categories end clean (8/8). Ready for user to decide next session loop (Phase 6 or stop).
+
