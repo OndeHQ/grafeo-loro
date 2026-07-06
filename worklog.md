@@ -5762,3 +5762,35 @@ Stage Summary:
   1. MAJOR 1 truly removed — `rg "inbound_events\.add\(op_count" src/` returns 0 matches; the only remaining `inbound_events.add(...)` is at `sync_engine.rs` per-op forward boundary (Devil Q12).
   2. MAJOR 2 labels match arch §23.1 row 1/2 spec — `origin ∈ {loro, grafeo}` + `event_type ∈ {vertex, edge, tree, triple, other}`. Verify the `event_type` derivation mapping is correct (LoroOp::UpsertNode/DeleteNode → vertex; LoroOp::UpsertEdge/DeleteEdge → edge; LoroOp::TreeMove → tree; EntityId::Node → vertex, EntityId::Edge → edge, EntityId::Triple → triple, _ → other). Confirm no plenger-traits introduced (no `if/else` chains — pure `match` expressions; no production `unwrap()`/`expect()`).
   3. MINOR 1 doc-only fix — verify `health.rs:20` + `:161-169` comments now correctly describe parking_lot semantics (NO poisoning, `try_read()` returns None only if writer holds lock). No behavioral change to `check()` method — `let loro_ok = self.doc.try_read().is_some();` at line 173 is unchanged.
+
+---
+Task ID: P5-HUNT-2
+Agent: Plenger-Traits Hunter Round 2
+Task: Verify P5-L2-2 fixes + final push gate
+
+Work Log:
+- Step 1: Read P5-HUNT-1 critique (`docs/critiques/p5-hunt.md`) + P5-L2-2 worklog tail. Confirmed 2 MAJOR (double-count `inbound_events` + missing arch §23.1 row 1/2 labels) + 1 MINOR (parking_lot doc misrepresentation) + 2 NIT (deferred). Baseline: 82/82 tests, 0 errors, 1 pre-existing warning.
+- Step 2: `git diff 17f9992..HEAD --stat` — 3 source files touched (`src/bridge/batcher.rs` +5/-1, `src/bridge/sync_engine.rs` +39/-6, `src/telemetry/health.rs` +10/-3) + worklog +33. Total +86/-10 across 4 files.
+- Step 3 (MAJOR 1 verification): `rg "inbound_events\.add" src/` → 1 match at `sync_engine.rs:486` (per-op forward, Devil Q12). `rg "inbound_events\.add\(op_count" src/` → 0 matches. Read `batcher.rs:305-329` — confirmed line removed + 4-line explanatory comment present (cites Devil Q12 + HUNT-1 MAJOR 1). ✅ FIXED.
+- Step 4 (MAJOR 2 inbound verification): Read `sync_engine.rs:465-504`. Confirmed pure `match &op` (5 arms: UpsertNode/DeleteNode → "vertex", UpsertEdge/DeleteEdge → "edge", TreeMove → "tree") + `KeyValue::new("origin", "loro")` + `KeyValue::new("event_type", event_type)`. No `if/else` chain (anti-plenger #8 clean).
+- Step 5 (MAJOR 2 outbound verification): Read `sync_engine.rs:575-609`. Confirmed pure `match &msg.payload.entity_id` (4 arms: Node → "vertex", Edge → "edge", Triple → "triple", `_` → "other") + `KeyValue::new("origin", "grafeo")` + `KeyValue::new("event_type", event_type)`.
+- Step 6 (LoroOp variant hallucination check): LoroOp is locally defined at `src/types/events.rs:14` (NOT from lorosurgeon as workflow spec hypothesized). Read events.rs:1-49 — confirmed exactly 5 variants: UpsertNode, UpsertEdge, DeleteNode, DeleteEdge, TreeMove. Match is exhaustive (no wildcard needed since LoroOp is local + not `#[non_exhaustive]`). 0 hallucinated variants.
+- Step 7 (EntityId variant hallucination check): `EntityId` is `grafeo::cdc::EntityId` re-exported from `grafeo-engine-0.5.42/src/cdc.rs:148`. Read cdc.rs:147-155 — confirmed `#[non_exhaustive]` at line 147 + 3 variants: `Node(NodeId)`, `Edge(EdgeId)`, `Triple(u64)`. The `_ => "other"` wildcard is justified by `#[non_exhaustive]` (P5-L2-2 worklog step 9 documents hitting + resolving E0004 non-exhaustive patterns). 0 hallucinated variants.
+- Step 8 (MINOR 1 verification): Read `health.rs:15-34` (module doc-comment) + `:155-179` (inline comment). Both correctly describe parking_lot semantics: "NO poisoning (unlike std::sync::RwLock); try_read() returns None only when a writer currently holds the lock." Behavioral probe (`let loro_ok = self.doc.try_read().is_some();`) unchanged — pure doc fix. ✅ FIXED.
+- Step 9 (plenger sweeps on diff): (a) Band-aid sweep: `git diff 17f9992..HEAD -- src/ | grep "^+" | grep -E "unwrap\(\)|expect\(|panic!\(|\.ok\(\)|unwrap_or_default"` → 0 matches. (b) Conditional-over-polymorphism sweep: no new `if/else` chains (only pre-existing `if let Some(m)` patterns with modified bodies). (c) Bloat sweep: inbound label derivation 7 lines, outbound 11 lines — both under 15-line threshold. (d) Context blindness sweep: both `match` expressions are pure value derivations inside synchronous blocks — no `.await` crossed, no RwLock guard held. 0 new plenger-traits introduced.
+- Step 10 (Goodhart's Law sweep): Verified label mapping is semantically meaningful (vertex/edge/tree/triple/other + origin loro/grafeo) per arch §23.1 row 1/2 — not hardcoded to pass HUNT-1 grep check.
+- Step 11 (compile + test): `cargo check --all-targets` → 0 errors, 1 pre-existing warning (`presence::socket::room_id` dead_code — unchanged from baseline). `cargo test --all` → 6 (lib unit) + 5 (integration) + 71 (unit) + 0 (doctest) = 82 passed, 0 failed, 2 ignored (matches P5-L3 + P5-HUNT-1 baseline exactly).
+- Step 12 (final counter checks): `rg "inbound_events\.add\(op_count" src/` → 0 matches ✅. `rg "&\[\]" src/bridge/sync_engine.rs` → 0 matches ✅ (no empty attribute sets remain anywhere in the file).
+- Step 13: Wrote `docs/critiques/p5-hunt-2.md` (187 lines) — verdict PROCEED_TO_PUSH, all 2 MAJOR + 1 MINOR verified fixed, 0 new plenger-traits introduced, Phase 5 ready for push.
+
+Stage Summary:
+- Hunt file: docs/critiques/p5-hunt-2.md (187 lines)
+- Verdict: PROCEED_TO_PUSH
+- MAJOR 1 fix verified: yes (inbound_events double-count removed; sole counter bump at sync_engine.rs:486 per-op forward)
+- MAJOR 2 fix verified: yes (LoroOp + EntityId variant tables verified against source — LoroOp at src/types/events.rs:14 [local, 5 variants], EntityId at grafeo-engine-0.5.42/src/cdc.rs:148 [#[non_exhaustive], 3 variants + wildcard]; semantic mapping matches arch §23.1 row 1/2; origin labels loro/grafeo correct)
+- MINOR 1 fix verified: yes (parking_lot doc-only fix; comments now correctly describe try_read() semantics; behavioral probe unchanged)
+- New plenger-traits introduced: 0 (no new band-aids, no new if/else chains, no bloat >15 lines, no context blindness, no Goodhart hardcoding, no backward-compat slaves)
+- cargo check: 0 errors, 1 pre-existing warning (`presence::socket::room_id`)
+- cargo test: 82 passed / 0 failed / 2 ignored (matches baseline)
+- Commit hash: <to be filled after commit>
+- Phase 5 loop closed: 70 → 82 tests (+12), 8/8 plenger categories clean, ready for Phase 6 (Hardening & Docs)
