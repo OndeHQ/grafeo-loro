@@ -26,8 +26,6 @@ pub struct AppConfig {
     pub presence_heartbeat_ms: u64,
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        unimplemented!()
-    }
-}
+// `Default` is intentionally NOT implemented for `AppConfig` — callers must
+// construct it explicitly via `GrafeoLoroAppBuilder` (anti-plenger #11:
+// deletion over addition; panicking in `Default::default()` is a footgun).
