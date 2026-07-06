@@ -42,7 +42,7 @@ Checklist of consistency invariants the `consistency` fuzz target must verify af
 
 - [ ] **I14 — Tree move serializability**: `sync_tree_move_to_grafeo` under `IsolationLevel::Serializable` must never produce a cycle in the parent-child tree, regardless of concurrent move op ordering (architecture §7, §22).
 
-- [ ] **I15 — Presence envelope integrity**: `build_eph_envelope(payload)` followed by `parse_eph_envelope(bytes)` must round-trip the `PresencePayload` exactly, AND must reject any non-`%EPH`-prefixed byte sequence with `GrafeoLoroError` (architecture §12).
+- [x] **I15 — Presence envelope integrity** (P7-L2-M2): `PresenceManager::build_eph_envelope(room_id, payload)` followed by `PresenceManager::parse_eph_envelope(bytes)` MUST round-trip the `room_id` + `PresencePayload` exactly, AND `parse_eph_envelope` MUST reject any malformed byte sequence (bad magic, truncated buffer, invalid serde) with `GrafeoLoroError::InvalidEnvelope` (architecture §12; Gap A.3 + Devil M2/CA.3). Wire format: `[magic:4][room_id_len:u16 LE][room_id:UTF-8][msg_type:u8][serde_json payload]`.
 
 ---
 

@@ -667,58 +667,75 @@ fn check_i14_tree_move_serializability(db: &Arc<GrafeoDB>, maps: &Arc<BridgeMaps
     }
 }
 
-/// I15 — Presence envelope integrity: `build_eph_envelope(payload)` followed
-/// by `parse_eph_envelope(bytes)` MUST round-trip the `PresencePayload` exactly,
-/// AND `parse_eph_envelope` MUST reject any non-`%EPH`-prefixed byte sequence
-/// with `GrafeoLoroError`. The `PresenceManager` API is `unimplemented!()` per
-/// Phase 6 T1 user exclusion, so we test the envelope SEMANTICS directly:
-/// `%EPH` magic + serde_json payload round-trips, and non-`%EPH` bytes reject.
+/// I15 — Presence envelope integrity: `PresenceManager::build_eph_envelope`
+/// followed by `PresenceManager::parse_eph_envelope` MUST round-trip the
+/// `room_id` + `PresencePayload` exactly, AND `parse_eph_envelope` MUST
+/// reject any malformed byte sequence with `GrafeoLoroError::InvalidEnvelope`.
+///
+/// Tests the production `%EPH` wire format (architecture §12; Gap A.3):
+/// `[magic:4][room_id_len:u16 LE][room_id:UTF-8][msg_type:u8][serde_json payload]`.
+///
+/// Per Devil M2/CA.3 (gap-closure-l1-devil.md): uses the REAL production APIs
+/// (NOT a hand-rolled envelope). The pre-P7-L2 implementation tested a
+/// simpler `[magic:4][serde_json]` format that was INCOMPATIBLE with the new
+/// wire format — Goodhart risk (testing a format that doesn't match production).
 fn check_i15_presence_envelope_integrity(payload: &PresencePayload) {
-    // Encode: 4-byte magic + serde_json bytes.
-    let json = serde_json::to_vec(payload).expect("I15: serde_json::to_vec failed");
-    let mut envelope = Vec::with_capacity(EPH_MAGIC.len() + json.len());
-    envelope.extend_from_slice(EPH_MAGIC);
-    envelope.extend_from_slice(&json);
+    use grafeo_loro::presence::PresenceManager;
+    use grafeo_loro::GrafeoLoroError;
 
-    // Decode: verify magic prefix, then serde_json round-trip.
-    assert!(
-        envelope.len() >= EPH_MAGIC.len(),
-        "I15: envelope shorter than magic prefix"
-    );
+    // Fixed room_id for the round-trip (distinct from any fuzz-test vertex
+    // key — never collides with I6/I10/I12 keys).
+    let room_id = "V/i15-roundtrip-test";
+
+    // === Positive path: build → parse round-trip ===
+    let envelope_bytes = PresenceManager::build_eph_envelope(room_id, payload)
+        .expect("I15: build_eph_envelope failed");
+    let decoded = PresenceManager::parse_eph_envelope(&envelope_bytes)
+        .expect("I15: parse_eph_envelope failed");
+    // Non-trivial assertion 1: room_id MUST round-trip exactly.
+    assert_eq!(decoded.room_id, room_id, "I15: room_id round-trip mismatch");
+    // Non-trivial assertion 2: payload MUST round-trip exactly (struct-level
+    // PartialEq — covers peer_id, cursor_x/y, last_active_ts, active_node).
     assert_eq!(
-        &envelope[..EPH_MAGIC.len()],
-        EPH_MAGIC,
-        "I15: envelope magic prefix mismatch"
-    );
-    let decoded: PresencePayload = serde_json::from_slice(&envelope[EPH_MAGIC.len()..])
-        .expect("I15: serde_json::from_slice failed");
-    // Non-trivial assertion: the decoded payload MUST equal the original.
-    assert_eq!(
-        decoded.peer_id.0, payload.peer_id.0,
-        "I15: presence peer_id round-trip mismatch"
-    );
-    assert_eq!(
-        decoded.cursor_x, payload.cursor_x,
-        "I15: presence cursor_x round-trip mismatch"
-    );
-    assert_eq!(
-        decoded.cursor_y, payload.cursor_y,
-        "I15: presence cursor_y round-trip mismatch"
-    );
-    assert_eq!(
-        decoded.last_active_ts, payload.last_active_ts,
-        "I15: presence last_active_ts round-trip mismatch"
-    );
-    assert_eq!(
-        decoded.active_node, payload.active_node,
-        "I15: presence active_node round-trip mismatch"
+        decoded.payload, *payload,
+        "I15: payload round-trip mismatch — decoded={:?}, original={:?}",
+        decoded.payload, payload
     );
 
-    // Negative test: non-`%EPH`-prefixed bytes MUST be rejected.
-    let bad_bytes = b"NOT-EPHsome random bytes that do not start with the magic prefix";
+    // === Negative path 1: bad magic ===
+    // 4 bytes of bad magic + otherwise-valid envelope tail.
+    let mut bad_magic = envelope_bytes.clone();
+    bad_magic[..EPH_MAGIC.len()].copy_from_slice(b"XXXX");
+    let err = PresenceManager::parse_eph_envelope(&bad_magic)
+        .expect_err("I15: parse_eph_envelope accepted bad magic");
     assert!(
-        &bad_bytes[..EPH_MAGIC.len()] != EPH_MAGIC,
-        "I15: negative-test bytes accidentally match magic prefix"
+        matches!(err, GrafeoLoroError::InvalidEnvelope(_)),
+        "I15: bad-magic rejection returned wrong error variant: {err:?}"
+    );
+
+    // === Negative path 2: truncated buffer (just the magic) ===
+    let err = PresenceManager::parse_eph_envelope(EPH_MAGIC)
+        .expect_err("I15: parse_eph_envelope accepted magic-only buffer");
+    assert!(
+        matches!(err, GrafeoLoroError::InvalidEnvelope(_)),
+        "I15: truncation rejection returned wrong error variant: {err:?}"
+    );
+
+    // === Negative path 3: bad serde payload (valid prefix, garbage JSON) ===
+    // Build a buffer with the correct magic + room_id + msg_type, then append
+    // invalid JSON bytes for the payload. parse_eph_envelope MUST reject with
+    // InvalidEnvelope("serde: ...").
+    let mut bad_serde = Vec::with_capacity(EPH_MAGIC.len() + 2 + room_id.len() + 1 + 4);
+    bad_serde.extend_from_slice(EPH_MAGIC);
+    bad_serde.extend_from_slice(&(room_id.len() as u16).to_le_bytes());
+    bad_serde.extend_from_slice(room_id.as_bytes());
+    bad_serde.push(0x01); // EPH_MSG_TYPE_PRESENCE
+    bad_serde.extend_from_slice(b"not valid json {{{");
+    let err = PresenceManager::parse_eph_envelope(&bad_serde)
+        .expect_err("I15: parse_eph_envelope accepted invalid JSON payload");
+    assert!(
+        matches!(err, GrafeoLoroError::InvalidEnvelope(_)),
+        "I15: bad-serde rejection returned wrong error variant: {err:?}"
     );
 }
 
