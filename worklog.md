@@ -4629,3 +4629,106 @@ Stage Summary:
   3. **`tracing` span instrumentation**: L2 did NOT add `tracing::info_span!("handle_text_update", node_id = ?node_id)` or similar — DEVIL did not flag this as a Phase 3 requirement. L3 may add observability spans as needed (anti-plenger #8 Observability).
   4. **Idempotency guarantee**: L2's `set_node_property` upsert path is idempotent at the value level (grafeo 0.5.42 `crud.rs:399` overwrites the existing property value — verified by L1 + DEVIL). L3's `vector_offload_is_idempotent` test asserts byte-identical `Vec<f32>` on readback — no L2 action needed.
   5. **Empty `text` handling**: L2 did NOT add an early-return for empty `text` (DEVIL did not flag this). `generate_local_embedding("")` returns a valid `DEFAULT_EMBEDDING_DIM`-length vector (Task 3 fold yields seed `0`; first SplitMix64 sample is non-zero). L3 may add a short-circuit if profiling shows it's a hot path — YAGNI at L2.
+
+
+
+---
+Task ID: P3T4-L3
+Agent: L3 Deep Implementation
+Task: Implement VectorOffloadManager::handle_text_update + 4 tests; zero stubs in Task 4 scope
+
+Work Log:
+- Confirmed branch `p3-vector-offload`, HEAD `743c250` (P3T4-L2 worklog append). Working tree clean. Baseline (re-verified): `cargo check --all-targets` = 0 errors / 3 pre-existing warnings; `cargo test --all` = 50 PASS / 0 FAIL / 6 IGNORED (4 P3T4-L1 scaffolds + 1 P3T3 warning smoke + 1 P3T2 benchmark). This is the FINAL Phase 3 task.
+- Read mandatory framework files in order: `sub-agents-traits.md` (6 rules — read-only context, no branch create other than $stn, push on progress), `klemer-agents.md` (L3 = "Fill in the final TODOs. Leave zero unwritten logic, stubs, band-aids, or plenger-traits"), `anti-plenger.md` (14 decisions), `plenger-traits.md` (8 anti-patterns), `repomix.md` (usage guide).
+- Read worklog most-recent 4 entries in full: `ORCH-P3T4-SETUP` (line 4251), `P3T4-L1` (line 4294), `P3T4-DEVIL` (line 4400), `P3T4-L2` (line 4519). Confirmed scope = fill 8 `// TODO(L3):` markers in `handle_text_update` + delete the `let _ = (...)` silencer tuple + implement 4 `#[ignore]`'d test bodies + remove `#![allow(unused_imports)]` silencer.
+- L2 open questions answered (per orchestrator):
+  1. Phantom pre-check error variant → `GrafeoLoroError::Bridge(format!("VectorOffloadManager: node {node_id:?} not found"))` (matches `parallel_hydrate_grafeo` precedent at `src/hydration/parallel.rs:67-69`).
+  2. ONNX → Phase 6; no action.
+  3. tracing spans → Phase 5; no action for Task 4.
+  4. Idempotency → grafeo `set_node_property` upserts; no action.
+  5. Empty text → `generate_local_embedding("")` returns valid vector; no early-return.
+
+### API verification
+- `Session::get_node`: verified at `grafeo-engine-0.5.42/src/session/mod.rs:5138` — `pub fn get_node(&self, id: NodeId) -> Option<Node>` (takes `&self`; gated `#[cfg(feature = "lpg")]` — transitively enabled via `grafeo` default → `embedded` → `lpg`). Used `if session.get_node(node_id).is_none()` form per orchestrator's lean (avoids binding an unused `Node`; anti-plenger #10 fewest LOC + clarity).
+- `grafeo::Value::Vector`: verified at `grafeo-common-0.5.42/src/types/value.rs:138` — `Vector(std::sync::Arc<[f32]>)` (exact shape match — `Arc<[f32]>`, NOT `Vec<f32>` or `Arc<Vec<f32>>`). Constructed via `grafeo::Value::Vector(std::sync::Arc::<[f32]>::from(embedding))`.
+- `Arc::<[f32]>::from(Vec<f32>)`: compiles ✓ — `From<Vec<T>> for Arc<[T]>` impl in `std::sync` stable since Rust 1.54. Project uses Rust 1.96 (per rust-toolchain.toml).
+- `EMBEDDING_PROPERTY` + `ORIGIN_LORO_BRIDGE`: verified at `src/constants.rs:55` (`pub const EMBEDDING_PROPERTY: &str = "embedding";`) + `src/constants.rs:3` (`pub const ORIGIN_LORO_BRIDGE: &str = "loro-bridge";`).
+- `Session::create_node`: verified at `grafeo-engine-0.5.42/src/session/mod.rs:4860` — `pub fn create_node(&self, labels: &[&str]) -> NodeId` (infallible; auto-commits at the current epoch when no tx is active — verified via `tests/unit/tree_move.rs:35` precedent). Used in all 4 tests for fixture setup.
+- `Node::get_property`: verified at `grafeo-core-0.5.42/src/graph/lpg/node.rs:91` — `pub fn get_property(&self, key: &str) -> Option<&Value>`. Used for read-back assertions in tests 1/3/4.
+- `LoroDoc::get_deep_value`: verified at `loro-1.13.6/src/lib.rs:937` — `pub fn get_deep_value(&self) -> LoroValue`. Returns `LoroValue::Map(LoroMapValue({}))` (an EMPTY map, NOT `Null`) for a fresh `LoroDoc::new()` — discovered at first test run; assertion adjusted to accept either `Null` OR an empty `Map` (see Tests implemented #2).
+- `LoroValue` variant shapes: verified at `loro-common-1.13.1/src/value.rs:14-26,51,53` — `List(LoroListValue)` where `LoroListValue(Arc<Vec<LoroValue>>)` derefs to `Vec<LoroValue>` at `value.rs:111`; `Map(LoroMapValue)` where `LoroMapValue(Arc<FxHashMap<String, LoroValue>>)` derefs to `FxHashMap<String, LoroValue>` at `value.rs:118`. The recursive walk in `contains_embedding_list` calls `llv.iter()` and `m.values()` directly via Deref.
+- `Session::set_node_property`: verified at `grafeo-engine-0.5.42/src/session/mod.rs:5012` — `pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()>` (takes `&self`, NOT `&mut self` — critical for borrow-flow with `prepare_commit(&mut self)` later; verified P3T4-L1 + P3T4-DEVIL + P3T4-L2).
+- `Session::begin_transaction`: verified at `session/mod.rs:3883` — `pub fn begin_transaction(&mut self) -> Result<()>`.
+- `Session::prepare_commit`: verified at `session/mod.rs:4496` — `pub fn prepare_commit(&mut self) -> Result<PreparedCommit<'_>>`.
+- `PreparedCommit::set_metadata`: verified at `transaction/prepared.rs:107` — `pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>)` (advisory-only — dropped on `commit()` per Devil Gap 1).
+- `PreparedCommit::commit`: verified at `transaction/prepared.rs:124` — `pub fn commit(mut self) -> Result<EpochId>` (consumes self).
+- `GrafeoDB::session_with_cdc`: verified at `database/mod.rs:1728` — `pub fn session_with_cdc(&self, cdc_enabled: bool) -> Session` (takes `&self`).
+- `GrafeoDB::session`: verified at `database/mod.rs:1663` — `pub fn session(&self) -> Session` (used in tests for node creation + read-back).
+- `GrafeoLoroError::Bridge(String)`: verified at `src/error.rs:31` — existing variant covers the phantom-pre-check error path (NO new variant added — anti-plenger #5 Bloat).
+- `NodeId` Debug: verified at `grafeo-common-0.5.42/src/types/id.rs:53` — `impl fmt::Debug for NodeId` formats as `NodeId({})` or `NodeId(INVALID)`. Used by `{node_id:?}` in the error message.
+- `grafeo::Value` re-export: verified at `grafeo-0.5.42/src/lib.rs:91` — `pub use grafeo_common::types::{EdgeId, NodeId, Value};` — reachable as `grafeo::Value::Vector(...)` without an additional import in `src/hydration/vector.rs` (no new `use` needed).
+
+### Implementation
+- `handle_text_update` flow (7-step, all stubs filled, zero `// TODO(L3):` markers remaining):
+  1. `let embedding = generate_local_embedding(text)?;` — reuses Task 3 (anti-plenger #2 DRY).
+  2. `let mut session = self.db.session_with_cdc(false);` — CDC off (bypass-Loro invariant).
+  3. `session.begin_transaction()?;` — SI isolation; auto-rollback on early `?` return via `Session::Drop` (`session/mod.rs:5368-5383`).
+  4. `if session.get_node(node_id).is_none() { return Err(GrafeoLoroError::Bridge(...)); }` — phantom pre-check (DEVIL Answer 4).
+  5. `let vector_value = grafeo::Value::Vector(std::sync::Arc::<[f32]>::from(embedding));` — `Vec<f32>` → `Arc<[f32]>` conversion (std::sync stable since 1.54).
+  6. `session.set_node_property(node_id, EMBEDDING_PROPERTY, vector_value)?;` — bypass Loro (never writes to any Loro container).
+  7. `let mut prepared = session.prepare_commit()?; prepared.set_metadata(ORIGIN_LORO_BRIDGE, ORIGIN_LORO_BRIDGE); prepared.commit()?; Ok(())` — origin tag advisory-only (Devil Gap 1); epoch side-channel is the real echo filter.
+- Phantom pre-check decision: chose `if .is_none()` form over `.ok_or_else(...)?` per orchestrator's lean — fewer LOC + clarity (avoids binding an unused `Node`). The error variant `GrafeoLoroError::Bridge(format!("VectorOffloadManager: node {node_id:?} not found"))` matches the `parallel_hydrate_grafeo` precedent at `src/hydration/parallel.rs:67-69` (DRY).
+- Added `use crate::error::GrafeoLoroError;` to `src/hydration/vector.rs:6` (was `use crate::error::Result;` only) — needed for the phantom-pre-check error construction. NO new error variant added (anti-plenger #5 Bloat).
+- Deleted the L2 silencer tuple `let _ = (&self.db, node_id, text, EMBEDDING_PROPERTY, ORIGIN_LORO_BRIDGE);` (and the 3-line comment above it) — the 7 real algorithm calls now consume all 5 symbols.
+
+### Tests implemented (4)
+1. `vector_offload_writes_embedding_to_grafeo` (was `#[test] #[ignore]`, now `#[tokio::test]`): creates a `Doc` node via `db.session().create_node(&["Doc"])`, calls `mgr.handle_text_update(node_id, "hello world").await`, asserts `node.get_property(EMBEDDING_PROPERTY)` is `Some(&Value::Vector(arc))` with `arc.len() == DEFAULT_EMBEDDING_DIM`. PASS ✓.
+2. `vector_offload_never_writes_to_loro` (CRITICAL SPEC GATE — was `#[test] #[ignore]`, now `#[tokio::test]`): FRESH `LoroDoc::new()` + FRESH `GrafeoDB::new_in_memory()` with NO `SyncEngine` (per DEVIL Answer 6 design constraint). Calls `mgr.handle_text_update(node_id, "test text").await`. Asserts (a) `doc.get_deep_value()` is effectively empty (`Null` OR empty `Map` — discovered at first run that fresh `LoroDoc::new()` yields `Map(LoroMapValue({}))`, NOT `Null`; assertion adjusted to accept both), (b) `!contains_embedding_list(&deep, DEFAULT_EMBEDDING_DIM)` — recursive tree-walk helper asserts NO `LoroValue::List` of length `DEFAULT_EMBEDDING_DIM` with all-`Double(_)` elements anywhere in the tree, (c) cross-check: the Grafeo node DOES have the embedding (`Some(Value::Vector(arc))` with `arc.len() == DEFAULT_EMBEDDING_DIM`). PASS ✓.
+3. `vector_offload_is_idempotent` (was `#[test] #[ignore]`, now `#[tokio::test]`): calls `handle_text_update(node_id, "same text twice").await` twice, reads back via `read_embedding(&db, node_id)` helper, asserts `assert_eq!(first, second)` on the FULL `Vec<f32>`. PASS ✓.
+4. `vector_offload_different_texts_different_embeddings` (was `#[test] #[ignore]`, now `#[tokio::test]`): calls `handle_text_update` with "first text" then "second text" on the same node, reads back both, asserts `assert_ne!(first, second)` on the FULL `Vec<f32>`. PASS ✓.
+- All 4 tests use `#[tokio::test]` (handle_text_update is async — L1 decision 2 + DEVIL Answer 2 DEFEND).
+- Added 2 helper functions at the bottom of `tests/unit/vector_offload.rs`:
+  * `read_embedding(db: &GrafeoDB, node_id: NodeId) -> Vec<f32>` — shared read-back path used by tests 3 + 4 (DRY; anti-plenger #2).
+  * `contains_embedding_list(v: &LoroValue, dim: usize) -> bool` — recursive tree-walk used by test 2's defense-in-depth assertion (catches a vector leak in ANY nested container).
+- Removed `#![allow(unused_imports)]` silencer at module top (was line 121). Removed the `// TODO(L3): remove this silencer when filling test bodies` comment (was line 122). All imports are now consumed: `Arc` (tests 1/3/4), `GrafeoDB` (tests 1/3/4 + read_embedding), `Value` (tests 1/2 + read_embedding), `DEFAULT_EMBEDDING_DIM` (tests 1/2 + contains_embedding_list), `EMBEDDING_PROPERTY` (tests 1/2 + read_embedding), `VectorOffloadManager` (tests 1-4), `NodeId` (read_embedding signature), `LoroDoc` (test 2), `LoroValue` (test 2 + contains_embedding_list).
+- Module-level rustdoc: trimmed the L1-scope-boundary note (was "L1 writes ONLY contracts + #[ignore] test scaffolds"; now reflects L3 completion) + the "All 4 scaffolds are #[ignore]'d at L1" note (now "All 4 tests are un-ignored and run by default") + the L1 algorithm-hint text block (replaced with a brief note that L3 implemented the full 7-step flow). API cheat-sheet + edge-cases sections preserved (they document the verified API surface + edge cases — still accurate).
+
+### Verification
+- `cargo check --all-targets` → exit 0, 0 errors, 3 distinct warnings (ALL pre-existing Phase 1/2 dead-code: `app.rs:47-52` builder fields, `presence/socket.rs:6` room_id, `telemetry/health.rs:9-11` HealthProbe fields; 0 NEW warnings).
+- `cargo test --all` → **54 PASS + 0 FAIL + 2 IGNORED** (6 lib + 5 integration + 43 unit pass; 2 ignored = 1 P3T3 warning smoke `generate_local_embedding_logs_onnx_warning` + 1 P3T2 benchmark `parallel_hydrate_10k_nodes_under_500ms`). Matches the expected `50 (baseline) + 4 (newly un-ignored) = 54 PASS, 0 FAIL, 2 IGNORED` EXACTLY.
+- `rg -n "TODO\(L3\)|todo!|unimplemented!" src/hydration/vector.rs` → **0 matches** (exit 1).
+- `rg -n "allow\(unused_imports\)" tests/unit/vector_offload.rs` → **0 matches** (exit 1).
+- `rg -n "TODO\(L3\)|todo!\(\)|unimplemented!" src/hydration/vector.rs tests/unit/vector_offload.rs` → **0 matches** (exit 1).
+- Push-protection guard: `rg "ghp_[a-zA-Z0-9]{20,}" worklog.md src/ tests/ docs/` → NO_PAT_MATCHES (verified BEFORE commit). `.git/config` verified clean post-push (remote URL is plain `https://github.com/OndeHQ/grafeo-loro.git`; inline-token URL never persisted).
+
+### Anti-plenger self-audit
+- #1 Pure Functions: `handle_text_update(&self, NodeId, &str) -> Result<()>` — takes shared ref, returns Result, no global mutation. The Grafeo write is the explicit contract. ✓
+- #2 DRY: `generate_local_embedding` REUSED (Task 3); `ORIGIN_LORO_BRIDGE` + `EMBEDDING_PROPERTY` SSOT constants REUSED; `GrafeoLoroError::Bridge` existing variant REUSED (matches `parallel_hydrate_grafeo:67-69` precedent); `read_embedding` + `contains_embedding_list` helpers shared across tests (no copy-paste). ✓
+- #3 YAGNI: did NOT add `tracing` spans (Phase 5); did NOT add ONNX preload (Phase 6); did NOT pre-create HNSW index in `new` (caller concern); did NOT add a new error variant; did NOT add `vector_offload_inserts_into_hnsw_index` 5th test (Phase 5 searchability scope). ✓
+- #4 Performance: `Arc::<[f32]>::from(Vec<f32>)` is a single allocation (no per-element copy); `if session.get_node(node_id).is_none()` is one read per call (cheap — Grafeo in-memory); `read_embedding` reuses a single `db.session()` per call. ✓
+- #6 Immutability: `&self` receiver on `handle_text_update`; `Arc<GrafeoDB>` field; no `&mut` parameters; tests use `db.clone()` (Arc refcount bump, not deep copy). ✓
+- #7 Happy-Path Bias: phantom-pre-check catches caller bugs early (a typo in `NodeId` propagation would otherwise silently corrupt the Grafeo store with phantom-node properties — DEVIL Answer 4); `vector_offload_never_writes_to_loro` walks the FULL `LoroValue` tree recursively (catches a vector leak in ANY nested container, not just root); `vector_offload_is_idempotent` asserts byte-identical `Vec<f32>` (not just length). ✓
+- #8 Observability: no `tracing` spans at L3 — deferred to Phase 5 per L2 open question 3 (Task 4 spec doesn't require it). The Grafeo write is observable via `db.session().get_node(...)`. ✓
+- #9 Absolute Idempotency: `set_node_property` upserts at the value level (grafeo 0.5.42 `crud.rs:399` overwrites the existing property value — verified by L1 + DEVIL). `vector_offload_is_idempotent` test asserts byte-identical `Vec<f32>` on readback after 2 calls with the same text. ✓
+- #10 Fewest LOC: `handle_text_update` body is 14 lines of executable code (7 algorithm calls + 5-line phantom pre-check + 2-line Ok return); chose `if .is_none()` over `.ok_or_else(...)?` for the pre-check (fewer LOC + clearer — no unused `Node` binding); `read_embedding` helper is 12 lines (shared by tests 3 + 4 — saves ~12 LOC vs inlining per test); `contains_embedding_list` is 11 lines (recursive visitor — minimal Rust pattern). ✓
+- #11 Deletion over addition: removed all 8 `// TODO(L3):` markers + the 5-line `let _ = (...)` silencer tuple + the `#![allow(unused_imports)]` silencer + the `// TODO(L3): remove this silencer when filling test bodies` comment. Did NOT add a new error variant; did NOT add a new origin-tag constant; did NOT add a 5th HNSW-index test. ✓
+- #12 Native-first: uses native `grafeo::Value::Vector(Arc<[f32]>)` (verified), native `Arc::<[f32]>::from(Vec<f32>)` (std::sync, stable 1.54), native `grafeo::Session` lifecycle API, native `tokio::test` macro for async tests. ✓
+- #13 Oneline doc first: kept the 9-line rustdoc on `handle_text_update` (L1 decision + L2 trim — contract-only: signature + bypass-Loro invariant + origin tag + error envelope); the 7 algorithm steps have 1-2 line `//` comments inside the body (no over-prescription). ✓
+- #14 Never simplify basics: kept `handle_text_update` signature unchanged (`pub async fn(&self, NodeId, &str) -> Result<()>` — L1 + DEVIL + L2 DEFEND). Did NOT collapse the 7-step flow into fewer steps (each step is a distinct API call with a distinct verified citation). Did NOT short-circuit empty `text` (per orchestrator: `generate_local_embedding("")` returns a valid vector; no early-return). ✓
+- Plenger #1 Backward-compat: did NOT preserve the `todo!()` test bodies — all 4 implemented with real assertions. Did NOT preserve the `#![allow(unused_imports)]` silencer — removed (imports are now consumed). ✓
+- Plenger #2 Tautology: test 2 (`vector_offload_never_writes_to_loro`) cross-checks that the Grafeo node DOES have the embedding — proving the bypass actually went Grafeo-ward, not nowhere (a manager that no-op'd would pass a shallow bypass assertion but fail the cross-check). ✓
+- Plenger #3 Context Blindness: confirmed via L1+DEVIL that NO existing caller of `VectorOffloadManager` exists (the future caller `GrafeoLoroApp::generate_embedding` at `src/app.rs:123` is itself `unimplemented!()` — Phase 4+ scope). The contract is greenfield; L3's implementation is forward-compatible with the future caller's expected flow. ✓
+- Plenger #4 Band-Aids: the phantom pre-check is NOT a band-aid — it's a defensive-programming measure (DEVIL Answer 4) that catches caller bugs early (grafeo 0.5.42 silently writes to phantom node ids). The `read_embedding` + `contains_embedding_list` helpers are NOT band-aids — they're DRY utilities shared across tests. ✓
+- Plenger #5 Bloat: `generate_local_embedding` REUSED (Task 3); session lifecycle pattern matches `parallel_hydrate_grafeo:57-106` + `VertexBuilder::commit:443-511` precedent; `EMBEDDING_PROPERTY` SSOT; `ORIGIN_LORO_BRIDGE` SSOT; no new error variant; no new origin tag. ✓
+- Plenger #6 Hallucination: every cited API re-verified at file:line in `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/grafeo-*/src/` (and `loro-*/src/`, `loro-common-*/src/`). The fresh-`LoroDoc::get_deep_value()` returns `Map(LoroMapValue({}))` (NOT `Null`) discovery was empirically confirmed at first test run + assertion adjusted to accept either. ✓
+- Plenger #7 Happy-Path Bias: see anti-plenger #7 above. ✓
+- Plenger #8 Goodhart: all 4 tests assert on FULL data (not just length / not just type); test 2 cross-checks Grafeo has the embedding; test 3 asserts byte-identical `Vec<f32>`; test 4 asserts `assert_ne!` on FULL `Vec<f32>`. ✓
+
+Stage Summary:
+- Commit: `710c73c` — "P3T4-L3: implement VectorOffloadManager::handle_text_update + 4 tests; zero stubs"
+- Push: **SUCCESS** — `p3-vector-offload` pushed to `origin` (`743c250..710c73c`) via inline-token URL (token never persisted to `.git/config`; remote URL is plain `https://github.com/OndeHQ/grafeo-loro.git`).
+- Tests: **54 PASS, 0 FAIL, 2 IGNORED** (50 baseline + 4 newly un-ignored P3T4-L1 scaffolds; 2 remaining ignored = P3T3 warning smoke + P3T2 benchmark).
+- Stubs remaining in Task 4 scope: **0** (`rg "TODO\(L3\)|todo!|unimplemented!" src/hydration/vector.rs tests/unit/vector_offload.rs` → 0 matches).
+- Files touched: 2 (`src/hydration/vector.rs` — 46 lines changed: implemented `handle_text_update` body, added `GrafeoLoroError` import, deleted L2 silencer tuple + 5 TODO comments + 1 silencer-delete comment; `tests/unit/vector_offload.rs` — 286 lines changed: implemented 4 test bodies, switched `#[test]` → `#[tokio::test]`, removed `#[ignore]` from all 4, removed `#![allow(unused_imports)]` silencer, added `read_embedding` + `contains_embedding_list` helpers, trimmed module rustdoc to reflect L3 completion).
+- API discrepancy: `LoroDoc::new().get_deep_value()` returns `LoroValue::Map(LoroMapValue({}))` (an EMPTY Map), NOT `LoroValue::Null` as the L1+DEVIL cheat-sheet suggested. Resolution: assertion in test 2 adjusted to accept either `Null` OR an empty `Map` (both are "effectively empty" for a fresh disconnected LoroDoc). Cheat-sheet text in the test module rustdoc updated to reflect this (`Returns the full document as a LoroValue::Map (or Null for an empty doc)`).
+- Ready for HUNT: **YES** — zero stubs in Task 4 scope; all 4 tests pass with anti-Goodhart shapes; `handle_text_update` implements the full 7-step flow with verified API calls; no new error variant / origin tag / constant added; no `#[ignore]` on any Task 4 test; no `#![allow(unused_imports)]` silencer.
