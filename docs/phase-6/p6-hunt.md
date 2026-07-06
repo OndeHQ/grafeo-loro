@@ -167,3 +167,16 @@
   - `MutationBatcher`, `SyncEngine`, `apply_loro_op`, `BridgeMaps`, `CompressedPayload`, `CompressedPayload::compress_to_wire`, `VectorOffloadManager`, `LoroOp`, `GraphValue`, `PresencePayload`, `PeerId` — all verified in #6 hunt.
 - 0 hallucinated APIs. README prose is accurate to the codebase.
 
+## L3 Risk R4: T2 deferred child spans
+
+**Hunt**: `rg 'defer|Deferr' docs/phase-6/instrument-plan.md`
+
+**Resolution**: REFUTED — actionable, not rot-hiding.
+
+- The deferred-note (lines 251-272) has a SPECIFIC trigger condition: "Deferred until Phase 6 T1 (unimplemented!() replacement) is done — child spans on panicking bodies are observationally pointless." (line 251).
+- Concrete reason: child spans require inline `tracing::info_span!(...)` calls inside method bodies (line 253); bodies are currently `unimplemented!()` (would panic before any child span could fire).
+- Concrete L3 placement instructions provided (lines 255-270): a table mapping each of the 13 child spans to its host method (e.g., `decompress_snapshot` → `GrafeoLoroApp::hydrate` after `storage.load`).
+- Line 272 explicitly states the L3 action: "L3 adds inline `info_span!` calls for the children when bodies are written."
+- This is honest tech-debt documentation with a clear trigger (T1 completion), NOT permanent rot-hiding. The trigger is conditional on a future phase (T1 was user-excluded for P6), but the deferral is technically correct (can't instrument a panicking body).
+- **NIT**: to guard against permanent rot, the note could add a "re-evaluate when T1 is scoped" reminder. Currently relies on the reader to follow up. Low-priority.
+
