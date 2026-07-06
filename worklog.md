@@ -430,3 +430,44 @@ Stage Summary:
   4. **`Vec<String>` for `VertexEntity::labels` (NIT)**: per lorosurgeon lib.rs, plain `Vec<T>` (no `#[loro(movable)]`) uses Myers LCS diffing — produces minimal insert/delete ops. This is fine for `labels`, but if labels are ever reordered by drag-drop in the UI, identity is NOT preserved (each item is just a positional string). Acceptable since labels are a set semantically; flagged for awareness.
   5. **`sync_tree_move_to_grafeo` skeleton in `src/schema/tree.rs` (MINOR)**: it has an `unimplemented!()` body (Phase 1 L1 non-Phase-1 skeleton). Phase 2 Task 2 will implement it. L1 for Task 1 deliberately did NOT touch it — out of scope.
 - Commit hash: `a8786c5` (on top of `d697ab2` which committed the orchestrator's setup worklog entry).
+
+---
+Task ID: P2-DEVIL
+Agent: Devil's Advocate
+Task: Critique P2-L1 scaffolder output for Phase 2 Task 1
+
+Work Log:
+- Read worklog.md end-to-end (432 lines): Phase 1 fully complete (10/10 tests pass, 0 ignored; zero TODOs in src/bridge, src/types, src/error, src/constants). 41 `unimplemented!()` remain in non-Phase-1 modules as pre-existing L1 skeletons (out of Phase 1 scope). ORCH-P2-SETUP initialized Phase 2 on branch `p2-derives`, picked Task 1 (lorosurgeon derives). P2-L1 verified derives compile + wrote 4 `#[ignore] todo!()` roundtrip test scaffolds in `tests/unit/schema_roundtrip.rs`.
+- Confirmed on branch `p2-derives` (HEAD = `6434657 P2-L1: worklog entry — derives compile, lorosurgeon 0.2.1 confirmed`).
+- Re-ran `cargo check --all-targets`: ✅ exit 0, 5 pre-existing lib dead-code warnings (hydration/vector.rs, presence/socket.rs, telemetry/health.rs — Phase-1 carryover), 0 new warnings from L1 work.
+- Re-ran `cargo test --no-run --all`: ✅ all 3 test binaries compile (`unittests`, `integration-…`, `unit-…`). L1's compile claim VERIFIED.
+- `grep -n lorosurgeon Cargo.lock`: `lorosurgeon v0.2.1` (line 1202) and `lorosurgeon-derive v0.2.1` (line 1216). `cargo tree -i lorosurgeon` → `lorosurgeon v0.2.1`. `cargo search lorosurgeon` → latest published = `0.2.1`. L1's version claim VERIFIED — `0.3` does NOT exist on crates.io.
+- Verified every mandated attribute in `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lorosurgeon-derive-0.2.1/src/attrs.rs`:
+  - `#[key]` (line 19, 96, 102-105) — sets `FieldAttrs::is_key = true`. ✓
+  - `#[loro(text)]` (line 24, 132-133) — sets `FieldAttrs::text = true` → `LoroText` with char-level LCS. ✓
+  - `#[loro(movable)]` (line 23, 128-130) — sets `FieldAttrs::movable = true` → `LoroMovableList` with `mov()`/`set()`. ✓
+- Verified L3's needed API surface in `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lorosurgeon-0.2.1/src/`:
+  - `RootReconciler::new(LoroMap)` at `reconcile.rs:297-300`. ✓
+  - `<T as Hydrate>::hydrate_map(&LoroMap)` at `hydrate.rs:64` (method) and `:127` (free fn). ✓
+  - `Reconcile::key() -> LoadKey<Self::Key>` at `reconcile.rs:95`; `LoadKey::NoKey / KeyNotFound / Found(K)` at `:51-58`. ✓
+  - `RootReconciler` implements `Reconciler` with ONLY `map()` succeeding (everything else errors with `TypeMismatch { expected: "map", found: ... }` at `reconcile.rs:303-369`) — confirms it works for struct-typed entities (which call `r.map()?` first) but NOT for unit structs (which call `r.null()`) or mixed enums (which call `r.str()`). The 4 entities are all named structs → safe. ✓
+  - Cross-checked L1's roundtrip pattern against lorosurgeon's own integration tests: `lorosurgeon-0.2.1/tests/integration.rs:151-162` uses IDENTICAL pattern (`RootReconciler::new(map.clone())` + `pos.reconcile(reconciler)` + `doc.commit()` + `Position::hydrate_map(&map)` + `assert_eq!`). L1's pattern is canonical. ✓
+- Verified the keyed-diffing dispatch path: `lorosurgeon-0.2.1/src/reconcile/movable_list.rs:57-73` checks `has_keys = items.first().is_some_and(|item| !matches!(item.key(), LoadKey::NoKey))`; if true → `reconcile_keyed` (uses `mov()` + `set()` preserving CRDT identity); if false → `reconcile_positional` (positional `set`/`insert`/`delete`). The derive codegen for `#[loro(movable)]` is at `lorosurgeon-derive-0.2.1/src/reconcile/struct_impl.rs:93-100` and calls `reconcile_vec_movable`. ✓
+- Read `docs/grafeo-loro.architecture.md` lines 150-272 (§5 Root Container Schema, §6 lorosurgeon mapping, §7 OrderedCollection + T_CHILD) and lines 1060-1085 (§27 deps). Confirmed §27 line 1071 says `lorosurgeon = "0.3"` (wrong — should be `"0.2"`); §5 line 164 says `T_CHILD (LoroTree)` while §7's `OrderedCollection` uses `#[loro(movable)]` (= `LoroMovableList`, NOT `LoroTree`) — the two concepts are conflated under the word "tree" in the doc.
+- Read `src/schema/{vertex,edge,tree}.rs`: `VertexEntity { labels: Vec<String>, properties: HashMap<String, LoroProperty>, #[loro(text)] description: String }`; `EdgeEntity { label, src, dst, properties }`; `OrderedCollection { #[loro(movable)] items: Vec<TreeNode> }`; `TreeNode { #[key] node_id, title }`. The `sync_tree_move_to_grafeo` skeleton at `tree.rs:19-26` takes raw `NodeId`s, NOT `TreeNode`s — confirming `TreeNode` belongs to `OrderedCollection`, NOT to T_CHILD.
+- Read `src/types/values.rs:39-71`: confirmed `LoroProperty` has manual `Hydrate`/`Reconcile` impls producing bare `LoroValue`s (Phase 1 orchestrator Gap 2 decision). No test in the codebase verifies the bare-value wire shape directly — the only verification is transitive via entity roundtrips.
+- Read `src/app.rs:122-143`: `VertexBuilder` is a fluent API with `with_label`/`with_property`/`commit()` — Phase 2 Task 3 territory. Uses `NodeId` (re-exported `grafeo::NodeId` per `src/types/ids.rs:10`). L1 Task 1 did NOT block Task 3.
+- Read `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/loro-1.13.6/src/lib.rs:2871,2933-3084`: `LoroTree` is a separate container type with `create(parent)`, `mov(target, parent)`, `get_parent(target)` and uses `TreeID` (native Loro type, not `String`) as identity. Confirms T_CHILD (`LoroTree`) and `OrderedCollection` (`LoroMovableList`) are different concepts — the existing `TreeNode` struct has no `parent_id` field and cannot represent a T_CHILD tree node.
+- Wrote critique artifact: `docs/critiques/p2-l1-devil.md` (397 lines). Covers verification matrix, 1 BLOCKER + 3 MAJOR + 5 MINOR + 3 NIT findings with concrete solutions, cross-phase coupling analysis, anti-plenger audit.
+- Did NOT modify any `src/` or `tests/` files (Devil is read-only on source). Only wrote to `docs/critiques/p2-l1-devil.md` and this worklog entry.
+
+Stage Summary:
+- BLOCKER count: 1 (B1 — LoroProperty manual Hydrate/Reconcile encoding is not isolated-tested; a 1-line regression to `#[derive(Hydrate, Reconcile)]` would silently flip to tagged-union encoding while all existing tests stay green — Goodhart's Law violation).
+- MAJOR count: 3 (M1 — `OrderedCollection` identity-preservation has no dedicated scaffold; M2 — architecture §5/§7 conflate `T_CHILD` (`LoroTree`) with `OrderedCollection` (`LoroMovableList`); M3 — `tree_node_roundtrip` doesn't actually exercise `#[key]` — only `OrderedCollection` does).
+- MINOR count: 5 (m1 doc version drift `0.3`→`0.2`; m2 missing lorosurgeon imports; m3 PhantomData noise; m4 ambiguous "root LoroMap" wording; m5 unnecessary `#![allow(missing_docs)]`).
+- NIT count: 3 (n1 verbose module doc; n2 project-structure doc drift on `ROOT_TREE`; n3 informational only).
+- L2 must address (priority order): (1) B1 add `loro_property_encoding_roundtrip` scaffold; (2) M1 add `ordered_collection_reorder_preserves_identity` scaffold; (3) M3 split `tree_node_roundtrip` into `tree_node_flat_roundtrip` + `tree_node_key_extraction`; (4) M2 add `Known Ambiguity` note to architecture §7 distinguishing `OrderedCollection` (`LoroMovableList`) from `T_CHILD` (`LoroTree`); (5) m1 fix architecture §27 line 1071 `0.3`→`0.2`; (6) m2 add lorosurgeon imports; (7) m3 delete PhantomData lines; (8) m4 reword module doc step 2; (9) m5 delete `#![allow(missing_docs)]`; (10) n1 trim module doc; (11) n2 update project-structure doc on `ROOT_TREE` deletion.
+- Top findings: (1) B1 — `LoroProperty` wire-shape regression would be invisible to existing tests; (2) M1 — `OrderedCollection`'s entire purpose (identity-preserving `mov()` ops) is unverified; (3) M2 — architecture conflation will cause Phase 2 Task 2 L1 to flounder; (4) M3 — test name `tree_node_roundtrip` lies about what it tests (Goodhart); (5) m1 — doc version drift invites a future agent to "fix" Cargo.toml to match the wrong doc.
+- L1 verification bar: HIGH. Every API claim independently verified against `~/.cargo/registry/src/`. No hallucination. The L1 worklog entry matches Phase 1 Devil's depth standard. The critique is on scaffold adequacy and contract coverage, not on factual errors.
+- Critique artifact: docs/critiques/p2-l1-devil.md
+- Commit hash: 9290072 (on `p2-derives`)
