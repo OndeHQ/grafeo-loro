@@ -28,3 +28,14 @@
   - Line 343 (I3c): `parallel_hydrate_grafeo` API error check, immediately followed (lines 350-356) by `assert_eq!(fresh_db.node_count(), state.live_node_keys.len())` — a real 1:1 hydration materialization comparison. The `is_ok()` is a precondition, not the actual invariant.
 - Module header (line 225-229) explicitly states the non-tautology contract: "NO `assert!(result.is_ok())` shortcuts" — and the code honors it.
 
+## Anti-Pattern #3: Context Blindness
+
+**Hunt**: `rg 'tokio::runtime|block_on|spawn' fuzz/fuzz_targets/consistency.rs` + `rg '^use ' fuzz/fuzz_targets/consistency.rs`
+
+**Verdict**: NOT FOUND — clean by inspection.
+
+- Fuzz harness uses `tokio::runtime::Builder::new_current_thread()` (lines 287, 382, 601) — CORRECT for fuzzing (deterministic, lower overhead than multi_thread).
+- `rt.block_on(async move {...})` (lines 299, 387, 604) is the ONLY way to enter tokio from libfuzzer's synchronous entry point — NOT a context violation.
+- `tokio::spawn` (line 320) used correctly inside runtime to run `MutationBatcher::run` concurrently.
+- Imports use real `grafeo_loro` crate APIs: `bridge::{apply_loro_op, BridgeMaps}`, `compression::CompressedPayload`, `config::CompressionType`, `constants::*`, `types::{EpochId, PresencePayload, ...}`, `VectorOffloadManager`. No reinvented logic — the harness respects the global async architecture.
+
