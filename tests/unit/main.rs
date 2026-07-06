@@ -5,8 +5,10 @@
 //! - [`tree_move`]: `sync_tree_move_to_grafeo` reparenting scaffolds (Phase 2 Task 2).
 //! - [`vertex_builder`]: `app::VertexBuilder` fluent API scaffolds (Phase 2 Task 3).
 //! - [`compression`]: `compression::wrapper` codec roundtrip scaffolds (Phase 3 Task 1).
+//! - [`parallel_hydrate`]: `hydration::parallel::parallel_hydrate_grafeo` scaffolds (Phase 3 Task 2).
 
 mod compression;
+mod parallel_hydrate;
 mod schema_roundtrip;
 mod tree_move;
 mod vertex_builder;
