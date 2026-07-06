@@ -1,19 +1,18 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::bridge::{BridgeMaps, SyncEngine};
-use crate::config::{CompressionType, SsotMode};
-use crate::error::{GrafeoLoroError, Result};
-use crate::storage::StorageBackend;
-use crate::types::{GraphValue, NodeId, PresencePayload};
+use lorosurgeon::reconcile::RootReconciler;
+use lorosurgeon::Reconcile;
 
-// L3 will need these when implementing `VertexBuilder::commit` (kept here as
-// a hint; `#[allow(unused)]` silences the unused-import warning until then):
-//   use std::sync::atomic::Ordering;
-//   use crate::bridge::grafeo_tx::apply_loro_op;
-//   use crate::constants::{ORIGIN_LORO_BRIDGE, ROOT_VERTICES};
-//   use crate::types::events::LoroOp;
+use crate::bridge::{apply_loro_op, BridgeMaps, SyncEngine};
+use crate::config::{CompressionType, SsotMode};
+use crate::constants::{ORIGIN_LORO_BRIDGE, ROOT_VERTICES};
+use crate::error::{GrafeoLoroError, Result};
+use crate::schema::VertexEntity;
+use crate::storage::StorageBackend;
+use crate::types::events::LoroOp;
+use crate::types::{GraphValue, LoroProperty, NodeId, PresencePayload};
 
 /// Top-level app facade.
 ///
@@ -361,76 +360,180 @@ impl VertexBuilder {
     /// - `<VertexEntity as Reconcile>::reconcile<R: Reconciler>(&self, R) -> Result<(), ReconcileError>` — `reconcile.rs:92` (Phase 2 Task 1 verified)
     /// - `<VertexEntity as Hydrate>::hydrate_map(&LoroMap) -> Result<VertexEntity, HydrateError>` — `hydrate.rs:64` (Phase 2 Task 1 verified)
     pub fn commit(self) -> Result<NodeId> {
-        // TODO(P2T3-L3): 1. Strict-reject `Vector`/`Map`/`List` properties
-        //                  BEFORE any Loro/Grafeo write (Q2 — fail loud):
-        //                    for (_k, v) in &self.properties {
-        //                        if matches!(v, GraphValue::Vector(_) | GraphValue::Map(_) | GraphValue::List(_)) {
-        //                            return Err(GrafeoLoroError::UnsupportedLoroType(format!(
-        //                                "VertexBuilder::commit: property has unsupported GraphValue variant {:?} \
-        //                                 (LoroProperty supports only Null/Bool/Integer/Float/String; Vector/Map/List \
-        //                                 will be wired in Phase 3 §17 vector-offload)", v)));
-        //                        }
-        //                    }
-        // TODO(P2T3-L3): 2. Generate fresh `loro_key` + build `VertexEntity`:
-        //                    let loro_key = format!("V/{}", self.loro_key_counter.fetch_add(1, Ordering::Relaxed));
-        //                    let entity = VertexEntity {
-        //                        labels: self.labels.clone(),
-        //                        properties: /* GraphValue → LoroProperty, all-strict-reject checked above */,
-        //                        description: String::new(), // default — see struct doc (M3)
-        //                    };
-        // TODO(P2T3-L3): 3. Acquire Loro write lock + tag origin + reconcile + commit
-        //                  (single `RwLock` write guard serializes
-        //                  `set_next_commit_origin + commit` per
-        //                  `bridge::sync_engine` module doc):
-        //                    {
-        //                        let doc = self.sync_engine.loro_doc.write();
-        //                        doc.set_next_commit_origin(ORIGIN_LORO_BRIDGE); // echo prevention — see B1 filter
-        //                        let v_map = doc.get_map(ROOT_VERTICES);
-        //                        let node_map = v_map.get_or_create_container(&loro_key, loro::LoroMap::new())?;
-        //                        entity.reconcile(lorosurgeon::reconcile::RootReconciler::new(node_map.clone()))?;
-        //                        doc.commit(); // fires subscriber synchronously; filtered by origin
-        //                    } // release Loro write lock
-        // TODO(P2T3-L3): 4. Open Grafeo session (CDC disabled — echo prevention)
-        //                  + begin tx (default isolation = SnapshotIsolation; see method doc):
-        //                    let mut session = self.sync_engine.grafeo_db.session_with_cdc(false);
-        //                    session.begin_transaction()?;
-        // TODO(P2T3-L3): 5. Apply via the SSOT apply path (architecture §20 — DRY):
-        //                    let op = LoroOp::UpsertNode {
-        //                        loro_key: loro_key.clone(),
-        //                        labels: self.labels.clone(),
-        //                        properties: self.properties.clone(),
-        //                    };
-        //                    apply_loro_op(&session, &op, self.sync_engine.maps())?;
-        //                  - On Err: COMPENSATE Loro (re-acquire write lock,
-        //                    `v_map.delete(&loro_key)?`, `doc.commit()` with
-        //                    `ORIGIN_LORO_BRIDGE`). Drop `session` (auto-rollback).
-        //                    Return the Grafeo error.
-        // TODO(P2T3-L3): 6. Prepare + commit Grafeo tx (advisory metadata dropped on commit — Devil Gap 1):
-        //                    let mut prepared = session.prepare_commit()?;
-        //                    prepared.set_metadata("origin", ORIGIN_LORO_BRIDGE); // advisory only
-        //                    let _epoch = prepared.commit()?;
-        //                  - On Err: COMPENSATE Loro (same as step 5). Return
-        //                    the Grafeo error.
-        // TODO(P2T3-L3): 7. Recover the grafeo-assigned `NodeId` from
-        //                  `BridgeMaps` (apply_loro_op's apply_upsert_node
-        //                  inserted the binding via `maps.insert_node`):
-        //                    let grafeo_node_id = self.sync_engine.maps()
-        //                        .node_id_map.read().get(&loro_key)
-        //                        .copied()
-        //                        .expect("apply_loro_op inserted the binding");
-        // TODO(P2T3-L3): 8. `Ok(grafeo_node_id)`
-        //
-        // NOTE: step 14 of the prior P2T3-L1 TODO (defensive epoch
-        // side-channel insert) is DELETED — `session_with_cdc(false)` emits
-        // no CDC event, so the side-channel is dead code (P2T3-DEVIL m1).
-        let _ = (
-            self.sync_engine,
-            self.loro_key_counter,
-            self.labels,
-            self.properties,
+        // 1. Strict-reject `Vector`/`Map`/`List` properties BEFORE any Loro/
+        //    Grafeo write (Q2 — fail loud). LoroProperty supports only the
+        //    JSON-shaped subset (Null/Bool/Integer/Float/String); the other
+        //    GraphValue variants will be wired in Phase 3 §17 vector-offload.
+        for v in self.properties.values() {
+            if matches!(
+                v,
+                GraphValue::Vector(_) | GraphValue::Map(_) | GraphValue::List(_)
+            ) {
+                return Err(GrafeoLoroError::UnsupportedLoroType(format!(
+                    "VertexBuilder::commit: property has unsupported GraphValue variant {v:?} \
+                     (LoroProperty supports only Null/Bool/Integer/Float/String; \
+                     Vector/Map/List will be wired in Phase 3 §17 vector-offload)"
+                )));
+            }
+        }
+
+        // 2. Generate fresh `loro_key` (AtomicU64 counter — see struct doc)
+        //    and build the Loro-side `VertexEntity`. The strict reject above
+        //    makes the `GraphValue → LoroProperty` conversion total.
+        let loro_key = format!("V/{}", self.loro_key_counter.fetch_add(1, Ordering::Relaxed));
+        let mut loro_props = HashMap::with_capacity(self.properties.len());
+        for (k, v) in &self.properties {
+            loro_props.insert(k.clone(), LoroProperty::try_from(v.clone())?);
+        }
+        let entity = VertexEntity {
+            labels: self.labels.clone(),
+            properties: loro_props,
+            description: String::new(), // default — see struct doc (M3)
+        };
+        tracing::debug!(
+            loro_key = %loro_key,
+            labels = ?self.labels,
+            property_count = self.properties.len(),
+            "VertexBuilder::commit: starting Loro-first atomic write"
         );
-        Err(GrafeoLoroError::Bridge(
-            "VertexBuilder::commit not yet implemented".into(),
-        ))
+
+        // 3. Acquire Loro write lock + tag origin + reconcile + commit. The
+        //    single `RwLock` write guard serializes `set_next_commit_origin +
+        //    commit` per the `bridge::sync_engine` module doc (so a peer's
+        //    commit cannot interleave and pick up our origin tag).
+        //    `ensure_mergeable_map` (loro-1.13.6/src/lib.rs:2247) is the
+        //    non-deprecated successor to `get_or_create_container`.
+        {
+            let doc = self.sync_engine.loro_doc.write();
+            doc.set_next_commit_origin(ORIGIN_LORO_BRIDGE); // echo prevention — see B1 filter
+            let v_map = doc.get_map(ROOT_VERTICES);
+            let node_map = v_map.ensure_mergeable_map(&loro_key)?;
+            entity
+                .reconcile(RootReconciler::new(node_map))
+                .map_err(|e| GrafeoLoroError::Bridge(format!("Loro reconcile failed: {e}")))?;
+            doc.commit(); // fires subscriber synchronously; filtered by origin (B1)
+        } // release Loro write lock
+
+        // 4. Open Grafeo session (CDC disabled — echo prevention on the
+        //    Grafeo→Loro path) + begin tx. Default isolation is
+        //    `SnapshotIsolation` (grafeo-engine-0.5.42/src/transaction/manager.rs:55)
+        //    — `commit()` is write-only (single `create_node_with_props`),
+        //    no read-then-write race, so SnapshotIsolation suffices.
+        let mut session = self.sync_engine.grafeo_db.session_with_cdc(false);
+        session.begin_transaction()?;
+
+        // 5. Apply via the SSOT apply path (architecture §20 — DRY).
+        //    `apply_loro_op` looks up `loro_key` in `node_id_map`; on miss,
+        //    `create_node_with_props` + `maps.insert_node` (grafeo_tx.rs:124-144).
+        //    On Err: COMPENSATE Loro (delete the just-inserted entry); drop
+        //    `session` (Drop auto-rollbacks the active tx per
+        //    session/mod.rs:5368-5383). Return the ORIGINAL Grafeo error.
+        let op = LoroOp::UpsertNode {
+            loro_key: loro_key.clone(),
+            labels: self.labels.clone(),
+            properties: self.properties.clone(),
+        };
+        if let Err(grafeo_err) = apply_loro_op(&session, &op, self.sync_engine.maps()) {
+            compensate_loro_vertex(&self.sync_engine, &loro_key, &grafeo_err, &self.labels, &self.properties);
+            drop(session); // auto-rollback Grafeo tx
+            return Err(grafeo_err);
+        }
+
+        // 6. Prepare + commit Grafeo tx. `set_metadata` is advisory only —
+        //    Devil Gap 1 established that grafeo drops it on commit, so the
+        //    epoch side-channel (Phase 1) is the real echo-prevention
+        //    mechanism on the outbound path (not exercised here since
+        //    `session_with_cdc(false)` emits no CDC event).
+        let mut prepared = session.prepare_commit()?;
+        prepared.set_metadata("origin", ORIGIN_LORO_BRIDGE);
+        if let Err(raw_err) = prepared.commit() {
+            // `prepared` was consumed by `commit()`; on Err it auto-rolled
+            // back via `Drop` (transaction/prepared.rs:141-148). The session
+            // tx is also auto-rolled back when `session` drops below.
+            // Wrap the raw grafeo::Error into GrafeoLoroError::Grafeo(_) via
+            // the `#[from]` impl at src/error.rs:9.
+            let grafeo_err: GrafeoLoroError = raw_err.into();
+            compensate_loro_vertex(&self.sync_engine, &loro_key, &grafeo_err, &self.labels, &self.properties);
+            return Err(grafeo_err);
+        }
+
+        // 7. Recover the grafeo-assigned `NodeId` from `BridgeMaps`
+        //    (`apply_loro_op`'s `apply_upsert_node` inserted the binding via
+        //    `maps.insert_node` at grafeo_tx.rs:142).
+        let grafeo_node_id = self
+            .sync_engine
+            .maps()
+            .node_id_map
+            .read()
+            .get(&loro_key)
+            .copied()
+            .ok_or_else(|| {
+                GrafeoLoroError::Bridge(format!(
+                    "BridgeMaps missing binding for {loro_key} after apply_loro_op"
+                ))
+            })?;
+
+        tracing::debug!(
+            loro_key = %loro_key,
+            node_id = ?grafeo_node_id,
+            "VertexBuilder::commit: atomic write complete"
+        );
+
+        // 8. Return the grafeo-assigned NodeId.
+        Ok(grafeo_node_id)
+    }
+}
+
+/// Compensate a `commit()` Loro write by deleting the just-inserted vertex
+/// entry under `loro_key` and committing with `ORIGIN_LORO_BRIDGE` (so the
+/// delete also bypasses the inbound subscriber filter — P2T3-L2 B1).
+///
+/// Q7 compensation-failure contract: if the Loro compensation ALSO fails,
+/// log at `error!` with full context (loro_key, labels, properties, both
+/// errors) and return — the caller returns the ORIGINAL Grafeo error (not
+/// the Loro compensation error). The system may be inconsistent (Loro has
+/// the vertex, Grafeo does not) — flagged for caller-side retry.
+fn compensate_loro_vertex(
+    sync_engine: &SyncEngine,
+    loro_key: &str,
+    grafeo_err: &GrafeoLoroError,
+    labels: &[String],
+    properties: &HashMap<String, GraphValue>,
+) {
+    // Hold the Loro write guard across `set_next_commit_origin + delete +
+    // commit` per the `bridge::sync_engine` module doc (so no peer commit can
+    // interleave and pick up our origin tag).
+    let comp_result: std::result::Result<(), loro::LoroError> = {
+        let doc = sync_engine.loro_doc.write();
+        doc.set_next_commit_origin(ORIGIN_LORO_BRIDGE);
+        let v_map = doc.get_map(ROOT_VERTICES);
+        match v_map.delete(loro_key) {
+            Ok(()) => {
+                doc.commit();
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    };
+    match comp_result {
+        Ok(()) => {
+            tracing::debug!(
+                loro_key = %loro_key,
+                grafeo_error = %grafeo_err,
+                "VertexBuilder::commit: Loro compensation succeeded (vertex entry deleted)"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                loro_key = %loro_key,
+                labels = ?labels,
+                properties = ?properties,
+                grafeo_error = %grafeo_err,
+                loro_compensation_error = %e,
+                "VertexBuilder::commit: Loro compensation FAILED after Grafeo error; \
+                 system may be inconsistent (Loro has the vertex, Grafeo does not). \
+                 Returning original Grafeo error."
+            );
+        }
     }
 }
