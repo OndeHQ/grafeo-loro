@@ -5729,3 +5729,36 @@ Stage Summary:
 - **cargo test**: ✅ 82 passed / 0 failed / 2 ignored (matches L3 baseline).
 - **PAT safety**: ✅ no `ghp_[a-zA-Z0-9]{20,}` strings in committed files.
 - **Commit hash**: <to be filled after commit>
+
+---
+Task ID: P5-L2-2
+Agent: Fixer Round 2
+Task: Address P5-HUNT-1 findings (2 MAJOR + 1 MINOR + 2 NIT deferred)
+
+Work Log:
+- Step 1: Read full P5-HUNT-1 critique (`docs/critiques/p5-hunt.md`) + worklog tail. Confirmed 2 MAJOR + 1 MINOR + 2 NIT, verdict L2_REENTRY. Baseline: 82/82 tests, 0 errors, 1 pre-existing warning (`presence::socket::room_id`).
+- Step 2: Verified MAJOR 1 location at `src/bridge/batcher.rs:317` — `m.inbound_events.add(op_count as u64, &[]);` inside the per-flush success branch (post `spawn_blocking` join). Counter is also bumped at `src/bridge/sync_engine.rs:477` per-op forward — confirmed double-count path.
+- Step 3: Verified MAJOR 2 inbound location at `src/bridge/sync_engine.rs:477` — `m.inbound_events.add(1, &[]);` inside `InboundMsg::Op(op)` arm. `op: LoroOp` enum has 5 variants (`UpsertNode`, `UpsertEdge`, `DeleteNode`, `DeleteEdge`, `TreeMove`) — derivable to `vertex`/`edge`/`tree` (≤10 lines, no algorithm rework).
+- Step 4: Verified MAJOR 2 outbound location at `src/bridge/sync_engine.rs:569` — `m.outbound_events.add(1, &[]);` inside the outbound worker loop after `apply_change_event_to_loro` success. `msg.payload.entity_id` is `grafeo::cdc::EntityId` (enum: `Node`/`Edge`/`Triple`, `#[non_exhaustive]`).
+- Step 5: Verified MINOR 1 locations at `src/telemetry/health.rs:20` (module doc-comment `1. **LoroDoc lock poison** — ...`) and `:161-162` (inline comment `// 1. LoroDoc lock poison: try_read() returns Option ... Some if unpoisoned, None if poisoned`). Both misrepresent `parking_lot::RwLock::try_read()` semantics — parking_lot has NO poisoning.
+- Step 6: Confirmed `use opentelemetry::KeyValue;` already imported at `src/bridge/sync_engine.rs:57` — no new import needed (echo_filtered at lines 400 + 546 + 650 already uses the same pattern).
+- Step 7 (MAJOR 1 fix): Removed `m.inbound_events.add(op_count as u64, &[]);` at `batcher.rs:317`, replaced with a 4-line comment citing Devil Q12 (per-op forward, NOT per-flush aggregate) + HUNT-1 MAJOR 1. cargo check: 0 errors, 1 pre-existing warning.
+- Step 8 (MAJOR 2 inbound fix): Wrapped `inbound_events.add(1, &[])` → `inbound_events.add(1, &[KeyValue::new("origin", "loro"), KeyValue::new("event_type", event_type)])` with a 5-arm `match &op` (vertex/edge/edge/edge/tree). cargo check: 0 errors.
+- Step 9 (MAJOR 2 outbound fix): Wrapped `outbound_events.add(1, &[])` → `outbound_events.add(1, &[KeyValue::new("origin", "grafeo"), KeyValue::new("event_type", event_type)])` with a `match &msg.payload.entity_id` (`Node → vertex, Edge → edge, Triple → triple, _ → other`). Initially hit `E0004 non_exhaustive patterns` because `EntityId` is `#[non_exhaustive]` — added `_ => "other"` wildcard arm with comment explaining it covers future variants (e.g. hyperedge) until arch §23.1 is amended. cargo check: 0 errors, 1 pre-existing warning.
+- Step 10 (MINOR 1 fix): Updated `health.rs:20` module doc-comment `1. **LoroDoc lock poison**` → `1. **Loro doc read accessibility**` with 3-line explanation noting parking_lot has NO poisoning, `try_read()` returns `None` only when writer holds the lock. Updated inline comment at `health.rs:161-162` similarly. cargo check: 0 errors, 1 pre-existing warning.
+- Step 11 (verification): `rg "m\.inbound_events\.add\(op_count"` → 0 matches (MAJOR 1 confirmed removed). `rg "inbound_events\.add\(1, &\[\]\)|outbound_events\.add\(1, &\[\]\)"` in sync_engine.rs → 0 matches (MAJOR 2 confirmed labels added).
+- Step 12 (test run): `cargo test --all` → 6 + 5 + 71 = 82 passed, 0 failed, 2 ignored (matches baseline exactly; the 2 ignored are pre-existing `vector_embedding` manual-smoke tests gated behind `--ignored`).
+- Step 13 (NITs): Per HUNT-1 + workflow spec, deferred to Phase 6 — both are <5-line cosmetic items not worth the round-trip.
+
+Stage Summary:
+- MAJOR 1 (double-count `inbound_events`): FIXED — removed `batcher.rs:317` `m.inbound_events.add(op_count as u64, &[])` line; sole counter bump now at `sync_engine.rs` per-op forward boundary (Devil Q12).
+- MAJOR 2 (missing arch §23.1 row 1/2 labels): FIXED — derived `event_type` via `match` expression (polymorphism over conditionals, anti-plenger #8). Inbound: `LoroOp` → `vertex|edge|tree`. Outbound: `grafeo::cdc::EntityId` → `vertex|edge|triple|other`. Both also add `origin` label (`loro` inbound, `grafeo` outbound). `KeyValue` import was already present (line 57).
+- MINOR 1 (parking_lot doc misrepresentation): FIXED — `health.rs:20` + `:161-162` comments now correctly describe `try_read()` as write-lock detection, NOT poison detection.
+- NITs (2): deferred to Phase 6 per workflow spec.
+- cargo check: 0 errors, 1 pre-existing warning (`presence::socket::room_id` dead_code — unchanged from baseline).
+- cargo test: 82 passed / 0 failed / 2 ignored (matches P5-L3 + P5-HUNT-1 baseline).
+- Commit hash: <to be filled after commit>
+- Top 3 things P5-HUNT-2 should verify:
+  1. MAJOR 1 truly removed — `rg "inbound_events\.add\(op_count" src/` returns 0 matches; the only remaining `inbound_events.add(...)` is at `sync_engine.rs` per-op forward boundary (Devil Q12).
+  2. MAJOR 2 labels match arch §23.1 row 1/2 spec — `origin ∈ {loro, grafeo}` + `event_type ∈ {vertex, edge, tree, triple, other}`. Verify the `event_type` derivation mapping is correct (LoroOp::UpsertNode/DeleteNode → vertex; LoroOp::UpsertEdge/DeleteEdge → edge; LoroOp::TreeMove → tree; EntityId::Node → vertex, EntityId::Edge → edge, EntityId::Triple → triple, _ → other). Confirm no plenger-traits introduced (no `if/else` chains — pure `match` expressions; no production `unwrap()`/`expect()`).
+  3. MINOR 1 doc-only fix — verify `health.rs:20` + `:161-169` comments now correctly describe parking_lot semantics (NO poisoning, `try_read()` returns None only if writer holds lock). No behavioral change to `check()` method — `let loro_ok = self.doc.try_read().is_some();` at line 173 is unchanged.

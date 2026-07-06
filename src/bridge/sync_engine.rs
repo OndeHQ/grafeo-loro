@@ -472,9 +472,24 @@ impl SyncEngine {
                                 // row 1 — per-op forward boundary, distinct
                                 // from the subscriber-boundary
                                 // `inbound_event_count` test counter per Devil
-                                // Q12).
+                                // Q12). Labels `origin=loro` +
+                                // `event_type=<vertex|edge|tree>` per arch
+                                // §23.1 row 1 (P5-HUNT-1 MAJOR 2).
                                 if let Some(m) = metrics.as_ref() {
-                                    m.inbound_events.add(1, &[]);
+                                    let event_type = match &op {
+                                        LoroOp::UpsertNode { .. }
+                                        | LoroOp::DeleteNode { .. } => "vertex",
+                                        LoroOp::UpsertEdge { .. }
+                                        | LoroOp::DeleteEdge { .. } => "edge",
+                                        LoroOp::TreeMove { .. } => "tree",
+                                    };
+                                    m.inbound_events.add(
+                                        1,
+                                        &[
+                                            KeyValue::new("origin", "loro"),
+                                            KeyValue::new("event_type", event_type),
+                                        ],
+                                    );
                                 }
                                 if batch_tx.send(op).await.is_err() {
                                     break;
@@ -562,11 +577,29 @@ impl SyncEngine {
                         }
                         // P5-L3: bump `outbound_events` counter per CDC event
                         // successfully applied to Loro (architecture §23.1
-                        // row 2). Then stamp `last_sync_ts` (Devil M3 / Q10
-                        // — architecture §23.3 "last sync" = both inbound
-                        // flush AND outbound commit).
+                        // row 2). Labels `origin=grafeo` +
+                        // `event_type=<vertex|edge|triple>` derived from
+                        // `EntityId` variant per arch §23.1 row 2 (P5-HUNT-1
+                        // MAJOR 2). Then stamp `last_sync_ts` (Devil M3 /
+                        // Q10 — architecture §23.3 "last sync" = both
+                        // inbound flush AND outbound commit).
                         if let Some(m) = metrics.as_ref() {
-                            m.outbound_events.add(1, &[]);
+                            let event_type = match &msg.payload.entity_id {
+                                grafeo::cdc::EntityId::Node(_) => "vertex",
+                                grafeo::cdc::EntityId::Edge(_) => "edge",
+                                grafeo::cdc::EntityId::Triple(_) => "triple",
+                                // `EntityId` is `#[non_exhaustive]` — future
+                                // variants (e.g. hyperedge) collapse to
+                                // "other" until arch §23.1 is amended.
+                                _ => "other",
+                            };
+                            m.outbound_events.add(
+                                1,
+                                &[
+                                    KeyValue::new("origin", "grafeo"),
+                                    KeyValue::new("event_type", event_type),
+                                ],
+                            );
                         }
                         if let Some(h) = health.as_ref() {
                             h.update_sync_ts();

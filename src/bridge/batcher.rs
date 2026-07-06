@@ -314,7 +314,10 @@ impl MutationBatcher {
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             if let Some(m) = &self.metrics {
                 m.record_batch_flush(elapsed_ms, op_count as u64);
-                m.inbound_events.add(op_count as u64, &[]);
+                // `inbound_events` is bumped per-op at the forward boundary
+                // in `sync_engine.rs` (Devil Q12 — per-op forward, NOT
+                // per-flush aggregate). Bumping it here too would double-
+                // count: a 5-op batch would report 10 (P5-HUNT-1 MAJOR 1).
             }
             if let Some(h) = &self.health {
                 h.update_sync_ts();

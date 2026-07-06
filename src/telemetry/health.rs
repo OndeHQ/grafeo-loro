@@ -17,7 +17,10 @@
 //! Loro commit) and the inbound batcher (after each flush). L3 fills the
 //! `check` body with the three probes specified in architecture §23.3:
 //!
-//! 1. **LoroDoc lock poison** — `self.doc.try_read().is_some()`.
+//! 1. **Loro doc read accessibility** — `self.doc.try_read().is_some()`. `parking_lot::RwLock`
+//!    has NO poisoning (unlike `std::sync::RwLock`); `try_read()` returns `None` only when a
+//!    writer currently holds the lock, so this probe verifies the lock is not held by a writer
+//!    (P5-HUNT-1 MINOR 1 — comment previously mis-described this as poison detection).
 //! 2. **Grafeo dummy query** — `self.db.session().execute("MATCH (n) RETURN count(n) LIMIT 1").is_ok()`
 //!    (Devil M1 — correct API per grafeo-engine-0.5.42; `GrafeoDB::execute(&str)` does NOT
 //!    exist; the actual API is `db.session() -> Session` + `Session::execute(&self, query:
@@ -158,8 +161,12 @@ impl HealthProbe {
         // P5-L3: three-component probe per architecture §23.3 (Devil M1 —
         // correct Grafeo API is `db.session().execute(...)`, NOT `db.execute(...)`).
         //
-        // 1. LoroDoc lock poison: `try_read()` returns `Option` (parking_lot
-        //    API) — `Some` if the lock is unpoisoned, `None` if poisoned.
+        // 1. Loro doc read accessibility: `try_read()` returns `Option`
+        //    (parking_lot API) — `Some` if the lock is free or read-locked,
+        //    `None` if a writer currently holds it. `parking_lot::RwLock` has
+        //    NO poisoning (unlike `std::sync::RwLock`), so this probe verifies
+        //    the lock is not held by a writer — NOT poison detection
+        //    (P5-HUNT-1 MINOR 1).
         // 2. Grafeo dummy query: `MATCH (n) RETURN count(n) LIMIT 1` is the
         //    lightest possible probe that still exercises the storage layer
         //    (parse + plan + execute + return). `is_ok()` collapses any
