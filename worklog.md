@@ -5415,3 +5415,69 @@ Stage Summary:
 - L2 re-entry recommendation: PROCEED TO PUSH
 - Rationale: 0 BLOCKERs + 0 MAJORs; 3 MINORs are all forward-compat issues for Phase 5 (not Phase 4 defects); cold-boot round-trip test is the anti-tautology gold standard; every API call verified against crate source; all 70 tests pass.
 - Commit hash: (to be filled in after commit)
+
+---
+
+## Phase 4 Loop Close — Orchestrator Summary
+
+**$stn**: `phase-4`
+**Range**: `3272017..HEAD` (13 commits across 6 agents)
+**Outcome**: ✅ **PROCEED_TO_PUSH** — all validation gates green
+
+### Loop Iterations Completed
+
+| Task ID | Agent | Commit | Outcome |
+|---|---|---|---|
+| P4-L1 | L1 Scaffolding | `818d5c5` | Contracts for `hydrate`/`checkpoint`/`build` + storage key SSOT constants. 8 open questions for Devil. |
+| P4-DEVIL | Devil's Advocate | `a49b892` + `726e7d7` | 2 BLOCKERs + 10 MAJORs; resolved all 8 L1 questions. Recommended deferring `SsotMode::Grafeo` to Phase 5 (Q2-d). |
+| P4-L2 | Fixer + L2 Wiring | `d528e47` + `42c846e` | State fields + builder setters + `build()` + hydrate/checkpoint dispatch (Loro arm wired, Grafeo arm `unimplemented!("P5: ...")`) + `SyncEngine::with_batch_config` (DRY refactor). 6 lib tests still pass. |
+| (chore) | Orchestrator | `4915f9f` → `7cc5902` | repomix.config.json tuned: 425k → 18.5k tokens (compress=true, removeComments=true, include=`**/*.rs` only). |
+| P4-L3 | L3 Deep Implementation | `49331d7` + `61c9bad` + `3352164` | `CompressedPayload` wire format + delta-import loop + `loro_key_counter` re-seed + idempotent delta-delete. **15 new tests** added (compression wire round-trip × 8, cold-boot round-trip × 3, builder validation × 5). Zero `TODO(P4-L3)` markers remaining. |
+| P4-HUNT | Plenger-Traits Hunter | `1810aa0` | 4 findings (3 MINOR + 1 NIT), all Phase 5 forward-compat. 5 of 8 plenger categories fully clean. Recommended **PROCEED_TO_PUSH**. |
+
+### Final Validation
+
+```
+cargo check --all-targets:  PASS  (0 errors, 2 pre-existing warnings, 0 new warnings)
+cargo test --all:           PASS  (70 passed, 0 failed, 2 ignored)
+grep "TODO(P4-L3)":         0 matches
+git status:                 clean
+remote sync:                phase-4 pushed to origin
+```
+
+### Phase 4 Scope Delivered (per `docs/implementation-plan.md`)
+
+✅ **Task 2 — `app::GrafeoLoroApp::hydrate`**
+- `SsotMode::Loro` arm: full implementation — download base + list/download deltas + `import_with(ORIGIN_LORO_BRIDGE)` (echo-safe) + `parallel_hydrate_grafeo` + `loro_key_counter` re-seed
+- `SsotMode::Grafeo` arm: `unimplemented!("P5: ...")` per Devil Q2(d) — needs wal feature + ArcSwap grafeo_db refactor
+
+✅ **Task 3 — `app::GrafeoLoroApp::checkpoint`**
+- `SsotMode::Loro` arm: full implementation — `oplog_frontiers` + `ExportMode::shallow_snapshot` + `CompressedPayload::compress` + storage save + idempotent delta-delete (Q3 risk accepted)
+- `SsotMode::Grafeo` arm: `unimplemented!("P5: ...")` per Devil Q2(d)
+
+✅ **Task 4 — `app::GrafeoLoroAppBuilder::build`**
+- Full implementation — validates config (rejects zero batch params, missing storage, Grafeo mode without grafeo_dir), constructs GrafeoDB via `with_config(Config::persistent(p))` (NOT wal-gated `open`), constructs LoroDoc, constructs SyncEngine via `with_batch_config`, spawns all workers, returns app
+
+❌ **Task 1 — S3 StorageBackend**: EXCLUDED by user request ("all task not 1")
+
+### Deferred to Phase 5 (per Devil Q2-d, documented in `docs/grafeo-loro.architecture.md` §25)
+
+- `SsotMode::Grafeo` cold-start path (wal feature + ArcSwap grafeo_db field)
+- `parallel_hydrate_loro` mirror of `parallel_hydrate_grafeo`
+- `tar = "0.4"` Cargo.toml addition for Grafeo backup tar.zst
+- `GrafeoDB::backup_full` / `restore_to_epoch` integration (wal + grafeo-file features)
+- `shutdown().await` for graceful worker cancellation (Hunter CB-1)
+
+### Phase 5 Forward-Compat Nits (from P4-HUNT, deferred)
+
+- **BA-1** (MINOR): `hydrate` delta-load `continue` swallows ALL `storage.load` errors — should distinguish `NotFound` from real errors. Phase 5 delta-write path will force this fix.
+- **DRY-1** (MINOR): `InMemoryStorage` impl duplicated across 2 test files. Refactor into `tests/common/mod.rs` when Phase 5 adds more storage-dependent tests.
+- **CB-1** (MINOR): `build()` discards `Vec<JoinHandle<()>>` from `spawn_all`. Will be needed by `shutdown().await` in Phase 5.
+- **DRY-2** (NIT): `format!("{graph_id}/{STORAGE_KEY_*}")` composed inline at 4 sites. Acceptable for now.
+
+### Loop Status
+
+**Loop iteration 1 complete.** Per `plonga-plongo-loop.md` step 7: "Push $stn" — DONE.
+
+Branch `phase-4` is the new head. Phase 5 (Presence & Telemetry) is the next user-decided scope per `docs/implementation-plan.md`. User will decide whether to proceed to a new session loop for Phase 5 or stop here.
+
