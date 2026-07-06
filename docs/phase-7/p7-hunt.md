@@ -36,3 +36,17 @@
 **Yellow flag (non-blocking)**: The `db` field on `FuzzState` has a `dead_code` allow reserved for "future invariant checks." I12 takes `db` as a function param, not via the struct field. This is reserved-space, not rot. Acceptable.
 **Counts**: blockers 0, majors 0, minors 0, nits 1 (reserved `db` field — consider removing or wiring I12 through the struct).
 
+## #2 Tautology — CLEAN
+
+**Hunt 1**: `rg -n 'assert!\(true\)|assert_eq!\(true, true\)' fuzz/ src/` → 0 active hits. Only a comment at `fuzz/fuzz_targets/consistency.rs:871` noting "fn was a tautology (`assert!(true)`) — removed per anti-plenger #11" (historical marker, not a violation).
+
+**Hunt 2**: I12 body (`fuzz/fuzz_targets/consistency.rs:570-638`) does REAL verification with 3 non-trivial assertions:
+1. `assert!(e2.as_u64() > e1.as_u64())` — epoch must advance on commit (L610-615)
+2. `assert_eq!(v_at_e1, Some(grafeo::Value::Int64(1)))` — pinned read sees old value (L620-626)
+3. `assert_eq!(v_now, Some(grafeo::Value::Int64(2)))` — post-clear read sees new value (L631-637)
+
+All asserts have descriptive failure messages with runtime context (epoch IDs, observed value). No tautology, no `.is_ok()` shortcuts, no hardcoded short-circuits.
+
+**Verdict**: CLEAN.
+**Counts**: blockers 0, majors 0, minors 0, nits 0.
+
