@@ -24,3 +24,15 @@
 - `646c2b2` P7-L2-fmt: apply rustfmt to prior P7-L2-A2/A3 commits
 - `a67fc1f` P7-L2-F2: fix 3 stale doc-comment mentions of unimplemented!() in app.rs
 
+## #1 Backward Compatibility Slaves — CLEAN
+
+**Hunt 1**: `rg -n '#\[allow' src/ fuzz/` → 4 hits, all with `reason=`:
+- `src/bridge/sync_engine.rs:461/555/663` — `clippy::async_yields_async`, reason: "spawn_*_worker returns tokio::task::JoinHandle by design — caller awaits the handle, not the spawn call. Permanent design choice, not a TODO." (3 sites, identical reason)
+- `fuzz/fuzz_targets/consistency.rs:99` — `dead_code`, reason: "reserved for future invariant checks that need direct db access" (struct field `db: &'a Arc<GrafeoDB>`)
+
+**Hunt 2**: `rg -n 'TODO.*(refactor|future|deprecated|legacy)' src/ fuzz/` → 0 hits.
+
+**Verdict**: No backward-compat slavery. All 4 `#[allow]` use permanent design language, no TODO/deferred rot.
+**Yellow flag (non-blocking)**: The `db` field on `FuzzState` has a `dead_code` allow reserved for "future invariant checks." I12 takes `db` as a function param, not via the struct field. This is reserved-space, not rot. Acceptable.
+**Counts**: blockers 0, majors 0, minors 0, nits 1 (reserved `db` field — consider removing or wiring I12 through the struct).
+
