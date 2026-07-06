@@ -2726,3 +2726,64 @@ Next steps for user:
    * Task 3: `hydration::vector::generate_local_embedding` (stub, deterministic dummy vector, ONNX warning log)
    * Task 4: `VectorOffloadManager::handle_text_update` (embedding → direct Grafeo upsert, bypass Loro)
    * Phase 3 validation gates owned by Tasks 2 & 4: "Hydration 10k nodes < 500ms on 8-core" benchmark; "Vector never written to Loro container" test.
+
+---
+Task ID: ORCH-P3T2-SETUP
+Agent: Orchestrator (Super Z)
+Task: Aggregate p3-compression into phase-3 branch (pushed); open Plonga-Plongo-Loop for Phase 3 Task 2 (hydration::parallel::parallel_hydrate_grafeo); spawn L1
+
+Work Log:
+- User instruction: "aggregate into phase-3 then push, then finish whole phase 3 rest".
+- Created `phase-3` branch from `p3-compression` HEAD (`3a59bef`); pushed to origin. Branch now tracks the aggregate of Phase 3 Task 1.
+- Created `p3-parallel-hydrate` branch from `phase-3` HEAD for Phase 3 Task 2 work.
+- Regenerated `repomix.md` (969K, grew from 823K due to +5 compression tests + architecture doc §15 update).
+- Phase 3 Task 2 scope (per docs/implementation-plan.md §Phase 3 Task 2):
+  1. `parallel_hydrate_grafeo(&Arc<GrafeoDB>, &LoroDoc) -> Result<()>`
+  2. Extract node IDs from Loro map (root key `ROOT_VERTICES = "V"` per constants.rs:6)
+  3. `rayon::par_chunks(DEFAULT_CHUNK_SIZE = 256)` per constants.rs:24
+  4. Per-chunk Grafeo tx with `ORIGIN_LORO_BRIDGE` metadata
+  5. Call `lval_to_gval` for properties (already implemented in src/types/values.rs:146)
+- Phase 3 Task 3 scope (deferred to its own loop):
+  - `hydration::vector::generate_local_embedding` stub returning deterministic dummy vector + ONNX warning log
+- Phase 3 Task 4 scope (deferred to its own loop):
+  - `VectorOffloadManager::handle_text_update` — generate embedding → direct Grafeo upsert (bypass Loro)
+- Existing skeleton state (already in repo from Phase 1 L1):
+  - `src/hydration/parallel.rs`: 10 lines, single `pub fn parallel_hydrate_grafeo(db: &Arc<GrafeoDB>, doc: &LoroDoc) -> Result<()>` with `unimplemented!()` body.
+  - `src/hydration/mod.rs`: 4 lines, re-exports `parallel_hydrate_grafeo` and `VectorOffloadManager`.
+  - `src/hydration/vector.rs`: 30 lines, `VectorOffloadManager { db: Arc<GrafeoDB> }` + `new()` + `handle_text_update(node_id, text)` + private `generate_local_embedding(text) -> Vec<f32>` — all `unimplemented!()`.
+  - `src/types/values.rs`: `lval_to_gval` FULLY IMPLEMENTED (Phase 1 L3) at line 146 — recursive, handles Map/List/Scalar, rejects Binary/Container. Will be reused (DRY).
+  - `src/types/values.rs`: `gval_to_grafeo_value` FULLY IMPLEMENTED at line 171 — converts GraphValue → grafeo::Value (for inbound apply). Will be reused.
+  - `src/types/ids.rs`: `PeerId(pub u64)` only — no `NodeId` alias; grafeo::NodeId is the canonical type.
+  - `src/schema/vertex.rs`: `VertexEntity { labels: Vec<String>, properties: HashMap<String, LoroProperty>, #[loro(text)] description: String }` with `#[derive(Hydrate, Reconcile)]` (Phase 2 Task 1 wired).
+  - `src/constants.rs`: `ROOT_VERTICES = "V"`, `ROOT_EDGES = "E"`, `DEFAULT_CHUNK_SIZE = 256`, `ORIGIN_LORO_BRIDGE = "loro-bridge"`.
+  - `src/bridge/grafeo_tx.rs`: existing pattern `apply_loro_op(&Session, &LoroOp, &BridgeMaps)` — uses `Session::create_node_with_props` + `Session::set_node_property` + `Session::begin_transaction`/`prepare_commit`. The hydration per-chunk tx should follow this proven pattern.
+- grafeo 0.5.42 API (verified at `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/grafeo-engine-0.5.42/src/`):
+  - `GrafeoDB::session_with_cdc(bool) -> Session` (database/mod.rs:1728) — non-transactional session
+  - `GrafeoDB::session() -> Session` — same, cdc=false
+  - `Session::begin_transaction() -> Result<()>` (session/mod.rs:3883)
+  - `Session::create_node_with_props(labels, properties) -> Result<NodeId>` (session/mod.rs:4885)
+  - `Session::set_node_property(id, key, value) -> Result<()>` (session/mod.rs:5012)
+  - `Session::prepare_commit() -> Result<PreparedCommit>` (session/mod.rs:4496)
+  - `PreparedCommit::set_metadata(k, v)` + `PreparedCommit::commit() -> Result<()>` (per existing bridge code)
+  - `Session::Drop` auto-rollbacks un-prepared-commit'd tx (session/mod.rs:5372-5383)
+  - grafeo has its own `embedding` module (`grafeo_engine::embedding::{EmbeddingModel, OnnxEmbeddingModel}`) — Phase 3 Task 3/4 may reuse, but spec says "stub for now" so we don't need to wire ONNX yet.
+- Validation gates for Phase 3 Task 2:
+  - Benchmark: Hydration 10k nodes < 500ms on 8-core (the spec gate; L1 doesn't own this — L3 will write the benchmark test, HUNT will verify)
+  - The `lval_to_gval` call is already tested in Phase 1 (3 unit tests in src/types/values.rs:234-351); Task 2 reuses it without re-testing.
+
+Loop Plan for this $stn (`p3-parallel-hydrate`):
+1. L1 scaffolding (contracts/types/signatures only — NO implementation logic) ← `Task ID: P3T2-L1`
+2. Devil's advocate critique + solution ← `Task ID: P3T2-DEVIL`
+3. Fixer (L2 evolving/reducing scaffolds; wire state + flow; complex algorithms as `// TODO`) ← `Task ID: P3T2-L2`
+4. L3 deep implementation (zero TODOs/stubs/band-aids) ← `Task ID: P3T2-L3`
+5. Plenger hunter (audit anti-plenger.md violations) ← `Task ID: P3T2-HUNT`
+6. Loop back to step 3 if MAJORs found, else push $stn and close.
+
+Stage Summary:
+- `phase-3` branch pushed to origin (aggregates Task 1)
+- $stn for this loop = `p3-parallel-hydrate` (branch created, currently == phase-3 HEAD `3a59bef`)
+- Repo at /home/z/my-project/grafeo-loro, on branch p3-parallel-hydrate, clean working tree
+- repomix.md regenerated (969K)
+- Baseline: 0 errors / 5 pre-existing warnings / 40 tests passing (carried over from Phase 3 Task 1 close)
+- Token (still ghp_vW5H...) remains active — used inline-only for pushes, never persisted to .git/config. User MUST revoke post-session.
+- Next: spawn P3T2-L1 subagent.
