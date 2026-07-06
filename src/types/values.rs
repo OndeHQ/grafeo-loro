@@ -117,6 +117,31 @@ impl From<&str> for GraphValue {
     }
 }
 
+/// Total-on-scalar-subset conversion used by `VertexBuilder::commit` step 2 to
+/// build a Loro-side `VertexEntity`. The scalar variants map 1:1; the
+/// `Vector`/`Map`/`List` variants (which have no `LoroProperty` representation)
+/// are rejected with [`GrafeoLoroError::UnsupportedLoroType`]. `commit()` step
+/// 1 strictly rejects those variants BEFORE this call, so the `Err` arm is
+/// defensive — but kept total so the conversion cannot silently drop data.
+impl std::convert::TryFrom<GraphValue> for LoroProperty {
+    type Error = GrafeoLoroError;
+
+    fn try_from(v: GraphValue) -> std::result::Result<Self, Self::Error> {
+        match v {
+            GraphValue::Null => Ok(LoroProperty::Null),
+            GraphValue::Bool(b) => Ok(LoroProperty::Bool(b)),
+            GraphValue::Integer(i) => Ok(LoroProperty::Integer(i)),
+            GraphValue::Float(f) => Ok(LoroProperty::Float(f)),
+            GraphValue::String(s) => Ok(LoroProperty::String(s)),
+            GraphValue::Vector(_) | GraphValue::Map(_) | GraphValue::List(_) => {
+                Err(GrafeoLoroError::UnsupportedLoroType(format!(
+                    "{v:?} has no LoroProperty representation (Vector/Map/List are graph-only)"
+                )))
+            }
+        }
+    }
+}
+
 /// Pure recursive `LoroValue → GraphValue` (architecture §5). Rejects `Binary`/`Container`.
 pub fn lval_to_gval(val: loro::LoroValue) -> Result<GraphValue> {
     use loro::LoroValue as LV;
