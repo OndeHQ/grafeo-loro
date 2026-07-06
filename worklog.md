@@ -5595,3 +5595,29 @@ Stage Summary:
   Q15: Should `GrafeoLoroApp::shutdown` auto-`checkpoint` before draining workers (to flush pending state)? Or is checkpointing the caller's responsibility? Architecture §4 Step D is silent on this. Recommend: shutdown does NOT auto-checkpoint (separation of concerns — caller decides if a final checkpoint is needed); shutdown only drains workers + flushes telemetry. Confirm.
   Q16: Should `GrafeoLoroAppBuilder::build` construct `HealthProbe::new(loro_doc.clone(), grafeo_db.clone())` internally after creating loro_doc + grafeo_db (since they exist at that point in build())? Currently L1 requires caller to pre-build via `.with_health(...)` — awkward because caller must construct doc + db BEFORE the builder. Recommend: `build()` auto-constructs HealthProbe if `self.health` is `None`, using the just-created loro_doc + grafeo_db. Devil ruling needed.
   Q17: Should `GrafeoLoroAppBuilder::build` auto-construct `Arc::new(global::tracer("grafeo-loro"))` if `.with_tracer(...)` not called? Same trade-off as Q14. Recommend: same as Q14 ruling (auto-construct if telemetry enabled flag is set). Devil ruling needed.
+
+---
+
+Task ID: P5-DEVIL
+Agent: Devil's Advocate
+Task: Critique P5-L1 scaffolding for Phase 5 Tasks 2/3/4 (telemetry metrics/health/traces + wiring). Resolve all 17 L1 open questions with explicit rulings. Verify Q4 API physically.
+
+Work Log:
+- Step 1: Verified branch (`phase-5`) + commits (`5a03a14` code, `8baf278` worklog hash) present. Read full P5-L1 worklog entry (17 questions extracted).
+- Step 2: **Q4 PHYSICAL VERIFICATION** — inspected grafeo 0.5.42 crate. Root `src/lib.rs` is a 94-line re-export shim pointing at `grafeo_engine`. Searched grafeo-engine-0.5.42 `src/` via `rg -n "pub fn execute|pub fn session|impl GrafeoDB"` — **`GrafeoDB::execute(&str)` does NOT exist**. Correct API: `GrafeoDB::session() -> Session` (`database/mod.rs:1663`) + `Session::execute(&self, query: &str) -> Result<QueryResult>` (`session/mod.rs:2636`). Architecture §23.3 line 1080 is out of sync with actual grafeo 0.5.42 API. M1 finding.
+- Step 3: Verified Q14/Q17 — `opentelemetry::global::meter(name)` exists at `opentelemetry-0.23.0/src/global/metrics.rs:115`; `opentelemetry::global::tracer(name)` exists at `opentelemetry-0.23.0/src/global/trace.rs:394`. Auto-construction in `build()` is feasible. Ruled YES for both.
+- Step 4: Read arch §23.1-§23.5 (lines 1020-1139). Confirmed: (a) §23.2 line 1048 explicitly shows `grafeo_commit` grandchild under `batch_flush` — L1's Q9 YAGNI suggestion rejected (M2 finding). (b) §23.2 lines 1050-1052 explicitly show `outbound_sync_loop` parent — L1's missing `create_outbound_sync_span` helper is a contract gap (M4 finding). (c) §23.4 WARN list excludes health check — Q5 ruling: silent return.
+- Step 5: Inspected L1 code via `rg -n` for citation line numbers. Confirmed `SyncEngine` struct (lines 96-151) has only `metrics` + `tracer` fields — NO `health` field — but `sync_engine.rs:467` TODO references `self.health.clone()`. Contract inconsistency → M3 finding.
+- Step 6: Wrote `docs/critiques/p5-l1-devil.md` (8 sections: Scope Audit, Arch Audit, 17 Question Rulings, Anti-Plenger Audit, API Verification §5, Findings M1-M4/m1-m2/n1-n2, L2 Implementation Guide top-8, Verification Matrix Q1-Q17). 17/17 questions ruled.
+- Step 7: Append this worklog entry + commit + push.
+
+Stage Summary:
+- **Findings**: 0 BLOCKER, 4 MAJOR (M1 arch API mismatch / M2 grafeo_commit grandchild missing / M3 SyncEngine+Batcher missing health field / M4 create_outbound_sync_span helper missing), 2 MINOR (m1 HydrationMode enum / m2 Q14/Q16/Q17 auto-construction), 2 NIT (n1 build TODO markers / n2 arch doc typo `grafio` → `grafeo`).
+- **Verdict**: PROCEED_TO_L2 (all findings fixable in L2 without L1 rework; L1 scaffolding compiles + 70/70 tests pass).
+- **L2 must address (top 5)**:
+  1. [M3] Add `health: Option<Arc<HealthProbe>>` field to `SyncEngine` + `MutationBatcher`; extend `with_telemetry` to 7 args; thread through `build()` — without this, `spawn_outbound_worker` TODO won't compile.
+  2. [M1] Implement `HealthProbe::check` using `self.db.session().execute("MATCH (n) RETURN count(n) LIMIT 1").is_ok()` (NOT `self.db.execute(...)` — arch §23.3 line 1080 is wrong). Patch arch doc.
+  3. [M4] Add `create_outbound_sync_span<T: Tracer>(tracer: &T) -> BoxedSpan` to `traces.rs`; use in `spawn_outbound_worker` for parent span + inline-create `receive_cdc_event` + `loro_commit` children.
+  4. [M2] Add `grafeo_commit` grandchild span in `MutationBatcher::flush_inner` around `commit()` call, nested under `batch_flush` parent (arch §23.2 line 1048).
+  5. [m2] Implement Q14/Q16/Q17 auto-construction in `GrafeoLoroAppBuilder::build`: metrics via `global::meter("grafeo-loro")`, health via `HealthProbe::new(doc, db)`, tracer via `global::tracer("grafeo-loro")` wrapped in `Arc`.
+- Commit hash: <to be filled after commit>
