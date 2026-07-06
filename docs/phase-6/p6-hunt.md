@@ -125,3 +125,12 @@
 
 **Summary**: 13/16 REAL; 1 WEAK (I2, MINOR); 1 honest NO-OP (I12, acceptable); 1 TAUTOLOGY (I13, MAJOR Goodhart).
 
+## L3 Risk R1: T5 invariant checks Goodhart
+
+**Resolution**: CONFIRMED (1 MAJOR) — cross-reference Anti-Pattern #8 above.
+
+- I13 `check_i13_batcher_count(true, op_count)` (consistency.rs:909) hardcodes the `batcher_buffer_is_empty` parameter to `true`, making the fn's `assert!(batcher_buffer_is_empty, ...)` a tautology (`assert!(true)`).
+- Honest call-site comment (lines 901-908) admits the limitation, so this is NOT malicious Goodhart — but the I13 invariant IS unverified by this fn.
+- Mitigating factor: I3b (line 283) indirectly verifies the batcher drains via `JoinHandle::await` success (panic = JoinError). So the underlying behavior is tested, just not by I13.
+- **Action (Fixer)**: either (a) remove `check_i13_batcher_count` entirely (I3b covers the behavior), or (b) add a `pub fn buffer_is_empty(&self) -> bool` accessor to `MutationBatcher` in `src/bridge/batcher.rs` and pass the real value. Option (a) is simpler (Deletion over addition — anti-plenger #11).
+
