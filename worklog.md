@@ -4202,3 +4202,47 @@ Stage Summary:
 - Anti-plenger.md 14/14 ✓. Plenger-traits.md 8/8 ✓ (with 1 MINOR on #7 — empty-input test gap, not a correctness bug). The `Arc<L>: Layer<S>` API discrepancy claim VERIFIED by independent registry-source re-reading — interior-Arc + `#[derive(Clone)]` is the correct fix, NOT a band-aid.
 - 0 CRITICAL, 0 MAJOR, 2 MINOR, 0 NIT. Both MINORs are documentation/test-coverage nits, not code-contract or correctness issues. The arch doc §17 pseudocode body staleness (MINOR 1) and the empty-input test gap (MINOR 2) can be addressed in a future hardening loop or L2-R2 quick fix — neither blocks PROCEED.
 - Branch `p3-vector-embedding` is ready for orchestrator close-out: merge to `phase-3` and proceed to Phase 3 Task 4 (`VectorOffloadManager::handle_text_update` + `new`).
+
+---
+Task ID: ORCH-P3T3-CLOSE
+Agent: Orchestrator (Super Z)
+Task: Close Plonga-Plongo-Loop for Phase 3 Task 3; merge p3-vector-embedding into phase-3; report
+
+Work Log:
+- Reviewed full Task 3 loop chain: ORCH-P3T3-SETUP → P3T3-L1 → P3T3-DEVIL → P3T3-L2 → P3T3-L3 → P3T3-HUNT.
+- P3T3-HUNT verdict: **PROCEED** (0 CRITICAL, 0 MAJOR, 2 MINOR non-blocking, 0 NIT).
+- Committed HUNT worklog entry as `f7e2b89` (intermediate commit; this entry supersedes).
+- Independent orchestrator re-verification:
+  * `cargo check --all-targets` → 0 errors, 4 pre-existing warnings (hydration/vector.rs:12 `db` field is Task 4 scope, accepted).
+  * `cargo test --all` → **50 PASS / 0 FAIL / 2 IGNORED** (6 lib + 5 integration + 39 unit; 2 ignored = warning smoke + benchmark).
+  * `grep -rn "TODO(L3)\|todo!\|unimplemented!" src/hydration/vector.rs` → 2 matches (both Task 4 `unimplemented!()` in `new` + `handle_text_update`); 0 in `generate_local_embedding`.
+  * Warning smoke test: `cargo test --test unit vector_embedding -- --ignored generate_local_embedding_logs_onnx_warning --test-threads=1` → PASS.
+- Branch state: `p3-vector-embedding` has 9 commits beyond `phase-3` (`d141bad`):
+  1. `957aa09` ORCH-P3T3-SETUP
+  2. `9354085` P3T3-L1 code
+  3. `8fbdee4` P3T3-L1 worklog
+  4. `a2269f1` P3T3-L2 code
+  5. `02a47f7` P3T3-L2 worklog
+  6. `348f974` P3T3-L3 code
+  7. `ef78ad9` P3T3-L3 worklog
+  8. `f7e2b89` P3T3-HUNT worklog
+  9. (this commit) ORCH-P3T3-CLOSE worklog
+- Merging `p3-vector-embedding` into `phase-3`: fast-forward.
+
+Stage Summary:
+- $stn = `p3-vector-embedding` COMPLETE.
+- Phase 3 Task 3 (Stub `hydration::vector::generate_local_embedding`) COMPLETE.
+- Test count: 47 (Task 2 baseline) + 3 (Task 3 newly un-ignored) = **50 PASS**, 0 FAIL, 2 IGNORED.
+- Key decisions:
+  * Signature: `pub fn generate_local_embedding(text: &str) -> Result<Vec<f32>>` (sync, Result-returning for future ONNX-compat).
+  * Algorithm: hand-rolled SplitMix64 (no `rand` dep) seeded by fold-hash of text bytes; emits `DEFAULT_EMBEDDING_DIM = 384` floats in `[0.0, 1.0)`.
+  * Warning: `tracing::warn!` once per process via `std::sync::Once`.
+  * Added `tracing-subscriber = "0.3"` dev-dep for test-capture (Option A).
+  * `WarnCounter` Layer uses interior `Arc<AtomicUsize>` + `#[derive(Clone)]` (workaround: `Arc<L>` is not a `Layer` in tracing-subscriber 0.3.23).
+- Anti-plenger.md score: 14/14 ✓.
+- Plenger-traits.md score: 8/8 ✓.
+- Loop iterations: 1 (no L2-R2 needed; HUNT found 0 MAJOR).
+- 2 MINORs deferred (arch doc §17 pseudocode body stale; no explicit empty-input test) — both non-blocking, suitable for Phase 6 hardening.
+- `phase-3` branch will be fast-forwarded to `p3-vector-embedding` HEAD after this commit.
+
+Next: Phase 3 Task 4 (`VectorOffloadManager::handle_text_update` — generate embedding → direct Grafeo upsert, bypass Loro). This is the FINAL Phase 3 task.
