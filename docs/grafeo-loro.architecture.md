@@ -270,6 +270,15 @@ fn sync_tree_move_to_grafeo(db: &grafeo::GrafeoDB, node_id: u64, old_parent: u64
 }
 ```
 
+### Known Ambiguity: `OrderedCollection` (LoroMovableList) vs `T_CHILD` (LoroTree)
+
+The codebase has two distinct "tree" concepts that share the word "tree" but use different Loro containers and serve different phases:
+
+- **`OrderedCollection`** (`LoroMovableList`, `src/schema/tree.rs:6-9`): a flat ordered list of `TreeNode`s for drag-drop UI ordering. Identity is preserved via `#[key] node_id` + `#[loro(movable)]`. No parent/child relationship. Phase 2 Task 1 territory (this section).
+- **`T_CHILD`** (`LoroTree`, `src/constants.rs:8` comment): a strict spanning tree that prevents cycles during parent moves. Identity is `TreeID` (native Loro type, not `String`). Parent/child is managed by the `LoroTree` container itself, queried via `tree.get_parent(tree_id)`. Phase 2 Task 2 territory (`sync_tree_move_to_grafeo`).
+
+`TreeNode` (this section, `src/schema/tree.rs:11-16`) belongs to `OrderedCollection` only. The `T_CHILD` `LoroTree` does not use `TreeNode` — its metadata (vertex_id mapping) lives in a separate container to be wired in Phase 2 Task 2.
+
 ---
 
 ## 8. Concurrency & Deadlock Prevention
@@ -1068,7 +1077,7 @@ Critical warnings:
 grafeo-loro = "0.1"
 grafeo = "0.5"
 loro = "1.0"
-lorosurgeon = "0.3"
+lorosurgeon = "0.2"
 tokio = { version = "1", features = ["full"] }
 parking_lot = "0.12"
 rayon = "1.8"
