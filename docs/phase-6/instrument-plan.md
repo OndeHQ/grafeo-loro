@@ -248,7 +248,7 @@ Each gets a one-line comment above the `#[instrument]` attribute: `// NOTE: body
 
 ## Span hierarchy (arch §23.2)
 
-> Deferred until Phase 6 T1 (unimplemented!() replacement) is done — child spans on panicking bodies are observationally pointless.
+> Deferred until the actual function implementations are done in future phases. T1 (Phase 7) replaces `unimplemented!()` panics with `Err(NotYetImplemented(...))` returns — it does NOT implement the real logic, so the sub-operations these child spans would instrument do not yet exist.
 
 Architecture §23.2 defines a 5-parent span hierarchy with 13 child spans. The parent spans are created via `create_*_span` factories in `src/telemetry/traces.rs` (correctly EXCLUDED above as span factories). The **child spans** do NOT map to any existing `pub fn` — they require inline `tracing::info_span!(...)` or `#[instrument]` calls inside method bodies (L3 placement, deferred until T1 fills the bodies).
 
