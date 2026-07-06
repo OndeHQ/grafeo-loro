@@ -1896,3 +1896,44 @@ Stage Summary:
 ### Push-readiness self-assessment
 
 All 4 MAJORs (atomicity contract violations) FIXED with surgical changes (~30 LOC total across `src/app.rs`). MAJOR 2's B1 filter test is regression-verified. The 4 MINORs are addressed (3 FIXED, 1 DEFERRED with rationale). The 2 NITs are DEFERRED (historical worklog citations; correct locations noted in this entry). Compile + test status green: 0 errors, 0 new warnings, 35/35 PASS, 0 ignored. Ready for next hunter round or push.
+
+---
+Task ID: ORCH-PHASE2-CLOSE
+Agent: Orchestrator (Super Z)
+Task: Close Plonga-Plongo-Loop iteration 3 for Phase 2 Task 3; push $stn; finalize Phase 2
+
+Work Log:
+- Reviewed full Loop 3 chain: ORCH-P2T3-SETUP → P2T3-L1 → P2T3-DEVIL → P2T3-L2 → P2T3-L3 → P2T3-HUNT → P2T3-L2R2.
+- P2T3-HUNT verdict: LOOP BACK TO FIXER (4 MAJORs — all atomicity contract violations).
+- P2T3-L2R2 addressed all 4 MAJORs + 4 MINORs:
+  * MAJOR 1: BridgeMaps::remove_node called on prepared.commit() failure (binding no longer points to phantom NodeId)
+  * MAJOR 2: New test `vertex_builder_commit_does_not_echo_through_subscriber` + new `inbound_filtered_count` counter (regression-verified: commenting out B1 filter makes test FAIL)
+  * MAJOR 3: prepare_commit() failure now compensates Loro + removes BridgeMaps binding
+  * MAJOR 4: begin_transaction() failure now compensates Loro
+- P2T3-L2R2 verified: 4 compensate_loro_vertex call sites covering all 4 failure paths; 2 remove_node call sites (step 6a + 6b).
+- Executed Rule 7: `git push -u origin p2-vertex-builder` — SUCCESS.
+- Branch p2-vertex-builder now tracks origin/p2-vertex-builder with 20 commits ahead of p2-tree-move.
+- Independent orchestrator re-verification: `cargo test --all` → 35/35 PASS, 0 ignored (6 lib + 5 integration + 24 unit).
+- Independent orchestrator re-verification: `awk '/pub fn commit/,/^    }$/' src/app.rs | grep -cE "TODO|todo!|unimplemented!"` → 0.
+- Independent orchestrator re-verification: concurrent test stable across 5 consecutive runs.
+
+Stage Summary:
+- $stn = `p2-vertex-builder` PUSHED to https://github.com/OndeHQ/grafeo-loro/tree/p2-vertex-builder
+- Phase 2 Task 3 (Implement VertexBuilder fluent API) COMPLETE.
+- 20 commits: 1 orch-setup + 2 L1 + 1 DEVIL + 5 L2 + 4 L3 + 1 HUNT + 7 L2R2 (minus 1 worklog-only).
+- Test count: 6 lib + 5 integration + 24 unit = 35/35 PASS (was 25/25 at start of Loop 3; +10 new tests).
+- Phase 2 fully complete. All 3 tasks done:
+  * Task 1 (lorosurgeon derives): p2-derives branch, +7 tests
+  * Task 2 (sync_tree_move_to_grafeo): p2-tree-move branch, +8 tests
+  * Task 3 (VertexBuilder): p2-vertex-builder branch, +10 tests
+- Total Phase 2 test count: 25 (Phase 1 baseline + P2T1) + 8 (P2T2) + 10 (P2T3) = 43? Actually: 10 (Phase 1) + 7 (P2T1) + 8 (P2T2) + 10 (P2T3) = 35 total. Matches cargo test output.
+- Branch chain: phase-1 → p2-derives → p2-tree-move → p2-vertex-builder (each layered on the previous).
+- Token security: token still active (used for 3 pushes). User should revoke the GitHub PAT (ghp_***) immediately on https://github.com/settings/tokens.
+
+Next steps for user:
+1. REVOKE the GitHub PAT (it has been used 3 times for push; still active).
+2. Decide branch strategy:
+   (a) Open 3 separate PRs (p2-derives→phase-1, p2-tree-move→p2-derives, p2-vertex-builder→p2-tree-move) for review-then-merge
+   (b) Open 1 PR from p2-vertex-builder→phase-1 (squash-merge all 3 tasks)
+   (c) Create a `phase-2` aggregate branch and fast-forward it to p2-vertex-builder HEAD, then open 1 PR phase-2→phase-1
+3. Phase 3 (Compression & Hydration) is next per implementation-plan.md. New orchestrator session recommended.
