@@ -127,6 +127,8 @@
 | `export_compressed` (impl) | 184 | `export_compressed` | `self`, `mode` | info | Loro export + compress. `#[instrument]` goes on the `impl LoroDocCompressionExt for LoroDoc` method at line 184, NOT the trait decl at line 173. |
 | `import_compressed` (impl) | 199 | `import_compressed` | `self`, `payload` | info | Decompress + Loro import. `#[instrument]` goes on the `impl LoroDocCompressionExt for LoroDoc` method at line 199, NOT the trait decl at line 180. |
 
+> Note: #[instrument] placed on impl-block methods only; trait declarations do not carry the attribute (no effect, would be plenger bloat).
+
 ### `src/hydration/parallel.rs`
 
 | Symbol | Line | Span name | `skip` | Level | Notes |
@@ -245,6 +247,8 @@ The following INCLUDED pub fns currently have `unimplemented!()` bodies (T1 was 
 Each gets a one-line comment above the `#[instrument]` attribute: `// NOTE: body unimplemented!() — T1 excluded per user; span fires then panics`.
 
 ## Span hierarchy (arch §23.2)
+
+> Deferred until Phase 6 T1 (unimplemented!() replacement) is done — child spans on panicking bodies are observationally pointless.
 
 Architecture §23.2 defines a 5-parent span hierarchy with 13 child spans. The parent spans are created via `create_*_span` factories in `src/telemetry/traces.rs` (correctly EXCLUDED above as span factories). The **child spans** do NOT map to any existing `pub fn` — they require inline `tracing::info_span!(...)` or `#[instrument]` calls inside method bodies (L3 placement, deferred until T1 fills the bodies).
 
