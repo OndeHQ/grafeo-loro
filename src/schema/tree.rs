@@ -74,6 +74,8 @@ pub struct TreeNode {
 ///
 /// Grafeo Session API (verified against `grafeo-engine-0.5.42/src/`):
 /// - `GrafeoDB::session` — `database/mod.rs:1663` (`&self -> Session`)
+/// - `GrafeoDB::session_with_cdc` — `database/mod.rs:1728` (`&self, bool -> Session`; `#[cfg(feature = "cdc")]`; `cdc` feature enabled transitively via `grafeo = "0.5"` default → `embedded` → `ai` → `cdc`)
+/// - `grafeo_engine::transaction::IsolationLevel::Serializable` — `transaction/manager.rs:63`, re-exported at `transaction/mod.rs:201` (umbrella `grafeo` does NOT re-export `transaction`; direct `grafeo-engine = "0.5"` dep required — P2T2-DEVIL R3)
 /// - `Session::begin_transaction_with_isolation` — `session/mod.rs:3895` (`&mut self, IsolationLevel -> Result<()>`; `#[cfg(feature = "lpg")]`)
 /// - `Session::create_edge` — `session/mod.rs:4935` (`&self, NodeId, NodeId, &str -> EdgeId`; infallible)
 /// - `Session::delete_edge` — `session/mod.rs:5092` (`&self, EdgeId -> bool`; returns `false` if edge absent)
