@@ -134,3 +134,13 @@
 - Mitigating factor: I3b (line 283) indirectly verifies the batcher drains via `JoinHandle::await` success (panic = JoinError). So the underlying behavior is tested, just not by I13.
 - **Action (Fixer)**: either (a) remove `check_i13_batcher_count` entirely (I3b covers the behavior), or (b) add a `pub fn buffer_is_empty(&self) -> bool` accessor to `MutationBatcher` in `src/bridge/batcher.rs` and pass the real value. Option (a) is simpler (Deletion over addition — anti-plenger #11).
 
+## L3 Risk R2: T5 #[allow] audit
+
+**Resolution**: REFUTED — clean.
+
+- 2 `#[allow]` attributes in fuzz crate, BOTH have `reason=`:
+  - `fuzz/fuzz_targets/gen_corpus.rs:208` — `#[allow(dead_code, reason = "mirror of FuzzValue; all variants kept for parity")]` on `EncFuzzValue` enum. Doc-comment (line 207) explains "even if the 5 seed scenarios only exercise a subset". No TODO needed — the reason is structural (mirror-type parity), not a deferred fix.
+  - `fuzz/fuzz_targets/consistency.rs:208` — `#[allow(dead_code, reason = "reserved for future invariant checks that need direct db access")]` on `FuzzState.db` field. No TODO needed — the field is reserved for future invariants (e.g., when T1 fills `GrafeoLoroApp::query`, I12 may use it).
+- Neither has an associated TODO (neither needs one — both are intentional reservations, not deferred fixes).
+- 0 `#[allow]` without `reason=` in fuzz crate.
+
