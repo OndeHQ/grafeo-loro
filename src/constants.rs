@@ -31,6 +31,18 @@ pub const DEFAULT_STALENESS_MS: u64 = 5000;
 /// reaching into the compression module (anti-plenger #2 DRY/SSOT).
 pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
 
+/// Embedding dimension used by `hydration::vector::generate_local_embedding`
+/// (Phase 3 Task 3) and required by Grafeo's HNSW vector index at index-creation
+/// time. Value `384` matches `sentence-transformers/all-MiniLM-L6-v2` — the
+/// preset `EmbeddingModelConfig::MiniLmL6v2` in `grafeo-engine-0.5.42`
+/// (`src/embedding/config.rs:18`: `expected_dimensions: 384`). Named here as
+/// SSOT so the stub, the real ONNX wiring (future loop), and the Grafeo HNSW
+/// index-creation call site all agree on a single dimension source; the value
+/// can be swapped in one place if Task 4 / Phase 5 moves to `MiniLmL12-v2`
+/// (also 384) or `bge-small-en-v1.5` (also 384) — all-MiniLM/bge-small presets
+/// share 384, so the SSOT is forward-compatible for the foreseeable roadmap.
+pub const DEFAULT_EMBEDDING_DIM: usize = 384;
+
 // Outbound CDC poller cadence (Grafeo→Loro path). Grafeo 0.5.42 CDC is
 // poll-based: the outbound worker calls `session.changes_between(start, end)`
 // on this interval. 50 ms ≈ 20 polls/sec — low latency without burning CPU.
