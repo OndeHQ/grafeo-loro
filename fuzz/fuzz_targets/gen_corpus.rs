@@ -45,6 +45,12 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+// Shared fuzz types (DRY/SSOT — anti-plenger #5). Defined in
+// `fuzz/fuzz_targets/lib.rs` so both the `consistency` fuzz target and this
+// seed-corpus generator use the same definitions. Replaces the prior
+// `EncFuzzOp`/`EncFuzzValue` mirror enums (removed in P7-L2-E).
+use grafeo_loro_fuzz::{FuzzOp, FuzzValue};
+
 /// Encode a `u64` as 8 bytes little-endian.
 fn enc_u64(buf: &mut Vec<u8>, v: u64) {
     buf.extend_from_slice(&v.to_le_bytes());
@@ -67,11 +73,11 @@ fn enc_string(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(bytes);
 }
 
-/// Encode an `FuzzOp` variant. The discriminant byte picks the variant; the
+/// Encode a `FuzzOp` variant. The discriminant byte picks the variant; the
 /// payload encodes the variant's fields in declaration order.
-fn enc_fuzz_op(buf: &mut Vec<u8>, op: &EncFuzzOp) {
+fn enc_fuzz_op(buf: &mut Vec<u8>, op: &FuzzOp) {
     match op {
-        EncFuzzOp::UpsertNode {
+        FuzzOp::UpsertNode {
             loro_key,
             labels,
             properties,
@@ -88,7 +94,7 @@ fn enc_fuzz_op(buf: &mut Vec<u8>, op: &EncFuzzOp) {
                 enc_fuzz_value(buf, v);
             }
         }
-        EncFuzzOp::UpsertEdge {
+        FuzzOp::UpsertEdge {
             src_key,
             dst_key,
             label,
@@ -104,11 +110,11 @@ fn enc_fuzz_op(buf: &mut Vec<u8>, op: &EncFuzzOp) {
                 enc_fuzz_value(buf, v);
             }
         }
-        EncFuzzOp::DeleteNode { loro_key } => {
+        FuzzOp::DeleteNode { loro_key } => {
             enc_u8(buf, 2);
             enc_string(buf, loro_key);
         }
-        EncFuzzOp::DeleteEdge {
+        FuzzOp::DeleteEdge {
             src_key,
             dst_key,
             label,
@@ -118,7 +124,7 @@ fn enc_fuzz_op(buf: &mut Vec<u8>, op: &EncFuzzOp) {
             enc_string(buf, dst_key);
             enc_string(buf, label);
         }
-        EncFuzzOp::TreeMove {
+        FuzzOp::TreeMove {
             node_key,
             old_parent_key,
             new_parent_key,
@@ -131,23 +137,23 @@ fn enc_fuzz_op(buf: &mut Vec<u8>, op: &EncFuzzOp) {
     }
 }
 
-/// Encode an `FuzzValue` variant.
-fn enc_fuzz_value(buf: &mut Vec<u8>, v: &EncFuzzValue) {
+/// Encode a `FuzzValue` variant.
+fn enc_fuzz_value(buf: &mut Vec<u8>, v: &FuzzValue) {
     match v {
-        EncFuzzValue::Null => enc_u8(buf, 0),
-        EncFuzzValue::Bool(b) => {
+        FuzzValue::Null => enc_u8(buf, 0),
+        FuzzValue::Bool(b) => {
             enc_u8(buf, 1);
             enc_u8(buf, if *b { 1 } else { 0 });
         }
-        EncFuzzValue::I64(i) => {
+        FuzzValue::I64(i) => {
             enc_u8(buf, 2);
             buf.extend_from_slice(&i.to_le_bytes());
         }
-        EncFuzzValue::F64(f) => {
+        FuzzValue::F64(f) => {
             enc_u8(buf, 3);
             buf.extend_from_slice(&f.to_le_bytes());
         }
-        EncFuzzValue::Str(s) => {
+        FuzzValue::Str(s) => {
             enc_u8(buf, 4);
             enc_string(buf, s);
         }
@@ -157,7 +163,7 @@ fn enc_fuzz_value(buf: &mut Vec<u8>, v: &EncFuzzValue) {
 /// Encode a complete `FuzzInput` (seed, ops, peer_count, bail_after_ops).
 /// Appends trailing bytes that `arbitrary`'s `Vec` length-decode reads from
 /// the END of the buffer.
-fn enc_fuzz_input(seed: u64, ops: &[EncFuzzOp], peer_count: u8, bail_after_ops: u16) -> Vec<u8> {
+fn enc_fuzz_input(seed: u64, ops: &[FuzzOp], peer_count: u8, bail_after_ops: u16) -> Vec<u8> {
     let mut buf = Vec::new();
     enc_u64(&mut buf, seed);
     // For the ops Vec, write each op's encoding inline. The length-decode in
@@ -172,49 +178,6 @@ fn enc_fuzz_input(seed: u64, ops: &[EncFuzzOp], peer_count: u8, bail_after_ops: 
     // Clamped to u8 since `arbitrary_len` reads 1 byte.
     buf.push((ops.len() % 256) as u8);
     buf
-}
-
-// Enum mirrors for the seed corpus (avoids depending on the `arbitrary` derive
-// at gen time — keeps the generator self-contained).
-enum EncFuzzOp {
-    UpsertNode {
-        loro_key: String,
-        labels: Vec<String>,
-        properties: Vec<(String, EncFuzzValue)>,
-    },
-    UpsertEdge {
-        src_key: String,
-        dst_key: String,
-        label: String,
-        properties: Vec<(String, EncFuzzValue)>,
-    },
-    DeleteNode {
-        loro_key: String,
-    },
-    DeleteEdge {
-        src_key: String,
-        dst_key: String,
-        label: String,
-    },
-    TreeMove {
-        node_key: String,
-        old_parent_key: String,
-        new_parent_key: String,
-    },
-}
-
-/// Mirror of `FuzzValue`. All 5 variants kept for parity with the fuzz-target
-/// enum, even if the 5 seed scenarios only exercise a subset.
-#[allow(
-    dead_code,
-    reason = "mirror of FuzzValue; all variants kept for parity"
-)]
-enum EncFuzzValue {
-    Null,
-    Bool(bool),
-    I64(i64),
-    F64(f64),
-    Str(String),
 }
 
 /// Write `bytes` to `corpus/consistency/<name>.bin` (relative to the fuzz
@@ -244,12 +207,12 @@ fn main() -> std::io::Result<()> {
     // 2. single_upsert.bin — one UpsertNode.
     let single_upsert = enc_fuzz_input(
         7,
-        &[EncFuzzOp::UpsertNode {
+        &[FuzzOp::UpsertNode {
             loro_key: "V/alice".into(),
             labels: vec!["Person".into()],
             properties: vec![
-                ("name".into(), EncFuzzValue::Str("Alice".into())),
-                ("age".into(), EncFuzzValue::I64(30)),
+                ("name".into(), FuzzValue::Str("Alice".into())),
+                ("age".into(), FuzzValue::I64(30)),
             ],
         }],
         1,
@@ -261,33 +224,33 @@ fn main() -> std::io::Result<()> {
     let all_variants = enc_fuzz_input(
         99,
         &[
-            EncFuzzOp::UpsertNode {
+            FuzzOp::UpsertNode {
                 loro_key: "V/n1".into(),
                 labels: vec!["A".into()],
-                properties: vec![("k".into(), EncFuzzValue::I64(1))],
+                properties: vec![("k".into(), FuzzValue::I64(1))],
             },
-            EncFuzzOp::UpsertNode {
+            FuzzOp::UpsertNode {
                 loro_key: "V/n2".into(),
                 labels: vec!["B".into()],
-                properties: vec![("k".into(), EncFuzzValue::I64(2))],
+                properties: vec![("k".into(), FuzzValue::I64(2))],
             },
-            EncFuzzOp::UpsertEdge {
+            FuzzOp::UpsertEdge {
                 src_key: "V/n1".into(),
                 dst_key: "V/n2".into(),
                 label: "KNOWS".into(),
-                properties: vec![("since".into(), EncFuzzValue::I64(2024))],
+                properties: vec![("since".into(), FuzzValue::I64(2024))],
             },
-            EncFuzzOp::TreeMove {
+            FuzzOp::TreeMove {
                 node_key: "V/n2".into(),
                 old_parent_key: "V/n1".into(),
                 new_parent_key: "V/n1".into(),
             },
-            EncFuzzOp::DeleteEdge {
+            FuzzOp::DeleteEdge {
                 src_key: "V/n1".into(),
                 dst_key: "V/n2".into(),
                 label: "KNOWS".into(),
             },
-            EncFuzzOp::DeleteNode {
+            FuzzOp::DeleteNode {
                 loro_key: "V/n2".into(),
             },
         ],
@@ -301,24 +264,24 @@ fn main() -> std::io::Result<()> {
     let cycle_attempt = enc_fuzz_input(
         13,
         &[
-            EncFuzzOp::UpsertNode {
+            FuzzOp::UpsertNode {
                 loro_key: "V/parent".into(),
                 labels: vec!["N".into()],
                 properties: vec![],
             },
-            EncFuzzOp::UpsertNode {
+            FuzzOp::UpsertNode {
                 loro_key: "V/child".into(),
                 labels: vec!["N".into()],
                 properties: vec![],
             },
-            EncFuzzOp::UpsertEdge {
+            FuzzOp::UpsertEdge {
                 src_key: "V/parent".into(),
                 dst_key: "V/child".into(),
                 label: "CHILD".into(),
                 properties: vec![],
             },
             // Attempt to move `parent` under `child` — would create a cycle.
-            EncFuzzOp::TreeMove {
+            FuzzOp::TreeMove {
                 node_key: "V/parent".into(),
                 old_parent_key: "V/nonexistent".into(),
                 new_parent_key: "V/child".into(),
@@ -331,12 +294,12 @@ fn main() -> std::io::Result<()> {
 
     // 5. large_batch.bin — 256 ops (tests I3b batcher-drain path — I13 was a
     //    tautology and removed in P6-L2-FIX; I3b covers the behavior).
-    let mut large_ops: Vec<EncFuzzOp> = Vec::with_capacity(256);
+    let mut large_ops: Vec<FuzzOp> = Vec::with_capacity(256);
     for i in 0..256u32 {
-        large_ops.push(EncFuzzOp::UpsertNode {
+        large_ops.push(FuzzOp::UpsertNode {
             loro_key: format!("V/large-{i}"),
             labels: vec!["Batch".into()],
-            properties: vec![("idx".into(), EncFuzzValue::I64(i as i64))],
+            properties: vec![("idx".into(), FuzzValue::I64(i as i64))],
         });
     }
     let large_batch = enc_fuzz_input(256, &large_ops, 1, 1000);
