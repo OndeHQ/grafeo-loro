@@ -39,3 +39,14 @@
 - `tokio::spawn` (line 320) used correctly inside runtime to run `MutationBatcher::run` concurrently.
 - Imports use real `grafeo_loro` crate APIs: `bridge::{apply_loro_op, BridgeMaps}`, `compression::CompressedPayload`, `config::CompressionType`, `constants::*`, `types::{EpochId, PresencePayload, ...}`, `VectorOffloadManager`. No reinvented logic — the harness respects the global async architecture.
 
+## Anti-Pattern #4: Band-Aids
+
+**Hunt**: `rg 'unwrap\(\)|expect\(' fuzz/fuzz_targets/consistency.rs` + `rg 'TODO.*(refactor|fix)' src/`
+
+**Verdict**: NOT FOUND — clean by inspection.
+
+- 19 `expect()` calls in `consistency.rs`, ALL with invariant-labeled messages (e.g., `"I5: init_loro_subscriber failed"`, `"I6: apply_loro_op failed"`, `"I10: tokio runtime construction failed"`).
+- These are INTENTIONAL crash-on-failure semantics for the libfuzzer harness — if an underlying API returns Err, the fuzzer SHOULD panic (libfuzzer treats panic as a crash to investigate). This is correct design, not a band-aid. No `unwrap()` calls (which would be context-free); all are `.expect("I<n>: ...")` with diagnostic messages.
+- 0 `unwrap()` calls in consistency.rs.
+- 2 `TODO refactor` in src/ (`app.rs:251`, `batcher.rs:104`) — pre-existing Phase 5 wiring tech debt with documented "future phase" plan. NOT Phase 6 band-aids, NOT masking broken behavior. (Already noted in #1.)
+
