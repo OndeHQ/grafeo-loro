@@ -559,7 +559,19 @@ fn compensate_loro_vertex(
                 doc.commit();
                 Ok(())
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                // Clear the pending `ORIGIN_LORO_BRIDGE` origin tag (P2T3-L2R2
+                // MINOR 3). Without this `commit()`, a subsequent Loro write
+                // that doesn't call `set_next_commit_origin` would inherit
+                // `ORIGIN_LORO_BRIDGE` and be silently filtered by the B1
+                // inbound filter. In Phase 2 all Loro writes go through
+                // `commit()` or `apply_change_event_to_loro`, both of which
+                // set their own origin, so this is defensive — but the cost
+                // is one extra `commit()` call (no-op on the doc state since
+                // `delete` failed before mutating anything).
+                doc.commit();
+                Err(e)
+            }
         }
     };
     match comp_result {
