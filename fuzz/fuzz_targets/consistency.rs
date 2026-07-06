@@ -24,7 +24,7 @@
 //!
 //! # Invariant check cadence (per docs/phase-6/fuzz-invariants.md)
 //!
-//! - **Every iteration** (cheap): I1, I2, I3a, I3b, I3c, I4, I11, I13, I15
+//! - **Every iteration** (cheap): I1, I2, I3a, I3b, I3c, I4, I11, I15
 //! - **Periodic** (every 1000 ops OR final): I7, I9
 //! - **Event-driven** (when the relevant op fires): I5, I6, I8, I10, I12, I14
 //!
@@ -253,8 +253,8 @@ fn check_i2_edge_state_parity(state: &FuzzState) {
     let loro_edges: HashSet<(String, String, String)> =
         state.live_edge_keys.iter().cloned().collect();
     assert_eq!(
-        bridge_edges.len(),
-        loro_edges.len(),
+        bridge_edges,
+        loro_edges,
         "I2: edge state parity violated — bridge has {} edges, loro has {} edges",
         bridge_edges.len(),
         loro_edges.len()
@@ -674,21 +674,6 @@ fn check_i12_mvcc_snapshot_isolation() {
     // cannot be implemented until Phase 6 T1 fills `GrafeoLoroApp::query`.
 }
 
-/// I13 — Batcher count invariant: after `MutationBatcher::run` flushes a batch
-/// of N ops, `inbound_event_count` MUST reflect the forwarded-op count. The
-/// fuzz target does not run a full `SyncEngine` here (that's I3b + I5); we
-/// verify the `MutationBatcher`'s internal queue is empty after `run` returns
-/// by checking that the batcher's `buffer` mutex holds an empty Vec.
-fn check_i13_batcher_count(batcher_buffer_is_empty: bool, op_count: u64) {
-    // Non-trivial assertion: the batcher's internal buffer MUST be empty after
-    // `run` returns (shutdown path drains the buffer).
-    assert!(
-        batcher_buffer_is_empty,
-        "I13: batcher buffer not empty after run — {} ops may be in limbo",
-        op_count
-    );
-}
-
 /// I14 — Tree move serializability: after any sequence of `TreeMove` ops, the
 /// Grafeo tree (CHILD edges) MUST NOT contain a cycle. We traverse the
 /// parent→child tree from every node and assert no node is revisited within a
@@ -898,15 +883,13 @@ fuzz_target!(|data: &[u8]| {
     // I3c: parallel_hydrate (sync — no runtime needed).
     check_i3c_no_panic_in_parallel_hydrate(&state);
 
-    // I13: batcher buffer empty after run. We can't access the batcher's
-    // private `buffer` field from here, so we pass `true` (the buffer is
-    // drained by `run`'s shutdown path — verified in `check_i3b_no_panic_in_batcher_run`
-    // which actually runs the batcher). The non-trivial assertion is that the
-    // batcher completed without panic (I3b), which implies the buffer was
-    // drained. We assert `true` here with a concrete value comparison: the
-    // batcher's `inbound_event_count` would be 0 if it never ran, but since
-    // we don't have a batcher instance here, the I3b check covers this.
-    check_i13_batcher_count(true, op_count);
+    // I13 (batcher count / buffer-empty-after-run) is COVERED BY I3b: I3b
+    // spawns `MutationBatcher::run`, feeds ops via channel, triggers shutdown,
+    // and asserts `JoinHandle::await` is `Ok`. If the batcher failed to drain
+    // its buffer, it would either panic (caught by I3b's JoinError assert) or
+    // hang (the test would time out). The previous `check_i13_batcher_count`
+    // fn was a tautology (`assert!(true)`) — removed per anti-plenger #11
+    // (Deletion over addition) in P6-L2-FIX (Hunter Task 5b finding).
 
     // I15: presence envelope integrity (pure function — no state needed).
     let payload = PresencePayload {

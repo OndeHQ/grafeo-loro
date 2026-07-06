@@ -329,7 +329,8 @@ fn main() -> std::io::Result<()> {
     );
     write_seed("cycle_attempt", &cycle_attempt)?;
 
-    // 5. large_batch.bin — 256 ops (tests I13 batch-count invariant).
+    // 5. large_batch.bin — 256 ops (tests I3b batcher-drain path — I13 was a
+    //    tautology and removed in P6-L2-FIX; I3b covers the behavior).
     let mut large_ops: Vec<EncFuzzOp> = Vec::with_capacity(256);
     for i in 0..256u32 {
         large_ops.push(EncFuzzOp::UpsertNode {

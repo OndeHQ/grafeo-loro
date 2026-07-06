@@ -38,7 +38,9 @@ Checklist of consistency invariants the `consistency` fuzz target must verify af
 
   > **DEFERRED (Phase 6 T1)**: `GrafeoLoroApp::query` is `unimplemented!()` per user exclusion. A proper check requires: (1) start a read-only session at epoch E, (2) advance the epoch via a concurrent write, (3) read via the read-only session — MUST observe the E snapshot, not the new one. Without `query`, the "observe a consistent snapshot" half of the invariant cannot be verified. The fuzz harness documents this deferral via the empty `check_i12_mvcc_snapshot_isolation` stub + this note. Re-enable once T1 fills the query body.
 
-- [ ] **I13 — Batcher count invariant**: After `MutationBatcher::run` flushes a batch of size `N`, `inbound_event_count` must increment by exactly `N`, and the batcher's internal queue must be empty.
+- [x] **I13 — Batcher count invariant** (COVERED BY I3b): After `MutationBatcher::run` flushes a batch of size `N`, `inbound_event_count` must increment by exactly `N`, and the batcher's internal queue must be empty.
+
+  > **Covered by I3b (P6-L2-FIX, Hunter Task 5b)**: A standalone `check_i13_batcher_count` fn was a tautology — the call site hardcoded the `batcher_buffer_is_empty` parameter to `true`, making the fn's `assert!(batcher_buffer_is_empty, ...)` reduce to `assert!(true)`. The fn + call site were removed per anti-plenger #11 (Deletion over addition). I3b (`check_i3b_no_panic_in_batcher_run`) covers the underlying behavior: it spawns `MutationBatcher::run`, feeds ops via channel, triggers shutdown, and asserts `JoinHandle::await` is `Ok`. If the batcher failed to drain its buffer, it would either panic (caught by I3b's JoinError assert) or hang (test timeouts).
 
 - [ ] **I14 — Tree move serializability**: `sync_tree_move_to_grafeo` under `IsolationLevel::Serializable` must never produce a cycle in the parent-child tree, regardless of concurrent move op ordering (architecture §7, §22).
 
@@ -53,7 +55,7 @@ Checklist of consistency invariants the `consistency` fuzz target must verify af
 - **L3**: For each fuzz iteration, build a fresh `GrafeoLoroApp` (or reuse with reset), apply the op batch, then assert every invariant above. Failure → `panic!` (libfuzzer treats as crash).
 
 - **L3 — Per-iteration vs periodic cadence** (per Devil C5.3 + C5.6):
-  - **Checked every iteration** (cheap, O(1) or O(n) over current state): I1, I2, I3a/b/c, I4, I11, I13, I15.
+  - **Checked every iteration** (cheap, O(1) or O(n) over current state): I1, I2, I3a/b/c, I4, I11, I15. (I13 was removed in P6-L2-FIX — covered by I3b.)
   - **Checked periodically** (expensive I/O or full re-hydration): I7, I9.
     - Concrete cadence:
       - I7 (snapshot idempotency): every 1000 iterations OR on the final iteration of each fuzz run (whichever comes first). Cost: ~10-50ms per check.
@@ -75,7 +77,7 @@ Checklist of consistency invariants the `consistency` fuzz target must verify af
     2. `single_upsert.bin` — one UpsertNode
     3. `all_variants.bin` — one of each LoroOp variant
     4. `cycle_attempt.bin` — TreeMove that would create a cycle (tests I14)
-    5. `large_batch.bin` — 256 ops (tests I13 batch-count invariant)
+    5. `large_batch.bin` — 256 ops (tests I3b batcher-drain path — I13 was a tautology and removed in P6-L2-FIX; I3b covers the behavior)
   - **Regeneration** (idempotent per anti-plenger #9 — identical SHA256 on re-run):
     ```text,ignore
     cargo run --bin gen_corpus --manifest-path fuzz/Cargo.toml
