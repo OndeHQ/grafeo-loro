@@ -3636,3 +3636,42 @@ Stage Summary:
 - `phase-3` branch will be fast-forwarded to `p3-parallel-hydrate` HEAD after this commit.
 
 Next: Phase 3 Task 3 (`hydration::vector::generate_local_embedding` stub + ONNX warning).
+
+---
+Task ID: ORCH-P3T3-SETUP
+Agent: Orchestrator (Super Z)
+Task: Open Plonga-Plongo-Loop for Phase 3 Task 3 (hydration::vector::generate_local_embedding stub); spawn L1
+
+Work Log:
+- Merged `p3-parallel-hydrate` into `phase-3` (fast-forward); pushed `phase-3` to origin (`3a59bef..d141bad`).
+- Created `p3-vector-embedding` branch from `phase-3` HEAD (`d141bad`).
+- Phase 3 Task 3 scope (per docs/implementation-plan.md §Phase 3 Task 3):
+  1. Stub `hydration::vector::generate_local_embedding`
+     - Return deterministic dummy vector for now.
+     - Log warning: "ONNX not integrated".
+- Phase 3 Task 4 scope (NEXT loop, deferred):
+  - `VectorOffloadManager::handle_text_update` — generate embedding → direct Grafeo upsert (bypass Loro).
+  - Also `VectorOffloadManager::new` (currently `unimplemented!()`).
+- Existing skeleton (`src/hydration/vector.rs`, 30 lines):
+  - `VectorOffloadManager { db: Arc<GrafeoDB> }` + `new(db)` + `handle_text_update(node_id, text)` + private `generate_local_embedding(text) -> Vec<f32>`.
+  - ALL bodies `unimplemented!()`.
+  - Task 3 owns ONLY `generate_local_embedding`. Task 4 owns `new` + `handle_text_update`.
+  - L1 for Task 3 MAY refine `generate_local_embedding`'s signature (e.g. add `Result<Vec<f32>>` return, or dimension parameter) but MUST NOT implement `new`/`handle_text_update` (Task 4 scope).
+- grafeo 0.5.42 has its own `embedding` module (`grafeo_engine::embedding::{EmbeddingModel, OnnxEmbeddingModel}`) with `embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>` and `dimensions() -> usize`. Task 3's stub does NOT use this (spec says "stub for now"); Task 4 may use it OR keep the stub. The spec is explicit: "Return deterministic dummy vector for now."
+- Validation gates for Phase 3 Task 3:
+  - The spec's Phase 3 validation list does NOT have a Task 3-specific test. The relevant gate is "Test: Vector never written to Loro container" (Task 4 owns this). Task 3's only requirement is the warning log + deterministic output.
+  - L1 should scaffold a test: `generate_local_embedding_is_deterministic` (same input → same output) + `generate_local_embedding_logs_onnx_warning` (verify `tracing::warn!` fired — may need test capture).
+
+Loop Plan for this $stn (`p3-vector-embedding`):
+1. L1 scaffolding (contracts/types/signatures only) ← `Task ID: P3T3-L1`
+2. Devil's advocate critique ← `Task ID: P3T3-DEVIL`
+3. Fixer (L2 wiring) ← `Task ID: P3T3-L2`
+4. L3 deep implementation ← `Task ID: P3T3-L3`
+5. Plenger hunter ← `Task ID: P3T3-HUNT`
+6. Loop back to step 3 if MAJORs found, else push $stn and close.
+
+Stage Summary:
+- `phase-3` branch pushed (aggregates Tasks 1+2).
+- $stn for this loop = `p3-vector-embedding` (branch created, currently == phase-3 HEAD `d141bad`).
+- Baseline: 0 errors / 5 pre-existing warnings / 47 tests passing (carried over from Phase 3 Task 2 close).
+- Next: spawn P3T3-L1 subagent.
