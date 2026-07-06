@@ -80,29 +80,32 @@ fn tree_move_basic() {
     );
 }
 
-/// Reparenting a node under its own descendant must return
+/// Reparenting a non-root node under its own descendant must return
 /// `Err(GrafeoLoroError::TreeMoveCreatesCycle { node_id, new_parent })`.
 /// Grafeo 0.5.42 has no native acyclicity check (verified P2T2-L1), so the
-/// bridge's `would_create_cycle_precheck` pre-check is the only defense.
+/// bridge's `would_create_cycle_in_tx` pre-check is the only defense. This
+/// exercises the GENERAL cycle case (non-root `mid` with a real parent edge
+/// being moved under its descendant `leaf`), distinct from
+/// `tree_move_root_to_descendant_rejected_as_cycle` which covers the
+/// root-specific case (P2T2-HUNT m1).
 #[test]
 fn tree_move_cycle_rejected() {
     let db = GrafeoDB::new_in_memory();
-    let (root, _mid, leaf) = build_chain_fixture(&db);
-    // Move `root` under `leaf` — `leaf` is a descendant of `root`, so the
-    // pre-check must reject with `TreeMoveCreatesCycle`. `old_parent=root` is
-    // a sentinel (root has no real parent); the cycle pre-check fires BEFORE
-    // the old-edge delete step, so the sentinel is never used.
-    let err = sync_tree_move_to_grafeo(&db, root, root, leaf).unwrap_err();
+    let (root, mid, leaf) = build_chain_fixture(&db);
+    // Move `mid` (which has `root` as a real parent) under `leaf` — `leaf` is
+    // a descendant of `mid`, so the pre-check must reject with
+    // `TreeMoveCreatesCycle`. Unlike `tree_move_root_to_descendant_rejected_as_cycle`,
+    // this exercises the case where the moved node has a real parent edge
+    // (`root→mid`), so the best-effort delete step WOULD have an edge to
+    // delete if the pre-check didn't fire first.
+    let err = sync_tree_move_to_grafeo(&db, mid, root, leaf).unwrap_err();
     assert!(
         matches!(err, GrafeoLoroError::TreeMoveCreatesCycle { .. }),
         "expected TreeMoveCreatesCycle, got {err:?}"
     );
-    // Anti-Goodhart: assert the graph is actually unchanged (no edge mutated).
-    let leaf_parents = parents_of(&db, leaf);
-    assert!(
-        leaf_parents.contains(&_mid) && leaf_parents.len() == 1,
-        "graph must be unchanged after cycle rejection, leaf parents = {leaf_parents:?}"
-    );
+    // Anti-Goodhart: graph unchanged — root→mid and mid→leaf both intact.
+    assert_eq!(parents_of(&db, mid), vec![root], "root→mid edge must be intact");
+    assert_eq!(parents_of(&db, leaf), vec![mid], "mid→leaf edge must be intact");
 }
 
 /// Moving a root (no parent edge) under its own descendant must return
