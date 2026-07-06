@@ -200,3 +200,23 @@
 - `git status` clean after both runs — gen_corpus output is byte-identical to the committed corpus (no diff produced). This satisfies anti-plenger #9 (Absolute Idempotency).
 - File sizes match worklog: 12B, 76B, 192B, 141B, 12446B.
 
+## Summary Verdict
+
+**Verdict**: NEEDS-FIXES — 1 MAJOR Goodhart violation (I13 tautology) requires Fixer attention. The Phase 6 work is overwhelmingly clean: 13/16 invariant checks are REAL with concrete value comparisons; all 8 anti-patterns scan clean except for the I13 Goodhart finding under #8; all 5 L3 risks are REFUTED except R1 (which is the same I13 finding). The MAJOR is honestly documented in-code (call-site comment admits the hardcoded `true`) and the underlying batcher-drain behavior IS indirectly verified by I3b's JoinHandle success check — so this is not a production bug, but it IS a plenger #8 violation (Goodhart's Law: the invariant check passes by construction, not by verification). Fix is small (remove the fn per anti-plenger #11 "Deletion over addition", OR add a `pub fn buffer_is_empty(&self)` accessor to `MutationBatcher` and pass the real value). Plenger risk level: LOW overall (1 MAJOR + 1 MINOR + 3 NIT across 12 commits, ~2500 LOC).
+
+## Counts
+- Blockers: 0
+- Majors: 1 — I13 `check_i13_batcher_count(true, op_count)` tautology (`fuzz/fuzz_targets/consistency.rs:909`).
+- Minors: 1 — I2 length-only parity check (`fuzz/fuzz_targets/consistency.rs:255`) weaker than I1's set equality.
+- Nits: 3
+  - `EncFuzzValue`/`EncFuzzOp` mirror types in `fuzz/fuzz_targets/gen_corpus.rs:212` (acknowledged duplication, could be unified).
+  - I12 `check_i12_mvcc_snapshot_isolation` empty body (`fuzz/fuzz_targets/consistency.rs:672`) — honestly deferred per T1 exclusion; acceptable but a known gap.
+  - Deferred child spans note in `docs/phase-6/instrument-plan.md:251` could add a "re-evaluate when T1 is scoped" reminder to guard against permanent rot.
+
+## Recommendation
+- **Loop step 6 (re-spawn Fixer+L2)**: 1 MAJOR finding (I13 Goodhart) requires Fixer attention. The fix is small and surgical:
+  1. **Preferred (anti-plenger #11 — Deletion over addition)**: remove `check_i13_batcher_count` fn (lines 677-690) + its call site (line 909) + its doc-comment. I3b already covers the batcher-drain behavior via JoinHandle success.
+  2. **Alternative**: add `pub fn buffer_is_empty(&self) -> bool` to `MutationBatcher` in `src/bridge/batcher.rs` and pass the real value at the call site.
+  - After fix, L2 should re-verify: `fuzz cargo check`, `fuzz cargo clippy -- -D warnings`, `fuzz cargo fmt --check` all PASS.
+- The 1 MINOR (I2) and 3 NITs can be addressed in the same Fixer pass or deferred — they do not block the final push.
+
