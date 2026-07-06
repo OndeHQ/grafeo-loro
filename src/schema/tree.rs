@@ -15,7 +15,7 @@ use std::collections::{HashSet, VecDeque};
 
 use grafeo::GrafeoDB;
 use lorosurgeon::{Hydrate, Reconcile};
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::constants::{ORIGIN_LORO_BRIDGE, TREE_EDGE_LABEL};
 use crate::error::GrafeoLoroError;
@@ -113,6 +113,7 @@ pub struct TreeNode {
 /// - `Session::prepare_commit` — `session/mod.rs:4496` (`&mut self -> Result<PreparedCommit<'_>>`)
 /// - `PreparedCommit::set_metadata` — `transaction/prepared.rs:107` (advisory; dropped on commit per Devil Gap 1)
 /// - `PreparedCommit::commit` — `transaction/prepared.rs:124` (`self -> Result<EpochId>`)
+#[instrument(skip(db), name = "sync_tree_move_to_grafeo", level = "info")]
 pub fn sync_tree_move_to_grafeo(
     db: &GrafeoDB,
     node_id: NodeId,

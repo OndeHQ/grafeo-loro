@@ -4,6 +4,7 @@
 //! `zstd` binds to C zstd (no pure-Rust encoder exists in the ecosystem); `lz4_flex` is pure-Rust.
 
 use loro::{ExportMode, LoroDoc};
+use tracing::instrument;
 
 use crate::config::CompressionType;
 use crate::error::{GrafeoLoroError, Result};
@@ -30,6 +31,7 @@ pub struct CompressedPayload {
 
 impl CompressedPayload {
     /// Compress `raw_bytes` using `strategy`; fails on Zstd I/O errors.
+    #[instrument(skip(raw_bytes), name = "payload_compress", level = "info")]
     pub fn compress(raw_bytes: &[u8], strategy: CompressionType) -> Result<Self> {
         // Dispatch on `strategy`; each arm produces a `raw_data: Vec<u8>`.
         let raw_data = match strategy {
@@ -58,6 +60,7 @@ impl CompressedPayload {
     }
 
     /// Decompress `raw_data` back to the original Loro bytes.
+    #[instrument(skip(self), name = "payload_decompress", level = "info")]
     pub fn decompress(&self) -> Result<Vec<u8>> {
         // Dispatch on `self.compression`; each arm produces `Result<Vec<u8>, GrafeoLoroError>`.
         match self.compression {
@@ -89,6 +92,7 @@ impl CompressedPayload {
     /// (`None=0x00`, `Lz4=0x01`, `Zstd=0x02` — see [`compression_type_to_tag`]).
     /// Pre-allocates exactly `2 + raw_data.len()` so no reallocation occurs.
     /// Symmetric with [`Self::from_wire`].
+    #[instrument(skip(self), name = "payload_to_wire", level = "debug")]
     pub fn to_wire(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(2 + self.raw_data.len());
         buf.push(WIRE_FORMAT_VERSION);
@@ -102,6 +106,7 @@ impl CompressedPayload {
     /// Rejects payloads shorter than the 2-byte header, unknown versions, and
     /// unknown codec tags with [`GrafeoLoroError::Compression`]. Symmetric with
     /// [`Self::to_wire`].
+    #[instrument(skip(bytes), name = "payload_from_wire", level = "debug")]
     pub fn from_wire(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 2 {
             return Err(GrafeoLoroError::Compression(format!(
@@ -125,6 +130,7 @@ impl CompressedPayload {
     /// Convenience: compress raw bytes + serialize to wire format in one call.
     /// Used by `checkpoint` (architecture §4 Step D — persist shallow snapshot
     /// under the builder-configured codec).
+    #[instrument(skip(raw_bytes), name = "compress_to_wire", level = "info")]
     pub fn compress_to_wire(raw_bytes: &[u8], strategy: CompressionType) -> Result<Vec<u8>> {
         let payload = Self::compress(raw_bytes, strategy)?;
         Ok(payload.to_wire())
@@ -133,6 +139,7 @@ impl CompressedPayload {
     /// Convenience: parse wire format + decompress in one call. Used by
     /// `hydrate` (architecture §4 Step A — restore cold-boot state from the
     /// storage backend).
+    #[instrument(skip(bytes), name = "decompress_from_wire", level = "info")]
     pub fn decompress_from_wire(bytes: &[u8]) -> Result<Vec<u8>> {
         let payload = Self::from_wire(bytes)?;
         payload.decompress()
@@ -181,6 +188,7 @@ pub trait LoroDocCompressionExt {
 }
 
 impl LoroDocCompressionExt for LoroDoc {
+    #[instrument(skip(self, mode), name = "export_compressed", level = "info")]
     fn export_compressed(
         &self,
         mode: ExportMode,
@@ -196,6 +204,7 @@ impl LoroDocCompressionExt for LoroDoc {
         CompressedPayload::compress(&bytes, strategy)
     }
 
+    #[instrument(skip(self, payload), name = "import_compressed", level = "info")]
     fn import_compressed(&self, payload: &CompressedPayload) -> Result<loro::ImportStatus> {
         // Flow: decompress payload → bytes → import into `LoroDoc`.
         // `LoroDoc::import(&self, &[u8])` returns `Result<ImportStatus, LoroError>` (verified at loro-1.13.6/src/lib.rs:710).

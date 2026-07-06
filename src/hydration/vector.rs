@@ -4,7 +4,7 @@ use crate::types::ids::NodeId;
 use grafeo::GrafeoDB;
 use std::sync::Arc;
 use std::sync::Once;
-use tracing::warn;
+use tracing::{instrument, warn};
 
 /// Manages offloaded float-vector embeddings. Vectors are never written to
 /// Loro; they go direct to Grafeo's HNSW index.
@@ -33,6 +33,7 @@ impl VectorOffloadManager {
     /// real echo filter per Devil Gap 1). Errors route via existing variants
     /// (`Grafeo` via `#[from] grafeo::Error`; embedding via `Config`/`Bridge`)
     /// — no new variant (anti-plenger #5 Bloat).
+    #[instrument(skip(self, text), name = "handle_text_update", level = "info")]
     pub async fn handle_text_update(&self, node_id: NodeId, text: &str) -> Result<()> {
         // Flow: embed → open CDC-off session → begin tx → phantom pre-check →
         //       convert Vec→Arc→Value::Vector → set_node_property → commit.
@@ -119,6 +120,7 @@ fn u64_to_f01(x: u64) -> f32 {
 /// Stub never returns `Err`; real ONNX can fail (tokenize/infer/model-load),
 /// routed via existing `GrafeoLoroError::Config`/`Bridge` variants (no new
 /// variant — anti-plenger #5 Bloat).
+#[instrument(skip(text), name = "generate_local_embedding", level = "info")]
 pub fn generate_local_embedding(text: &str) -> Result<Vec<f32>> {
     ONNX_WARN_ONCE.call_once(|| {
         warn!("ONNX not integrated; returning deterministic dummy embedding");

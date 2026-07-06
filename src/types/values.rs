@@ -6,6 +6,7 @@ use lorosurgeon::{
     reconcile::NoKey,
     Hydrate, Reconcile, Reconciler,
 };
+use tracing::instrument;
 
 use crate::error::{GrafeoLoroError, Result};
 
@@ -156,6 +157,7 @@ impl std::convert::TryFrom<GraphValue> for LoroProperty {
 }
 
 /// Pure recursive `LoroValue → GraphValue` (architecture §5). Rejects `Binary`/`Container`.
+#[instrument(skip(val), name = "lval_to_gval", level = "trace")]
 pub fn lval_to_gval(val: loro::LoroValue) -> Result<GraphValue> {
     use loro::LoroValue as LV;
     Ok(match val {
@@ -181,6 +183,7 @@ pub fn lval_to_gval(val: loro::LoroValue) -> Result<GraphValue> {
 }
 
 /// Pure `GraphValue → grafeo::Value` for the inbound apply path.
+#[instrument(skip(val), name = "gval_to_grafeo_value", level = "trace")]
 pub fn gval_to_grafeo_value(val: GraphValue) -> grafeo::Value {
     use grafeo::Value as GV;
     match val {
@@ -205,6 +208,7 @@ pub fn gval_to_grafeo_value(val: GraphValue) -> grafeo::Value {
 /// Pure `grafeo::Value → LoroValue` for the outbound worker. Exotic grafeo
 /// variants (Timestamp/Date/Time/Duration/Path/Counter/Bytes) collapse to
 /// `Null` — Phase 1 only round-trips the JSON-shaped subset shared with LoroValue.
+#[instrument(skip(val), name = "grafeo_value_to_lval", level = "trace")]
 pub fn grafeo_value_to_lval(val: &grafeo::Value) -> loro::LoroValue {
     use loro::LoroValue as LV;
     match val {

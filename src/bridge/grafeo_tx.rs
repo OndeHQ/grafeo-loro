@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use parking_lot::RwLock;
+use tracing::instrument;
 
 use crate::constants::TREE_EDGE_LABEL;
 use crate::error::{GrafeoLoroError, Result};
@@ -42,6 +43,7 @@ impl BridgeMaps {
 
     /// Record a `loro_key ↔ grafeo::NodeId` binding in both forward and
     /// inverse maps. Overwrites any prior binding for either side.
+    #[instrument(skip(self), name = "bridge_insert_node", level = "trace")]
     pub fn insert_node(&self, loro_key: String, id: grafeo::NodeId) {
         self.node_id_map.write().insert(loro_key.clone(), id);
         self.node_key_map.write().insert(id, loro_key);
@@ -49,6 +51,7 @@ impl BridgeMaps {
 
     /// Remove a `loro_key ↔ grafeo::NodeId` binding from both maps. Returns
     /// the grafeo id if the key was present (no-op otherwise).
+    #[instrument(skip(self), name = "bridge_remove_node", level = "trace")]
     pub fn remove_node(&self, loro_key: &str) -> Option<grafeo::NodeId> {
         let id = self.node_id_map.write().remove(loro_key)?;
         self.node_key_map.write().remove(&id);
@@ -56,12 +59,14 @@ impl BridgeMaps {
     }
 
     /// Record an `EdgeKey ↔ grafeo::EdgeId` binding in both maps.
+    #[instrument(skip(self), name = "bridge_insert_edge", level = "trace")]
     pub fn insert_edge(&self, key: EdgeKey, id: grafeo::EdgeId) {
         self.edge_id_map.write().insert(key.clone(), id);
         self.edge_key_map.write().insert(id, key);
     }
 
     /// Remove an edge binding by `EdgeKey`. Returns the grafeo id if present.
+    #[instrument(skip(self), name = "bridge_remove_edge", level = "trace")]
     pub fn remove_edge(&self, key: &EdgeKey) -> Option<grafeo::EdgeId> {
         let id = self.edge_id_map.write().remove(key)?;
         self.edge_key_map.write().remove(&id);
@@ -70,6 +75,7 @@ impl BridgeMaps {
 
     /// Remove an edge binding by grafeo `EdgeId`. Returns the Loro-side key
     /// tuple if present (used when translating a CDC `EdgeDelete` event).
+    #[instrument(skip(self), name = "bridge_remove_edge_by_id", level = "trace")]
     pub fn remove_edge_by_id(&self, id: grafeo::EdgeId) -> Option<EdgeKey> {
         let key = self.edge_key_map.write().remove(&id)?;
         self.edge_id_map.write().remove(&key);
@@ -83,6 +89,7 @@ impl BridgeMaps {
 /// new entity and inserts both forward and inverse bindings. Delete ops are
 /// idempotent (missing key = no-op). `TreeMove` is implemented as
 /// delete-old-CHILD-edge + insert-new-CHILD-edge per L3 mandate.
+#[instrument(skip(session, op, maps), name = "apply_loro_op", level = "info")]
 pub fn apply_loro_op(session: &grafeo::Session, op: &LoroOp, maps: &BridgeMaps) -> Result<()> {
     match op {
         LoroOp::UpsertNode {

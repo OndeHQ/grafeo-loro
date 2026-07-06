@@ -27,6 +27,7 @@ use std::fmt;
 
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::KeyValue;
+use tracing::instrument;
 
 /// Hydration mode for `record_hydration` attribute labelling (architecture
 /// §23.1 row 5 label `mode` ∈ {`"loro"`, `"grafeo"}`).
@@ -118,6 +119,7 @@ impl MetricsRegistry {
     /// - `batch_size` → attribute set on the histogram record (architecture
     ///   §23.1 row 4 labels: `batch_size`).
     /// - No-op if the registry's instruments are no-ops (test mode).
+    #[instrument(skip(self), name = "record_batch_flush", level = "trace")]
     pub fn record_batch_flush(&self, duration_ms: f64, batch_size: u64) {
         // P5-L3: architecture §23.1 row 4 — `batch_flush_duration_ms` with
         // label `batch_size`. `u64` → `i64` cast because OTel `Value` does
@@ -140,6 +142,7 @@ impl MetricsRegistry {
     ///   [`HydrationMode`] enum per Devil m1 (Q6 ruling) — `&str` form
     ///   replaced by the enum to prevent typos at compile time; the enum's
     ///   `Display` impl renders the OTLP attribute value (`"loro"` / `"grafeo"`).
+    #[instrument(skip(self), name = "record_hydration", level = "trace")]
     pub fn record_hydration(&self, duration_ms: f64, mode: HydrationMode) {
         // P5-L3: architecture §23.1 row 5 — `hydration_duration_ms` with
         // label `mode` ∈ {`"loro"`, `"grafeo"`}. `mode.to_string()` is

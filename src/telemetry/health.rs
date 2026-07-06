@@ -42,6 +42,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use grafeo::GrafeoDB;
 use loro::LoroDoc;
 use parking_lot::RwLock;
+use tracing::instrument;
 
 /// Wall-clock milliseconds since UNIX epoch.
 ///
@@ -125,6 +126,7 @@ impl HealthProbe {
     ///
     /// - `self.last_sync_ts.store(now_ms, Ordering::Relaxed)`.
     /// - `now_ms` from `SystemTime::now().duration_since(UNIX_EPOCH)`.
+    #[instrument(skip(self), name = "update_sync_ts", level = "debug")]
     pub fn update_sync_ts(&self) {
         // P5-L3: stamp current wall-clock ms. `Ordering::Relaxed` per
         // architecture §23.3 — staleness is a soft signal, not a sync
@@ -157,6 +159,7 @@ impl HealthProbe {
     ///   Architecture §23.3 line 1080 was patched in P5-L2 to use `db.session().execute(...)`.
     /// - Q5: Silent return on failure (no `WARN` log) per architecture §23.4 — WARN list
     ///   covers echo loops + batch flush backpressure, NOT health checks.
+    #[instrument(skip(self), name = "health_check", level = "info")]
     pub fn check(&self, max_staleness_ms: u64) -> HealthStatus {
         // P5-L3: three-component probe per architecture §23.3 (Devil M1 —
         // correct Grafeo API is `db.session().execute(...)`, NOT `db.execute(...)`).

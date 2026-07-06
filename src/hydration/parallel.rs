@@ -10,6 +10,7 @@ use loro::LoroDoc;
 use lorosurgeon::Hydrate;
 use opentelemetry::trace::Tracer;
 use rayon::prelude::*;
+use tracing::instrument;
 
 use crate::bridge::apply_loro_op;
 use crate::bridge::grafeo_tx::BridgeMaps;
@@ -39,6 +40,11 @@ use crate::types::values::GraphValue;
 /// # Idempotency assumption
 ///
 /// Caller guarantees `GrafeoDB` + `BridgeMaps` are cold. Re-running on a warm DB will create duplicate nodes (no upsert check). Phase 4 `hydrate()` enforces this.
+#[instrument(
+    skip(db, doc, maps, metrics, tracer),
+    name = "parallel_hydrate_grafeo",
+    level = "info"
+)]
 pub fn parallel_hydrate_grafeo(
     db: &Arc<GrafeoDB>,
     doc: &LoroDoc,

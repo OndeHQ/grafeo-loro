@@ -31,6 +31,7 @@ use parking_lot::Mutex;
 use parking_lot::RwLock;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
+use tracing::instrument;
 
 use crate::bridge::grafeo_tx::{apply_loro_op, BridgeMaps};
 use crate::constants::{DEFAULT_BATCH_MS, DEFAULT_BATCH_SIZE, ORIGIN_LORO_BRIDGE};
@@ -180,6 +181,7 @@ impl MutationBatcher {
     /// size-threshold flush, (b) interval tick → flush, (c) shutdown →
     /// flush remaining + exit. Returns when shutdown fires AND the final
     /// flush completes.
+    #[instrument(skip(self, rx), name = "batcher_run", level = "info")]
     pub async fn run(self: Arc<Self>, mut rx: mpsc::Receiver<LoroOp>) -> Result<()> {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let mut ticker = tokio::time::interval(Duration::from_millis(self.batch_ms));

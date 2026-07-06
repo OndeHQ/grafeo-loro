@@ -6,6 +6,7 @@ use std::sync::Arc;
 use lorosurgeon::reconcile::RootReconciler;
 use lorosurgeon::Reconcile;
 use tokio::task::JoinHandle;
+use tracing::instrument;
 
 use crate::bridge::{apply_loro_op, BridgeMaps, SyncEngine};
 use crate::compression::wrapper::CompressedPayload;
@@ -343,6 +344,7 @@ impl GrafeoLoroApp {
     /// Wiring only: clones the engine handle + the shared counter and returns
     /// a fresh empty [`VertexBuilder`]. No allocations beyond the empty
     /// `Vec`/`HashMap`.
+    #[instrument(skip(self), level = "debug")]
     pub fn create_vertex(&self) -> VertexBuilder {
         VertexBuilder {
             sync_engine: Arc::clone(&self.sync_engine),
@@ -353,12 +355,16 @@ impl GrafeoLoroApp {
     }
 
     /// One-shot GQL query against the materialized Grafeo view.
+    // NOTE: body unimplemented!() — T1 excluded per user; span fires then panics
+    #[instrument(skip(self, gql), level = "info")]
     pub fn query(&self, gql: &str) -> Result<grafeo::QueryResult> {
         let _ = gql;
         unimplemented!("query is Phase 4+ scope")
     }
 
     /// Update a collaborative text field on a vertex.
+    // NOTE: body unimplemented!() — T1 excluded per user; span fires then panics
+    #[instrument(skip(self, text), level = "info")]
     pub async fn update_text(&self, node_id: NodeId, field: &str, text: &str) -> Result<()> {
         let _ = (node_id, field, text);
         unimplemented!("update_text is Phase 3 scope")
@@ -371,6 +377,8 @@ impl GrafeoLoroApp {
     /// the leaf `generate_local_embedding` stub); NOT Task 4 scope (Task 4 owns
     /// `VectorOffloadManager::handle_text_update` + `new`). This is a separate
     /// app-facade concern that composes both — Phase 4+ scope (P3T3-DEVIL M2).
+    // NOTE: body unimplemented!() — T1 excluded per user; span fires then panics
+    #[instrument(skip(self), level = "info")]
     pub async fn generate_embedding(&self, node_id: NodeId, field: &str) -> Result<()> {
         let _ = (node_id, field);
         unimplemented!("generate_embedding is Phase 4+ scope (depends on Task 4's VectorOffloadManager::handle_text_update)")
@@ -467,6 +475,7 @@ impl GrafeoLoroApp {
     /// Calling `checkpoint(graph_id)` twice in succession is a no-op on the
     /// second call IF the Loro doc has not been mutated between calls — the
     /// storage key is overwritten unconditionally (last writer wins).
+    #[instrument(skip(self), level = "info")]
     pub async fn checkpoint(&self, graph_id: &str) -> Result<()> {
         // Manual span (P4-DEVIL Q4 observability) — equivalent to
         // `#[instrument(skip(self), fields(graph_id = %graph_id))]` but without
@@ -714,6 +723,7 @@ impl GrafeoLoroApp {
     /// responsibility: only call once at cold boot. The orchestrator's
     /// `builder().build().await` + `hydrate()` sequence (architecture §24.2)
     /// is the canonical pattern.
+    #[instrument(skip(self), level = "info")]
     pub async fn hydrate(&self, graph_id: &str) -> Result<()> {
         // Manual span (P4-DEVIL M6/M10 observability) — equivalent to
         // `#[instrument(skip(self), fields(graph_id = %graph_id))]` but without
@@ -978,6 +988,8 @@ impl GrafeoLoroApp {
     }
 
     /// Broadcast ephemeral presence over the WebSocket channel.
+    // NOTE: body unimplemented!() — T1 excluded per user; span fires then panics
+    #[instrument(skip(self, payload), level = "info")]
     pub async fn broadcast_presence(&self, payload: PresencePayload) -> Result<()> {
         let _ = payload;
         unimplemented!("broadcast_presence is Phase 5 scope")
@@ -1002,6 +1014,7 @@ impl GrafeoLoroApp {
     ///    configured).
     /// 5. Close `GrafeoDB` (currently no-op — `GrafeoDB::close` is wal-gated
     ///    per P4-DEVIL M3; deferred to Phase 5 wal feature work).
+    #[instrument(skip(self), level = "info")]
     pub async fn shutdown(self) -> Result<()> {
         // P5-L3: 5-step graceful shutdown per architecture §4 Step D +
         // Devil Q15 (no auto-checkpoint) + Devil M3 (flush telemetry).
@@ -1322,6 +1335,7 @@ impl GrafeoLoroAppBuilder {
     /// compile-time error (move). The returned `GrafeoLoroApp` owns the
     /// `Arc<SyncEngine>` exclusively; orchestrator may `Arc::clone` for child
     /// tasks but cannot `build()` twice.
+    #[instrument(skip(self), level = "info")]
     pub async fn build(self) -> Result<GrafeoLoroApp> {
         // 1. Validate config (P4-DEVIL Q5/Q8).
         if self.batch_interval_ms == 0 {
@@ -1621,6 +1635,7 @@ impl VertexBuilder {
     /// - `RootReconciler::new(LoroMap) -> Self` — `reconcile.rs:298`
     /// - `<VertexEntity as Reconcile>::reconcile<R: Reconciler>(&self, R) -> Result<(), ReconcileError>` — `reconcile.rs:92` (Phase 2 Task 1 verified)
     /// - `<VertexEntity as Hydrate>::hydrate_map(&LoroMap) -> Result<VertexEntity, HydrateError>` — `hydrate.rs:64` (Phase 2 Task 1 verified)
+    #[instrument(skip(self), name = "vertex_commit", level = "info")]
     pub fn commit(self) -> Result<NodeId> {
         // 1. Strict-reject `Vector`/`Map`/`List` properties BEFORE any Loro/
         //    Grafeo write (Q2 — fail loud). LoroProperty supports only the

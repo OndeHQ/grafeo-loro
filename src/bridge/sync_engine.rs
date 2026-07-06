@@ -59,6 +59,7 @@ use opentelemetry::KeyValue;
 use parking_lot::RwLock;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use tracing::instrument;
 
 use crate::bridge::batcher::MutationBatcher;
 use crate::bridge::grafeo_tx::{BridgeMaps, EdgeKey};
@@ -367,6 +368,7 @@ impl SyncEngine {
     /// async runtime (e.g. when the outbound worker commits a Loro write).
     /// `blocking_send` would panic in that case, so we use `try_send`: if
     /// the channel is full or closed, we log a warning and drop the op.
+    #[instrument(skip(self), level = "info")]
     pub fn init_loro_subscriber(&self) -> Result<()> {
         let inbound_tx = self.inbound_tx.clone();
         let inbound_event_count = self.inbound_event_count.clone();
@@ -453,6 +455,11 @@ impl SyncEngine {
     /// subscriber-boundary `inbound_event_count` test counter coexists with
     /// the OTel `inbound_events` counter at the per-op forward boundary).
     /// Actual span + counter calls filled P5-L3.
+    #[instrument(skip(self), level = "info")]
+    #[allow(
+        clippy::async_yields_async,
+        reason = "spawn_*_worker fns return tokio::task::JoinHandle by design — caller awaits the handle, not the spawn call"
+    )]
     pub async fn spawn_inbound_worker(
         self: Arc<Self>,
         mut rx: mpsc::Receiver<InboundMsg>,
@@ -542,6 +549,11 @@ impl SyncEngine {
     /// `self.health.clone()` to call `health.update_sync_ts()` after each
     /// successful Loro commit (Devil M3 / Q10 — batcher also stamps inbound
     /// flush path). Actual span + counter + health calls filled P5-L3.
+    #[instrument(skip(self), level = "info")]
+    #[allow(
+        clippy::async_yields_async,
+        reason = "spawn_*_worker fns return tokio::task::JoinHandle by design — caller awaits the handle, not the spawn call"
+    )]
     pub async fn spawn_outbound_worker(
         self: Arc<Self>,
         mut rx: mpsc::Receiver<OutboundMsg>,
@@ -645,6 +657,11 @@ impl SyncEngine {
     /// open `outbound_sync_loop` + `receive_cdc_event` child spans
     /// (architecture §23.2 tree row 3.1). Actual span + counter calls remain
     /// filled P5-L3.
+    #[instrument(skip(self), level = "info")]
+    #[allow(
+        clippy::async_yields_async,
+        reason = "spawn_*_worker fns return tokio::task::JoinHandle by design — caller awaits the handle, not the spawn call"
+    )]
     pub async fn spawn_cdc_poller(self: Arc<Self>) -> JoinHandle<()> {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let grafeo_db = self.grafeo_db.clone();
@@ -732,6 +749,7 @@ impl SyncEngine {
     /// worker tasks (inbound, outbound, CDC poller). Returns the three
     /// `JoinHandle`s in spawn order. The caller is responsible for
     /// awaiting them on shutdown.
+    #[instrument(skip(self), level = "info")]
     pub async fn spawn_all(
         self: Arc<Self>,
         inbound_rx: mpsc::Receiver<InboundMsg>,
@@ -749,6 +767,7 @@ impl SyncEngine {
     }
 
     /// Signal all worker loops to drain and exit.
+    #[instrument(skip(self), level = "info")]
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(());
     }
