@@ -1,0 +1,35 @@
+%% grafeo-loro module dependency graph (L1 skeleton — boxes + arrows only)
+%% Boxes map to src/ modules. Arrows = "depends on" direction.
+%% L2/L3 may add edge labels and styling.
+
+graph TD
+    app
+    bridge
+    schema
+    compression
+    hydration
+    storage
+    presence
+    telemetry
+    types
+
+    app --> bridge
+    app --> schema
+    app --> compression
+    app --> hydration
+    app --> storage
+    app --> presence
+    app --> telemetry
+    app --> types
+
+    bridge --> schema
+    bridge --> types
+    bridge --> compression
+
+    schema --> types
+
+    hydration --> types
+
+    presence --> types
+
+    telemetry --> types

@@ -1,0 +1,18 @@
+[package]
+name = "grafeo-loro-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+grafeo-loro = { path = ".." }
+# TODO: L2 — add libfuzzer-sys, arbitrary, loro
+
+[lib]
+path = "fuzz_targets/lib.rs"
+
+[[bin]]
+name = "consistency"
+path = "fuzz_targets/consistency.rs"
+test = false
+doc = false
