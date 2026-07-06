@@ -25,3 +25,7 @@ pub use hydration::parallel_hydrate_grafeo;
 // P3T3-L2 m2: crate-root re-export of generate_local_embedding for external visibility
 // (matches P3T1-L1 m3 + P3T2-L2 m1 precedent; `pub` stub reachable from `tests/unit/`).
 pub use hydration::vector::generate_local_embedding;
+// P3T4-L2 m5: crate-root re-export of VectorOffloadManager for Phase 4+ caller ergonomics
+// (`use grafeo_loro::VectorOffloadManager` vs the longer `hydration::VectorOffloadManager` path;
+// matches P3T1-L1 m3 + P3T2-L2 m1 + P3T3-L2 m2 precedent).
+pub use hydration::VectorOffloadManager;

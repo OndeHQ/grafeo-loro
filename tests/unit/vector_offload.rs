@@ -16,13 +16,16 @@
 //! # Verified API surface (cheat sheet for L3)
 //!
 //! ## grafeo-loro
-//! - `grafeo_loro::hydration::vector::VectorOffloadManager` — re-exported at
-//!   `src/hydration/mod.rs:5` + `src/lib.rs` (via `pub use hydration::vector::*`
-//!   is NOT used; reach via the `hydration::vector` path).
+//! - `grafeo_loro::VectorOffloadManager` — re-exported at `src/hydration/mod.rs:5`
+//!   + crate root `src/lib.rs:31` (`pub use hydration::VectorOffloadManager;` —
+//!   P3T4-L2 m5). Reach via the short path `grafeo_loro::VectorOffloadManager`.
 //! - `VectorOffloadManager::new(Arc<GrafeoDB>) -> Self` — L1 implements
 //!   trivially as `Self { db }` (decision 1).
 //! - `VectorOffloadManager::handle_text_update(&self, NodeId, &str) -> Result<()>`
-//!   — async, `unimplemented!()` at L1 (body is L3).
+//!   — async; L2 wired the execution path with `// TODO(L3):` markers per step
+//!   (embed → session_with_cdc(false) → begin_tx → phantom pre-check →
+//!   convert Vec→Arc→Value::Vector → set_node_property → prepare_commit +
+//!   set_metadata(ORIGIN_LORO_BRIDGE) → commit). L3 fills the actual calls.
 //! - `grafeo_loro::hydration::vector::generate_local_embedding(&str) -> Result<Vec<f32>>`
 //!   — Task 3, FULLY IMPLEMENTED. Returns `DEFAULT_EMBEDDING_DIM`-length
 //!   `Vec<f32>` derived from `text` via SplitMix64. Deterministic + idempotent.
@@ -66,13 +69,18 @@
 //!
 //! ## loro 1.13.6 (`loro-1.13.6/src/lib.rs`)
 //! - `LoroDoc::new() -> Self` — `lib.rs:137`.
-//! - `LoroDoc::get_deep_value(&self) -> LoroValue` — `lib.rs:1064`. Returns the
+//! - `LoroDoc::get_deep_value(&self) -> LoroValue` — `loro-1.13.6/src/lib.rs:937`
+//!   (DEVIL MINOR 1 correction — L1 cited `:1064`, off-by-127). Returns the
 //!   full document as a `LoroValue::Map` (or `Null` for an empty doc).
-//! - `LoroValue` variants (for the bypass-Loro assertion): `Null`, `Bool`,
-//!   `Double(f64)`, `I64(i64)`, `Binary`, `String`, `List(Arc<[LoroValue]>)`,
-//!   `Map(Arc<HashMap<String, LoroValue>>)`, `Container`. The bypass-Loro test
-//!   walks the `LoroValue` tree recursively and asserts NO `LoroValue::List`
-//!   of `DEFAULT_EMBEDDING_DIM` `f32`-coerceable `Double`s appears anywhere.
+//! - `LoroValue` variants (for the bypass-Loro assertion — shapes verified at
+//!   `loro-common-1.13.1/src/value.rs:14-26,51,53`): `Null`, `Bool(bool)`,
+//!   `Double(f64)`, `I64(i64)`, `Binary(LoroBinaryValue)`, `String(LoroStringValue)`,
+//!   `List(LoroListValue)` where `LoroListValue(Arc<Vec<LoroValue>>)`,
+//!   `Map(LoroMapValue)` where `LoroMapValue(Arc<FxHashMap<String, LoroValue>>)`,
+//!   `Container(ContainerID)`. The bypass-Loro test walks the `LoroValue` tree
+//!   recursively and asserts NO `LoroValue::List` of `DEFAULT_EMBEDDING_DIM`
+//!   `f32`-coerceable `Double`s appears anywhere (`LoroListValue` derefs to
+//!   `Vec<LoroValue>` at `value.rs:111`).
 //!
 //! # L3 algorithm hint (informational, not binding)
 //!
@@ -111,6 +119,7 @@
 //!   asserts the final vector matches the second text's embedding.
 
 #![allow(unused_imports)] // imports are L3 cheat-sheet; bodies are todo!()
+// TODO(L3): remove this silencer when filling test bodies
 
 use std::sync::Arc;
 
@@ -153,9 +162,14 @@ fn vector_offload_writes_embedding_to_grafeo() {
 /// `VectorOffloadManager::handle_text_update`, the `LoroDoc` MUST contain NO
 /// vector data. Vectors bypass Loro entirely — they live ONLY in Grafeo.
 ///
-/// # Anti-Goodhart test shape
+/// # Anti-Goodhart test shape (DEVIL answer 6 design constraint)
 ///
-/// 1. `LoroDoc::new()` (fresh, empty) + `Arc::new(GrafeoDB::new_in_memory())`.
+/// 1. Instantiate a FRESH `LoroDoc::new()` AND a FRESH `GrafeoDB::new_in_memory()`
+///    with **NO `SyncEngine` connecting them**. The `VectorOffloadManager`
+///    does NOT hold a `LoroDoc` reference (only `Arc<GrafeoDB>` field —
+///    verified at `src/hydration/vector.rs:12`); the LoroDoc in this test is
+///    intentionally DISCONNECTED from the manager's GrafeoDB, isolating the
+///    contract test from any echo-back path.
 /// 2. `VectorOffloadManager::new(db.clone())` + `mgr.handle_text_update(node_id, "test text").await`.
 /// 3. `let deep = doc.get_deep_value();` — walk the `LoroValue` tree recursively.
 /// 4. Assert NO `LoroValue::List` of length `DEFAULT_EMBEDDING_DIM` whose

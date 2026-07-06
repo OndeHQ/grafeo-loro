@@ -24,60 +24,65 @@ impl VectorOffloadManager {
         Self { db }
     }
 
-    /// Generate embedding for `text` via `generate_local_embedding` (Task 3),
-    /// then write it direct to Grafeo as `Value::Vector(Arc<[f32]>)` on the
-    /// node's `EMBEDDING_PROPERTY` slot — bypassing Loro entirely.
+    /// Generate embedding for `text` via `generate_local_embedding` (Task 3)
+    /// and write it directly to Grafeo as `Value::Vector(Arc<[f32]>)` on the
+    /// node's `EMBEDDING_PROPERTY` slot — bypassing Loro entirely (bypass-Loro
+    /// invariant, spec gate `docs/implementation-plan.md` Phase 3 Task 4).
     ///
-    /// # Loro bypass invariant (spec validation gate)
-    ///
-    /// This function NEVER calls `LoroDoc::*`, `LoroMap::*`, `RootReconciler`,
-    /// or any other Loro write API. The embedding lives ONLY in Grafeo. The
-    /// test `vector_offload_never_writes_to_loro` asserts this by inspecting
-    /// `LoroDoc::get_deep_value()` post-call and verifying no `LoroValue::List`
-    /// of `DEFAULT_EMBEDDING_DIM` floats is present anywhere.
-    ///
-    /// # Transaction lifecycle (L1 decision 7 — matches `parallel_hydrate_grafeo` + `VertexBuilder::commit`)
-    ///
-    /// 1. `db.session_with_cdc(false)` — CDC off suppresses outbound echoes
-    ///    (matches `parallel_hydrate_grafeo:57` + `app.rs:443`).
-    /// 2. `session.begin_transaction()` — SI isolation (single property write,
-    ///    no read-then-write race — Serializable not needed).
-    /// 3. `session.set_node_property(node_id, EMBEDDING_PROPERTY, Value::Vector(arc))`
-    ///    — verified at `grafeo-engine-0.5.42/src/session/mod.rs:5012` (takes
-    ///    `&self`); the underlying `crud.rs:359` extracts vector data and
-    ///    auto-inserts into any matching HNSW index (created by the caller).
-    /// 4. `session.prepare_commit()?.set_metadata(ORIGIN_LORO_BRIDGE, ORIGIN_LORO_BRIDGE).commit()?`
-    ///    — origin tag is advisory-only per Devil Gap 1 (dropped on `commit()`
-    ///    per `transaction/prepared.rs:124-128`); retained for advisory
-    ///    logging consistency with `parallel_hydrate_grafeo:104-106`.
-    ///
-    /// # `Vec<f32>` → `Arc<[f32]>` conversion (L1 decision 5)
-    ///
-    /// `Arc::<[f32]>::from(vec)` where `vec: Vec<f32>` — `From<Vec<T>> for
-    /// Arc<[T]>` is in `std::sync` (stable since 1.54). L3 may also use
-    /// `vec.into()` (inferred) — equivalent.
-    ///
-    /// # Errors
-    ///
-    /// - `GrafeoLoroError::Grafeo` if `begin_transaction` / `set_node_property`
-    ///   / `prepare_commit` / `commit` fails (existing `#[from] grafeo::Error`
-    ///   impl handles all — no new variant per anti-plenger #5 Bloat).
-    /// - `generate_local_embedding` error (stub returns `Ok`; real ONNX may
-    ///   fail via `Config`/`Bridge` per Task 3 contract) propagates via `?`.
-    ///
-    /// # Origin tag (L1 decision 3 — `ORIGIN_LORO_BRIDGE`)
-    ///
-    /// The vector write IS conceptually a Loro-side update routed directly to
-    /// Grafeo (bypassing Loro's CRDT). Using `ORIGIN_LORO_BRIDGE` keeps the
-    /// origin vocabulary at 2 tags (`grafeo-bridge` / `loro-bridge`) — no new
-    /// `ORIGIN_VECTOR_OFFLOAD` constant, no `bridge::origin` change (anti-
-    /// plenger #11 deletion over addition). The outbound worker filters via
-    /// the epoch side-channel (Devil Gap 1), not origin strings, so the tag is
-    /// advisory — but consistency with `parallel_hydrate_grafeo` matters for
-    /// log-readability.
+    /// Origin tag: `ORIGIN_LORO_BRIDGE` (advisory — epoch side-channel is the
+    /// real echo filter per Devil Gap 1). Errors route via existing variants
+    /// (`Grafeo` via `#[from] grafeo::Error`; embedding via `Config`/`Bridge`)
+    /// — no new variant (anti-plenger #5 Bloat).
     pub async fn handle_text_update(&self, node_id: NodeId, text: &str) -> Result<()> {
-        let _ = (node_id, text, EMBEDDING_PROPERTY, ORIGIN_LORO_BRIDGE, self.db.clone());
-        unimplemented!()
+        // L2 wires the execution path; L3 fills the algorithm calls.
+        // Flow: embed → open CDC-off session → begin tx → phantom pre-check →
+        //       convert Vec→Arc→Value::Vector → set_node_property → commit.
+
+        // 1. Generate embedding (Task 3, fully implemented).
+        //    `generate_local_embedding(text) -> Result<Vec<f32>, GrafeoLoroError>`.
+        // TODO(L3): let embedding = generate_local_embedding(text)?;
+
+        // 2. Open a Grafeo session (CDC off — bypass-Loro invariant: outbound
+        //    worker must NOT echo this write back to Loro).
+        //    verified at `grafeo-engine-0.5.42/src/database/mod.rs:1728`.
+        // TODO(L3): let mut session = self.db.session_with_cdc(false);
+
+        // 3. Begin transaction. verified at `session/mod.rs:3883`.
+        // TODO(L3): session.begin_transaction()?;
+
+        // 4. Pre-check: verify node exists (DEVIL answer 4 — `set_node_property`
+        //    silently writes to phantom node ids in grafeo 0.5.42; verified at
+        //    `session/mod.rs:5012` + `crud.rs:359`).
+        //    `Session::get_node(&self, NodeId) -> Option<Node>` at `session/mod.rs:5138`.
+        // TODO(L3): session.get_node(node_id).ok_or_else(|| GrafeoLoroError::Bridge(format!("VectorOffloadManager: node {node_id:?} not found")))?;
+
+        // 5. Convert `Vec<f32>` → `Arc<[f32]>` → `grafeo::Value::Vector`.
+        //    `grafeo::Value::Vector(std::sync::Arc<[f32]>)` at
+        //    `grafeo-common-0.5.42/src/types/value.rs:138` (exact shape).
+        //    `Arc::<[f32]>::from(Vec<f32>)` — std::sync stable since Rust 1.54.
+        // TODO(L3): let vector_value = grafeo::Value::Vector(std::sync::Arc::<[f32]>::from(embedding));
+
+        // 6. Write vector to Grafeo (bypass Loro — never write to any Loro
+        //    container). `Session::set_node_property(&self, NodeId, &str, Value)
+        //    -> Result<()>` at `session/mod.rs:5012` (takes `&self`).
+        // TODO(L3): session.set_node_property(node_id, EMBEDDING_PROPERTY, vector_value)?;
+
+        // 7. Prepare + commit with origin tag (echo prevention via epoch
+        //    side-channel; `set_metadata` is advisory — dropped on `commit()`
+        //    per `transaction/prepared.rs:124-128`).
+        //    `Session::prepare_commit` at `session/mod.rs:4496`.
+        //    `PreparedCommit::set_metadata` at `transaction/prepared.rs:107`.
+        //    `PreparedCommit::commit` at `transaction/prepared.rs:124`.
+        // TODO(L3): let mut prepared = session.prepare_commit()?;
+        // TODO(L3): prepared.set_metadata(ORIGIN_LORO_BRIDGE, ORIGIN_LORO_BRIDGE);
+        // TODO(L3): prepared.commit()?;
+
+        // L2 silencer — L3 deletes this line when the TODO(L3) calls above
+        // consume `node_id`, `text`, `EMBEDDING_PROPERTY`, `ORIGIN_LORO_BRIDGE`,
+        // and `&self.db`. `&self.db` (a borrow) is used instead of `self.db.clone()`
+        // to avoid wasteful `Arc::clone` atomic ops (DEVIL answer 5).
+        let _ = (&self.db, node_id, text, EMBEDDING_PROPERTY, ORIGIN_LORO_BRIDGE);
+        Ok(())
     }
 }
 

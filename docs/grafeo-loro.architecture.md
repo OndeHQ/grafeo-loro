@@ -777,7 +777,7 @@ use std::sync::Arc;
 use grafeo::{GrafeoDB, Value as GValue};
 use grafeo_loro::types::ids::NodeId;
 use grafeo_loro::error::Result;
-use grafeo_loro::constants::DEFAULT_EMBEDDING_DIM;
+use grafeo_loro::constants::{DEFAULT_EMBEDDING_DIM, EMBEDDING_PROPERTY, ORIGIN_LORO_BRIDGE};
 
 pub struct VectorOffloadManager {
     db: Arc<GrafeoDB>,
@@ -787,22 +787,26 @@ impl VectorOffloadManager {
     /// Detects updated text and generates local-only embeddings. Writes the
     /// resulting vector directly to Grafeo (never to Loro). Task 4 owns the
     /// body — calls `generate_local_embedding`, then upserts via Session +
-    /// PreparedCommit.
+    /// PreparedCommit with `session_with_cdc(false)` (CDC off suppresses
+    /// outbound Grafeo→Loro echoes — bypass-Loro invariant).
     pub async fn handle_text_update(&self, node_id: NodeId, text: &str) -> Result<()> {
         // 1. Generate local float vector (deterministic dummy until ONNX lands).
         let embedding_vector: Vec<f32> = generate_local_embedding(text)?;
 
-        // 2. Insert directly into Grafeo column and update HNSW index
-        // (Illustrative — actual grafeo 0.5.42 API uses Session + PreparedCommit.)
-        let mut session = self.db.session_with_cdc(true);
+        // 2. Insert directly into Grafeo column and update HNSW index.
+        // CDC OFF (`false`) — outbound worker must NOT see this write (bypass-Loro).
+        let mut session = self.db.session_with_cdc(false);
         session.begin_transaction()?;
+        // `node_id` is already `grafeo::NodeId` (re-exported at
+        // `src/types/ids.rs:10`); NO wrap. `EMBEDDING_PROPERTY` is the SSOT
+        // constant for the `"embedding"` literal (Phase 3 Task 4).
         session.set_node_property(
-            grafeo::NodeId(node_id),
-            "embedding",
+            node_id,
+            EMBEDDING_PROPERTY,
             GValue::Vector(Arc::from(embedding_vector)),
         )?;
         let mut prepared = session.prepare_commit()?;
-        prepared.set_metadata("origin", "loro-bridge"); // advisory only
+        prepared.set_metadata(ORIGIN_LORO_BRIDGE, ORIGIN_LORO_BRIDGE); // advisory only
         let _epoch = prepared.commit()?;
         // Grafeo rebuilds local HNSW index incrementally on commit.
         Ok(())
@@ -815,12 +819,22 @@ impl VectorOffloadManager {
 /// Logs `tracing::warn!("ONNX not integrated; returning deterministic dummy
 /// embedding")` once per process via `std::sync::Once`. Real ONNX lands via
 /// `grafeo_engine::embedding::OnnxEmbeddingModel` (Phase 6).
+//
+// Fully implemented in Phase 3 Task 3 — see `src/hydration/vector.rs:129-149`
+// for the source. Algorithm: fold `text.bytes()` into a `u64` seed → hand-rolled
+// SplitMix64 PRNG (~10 LOC, no `rand` dep) → `DEFAULT_EMBEDDING_DIM` `f32`
+// samples in `[0.0, 1.0)` via the top-24-bits `u64_to_f01` formula. Deterministic,
+// zero-seed-safe (empty `""` folds to seed `0`, first sample is non-zero),
+// idempotent (anti-plenger #9). Once-warn guarded.
 pub fn generate_local_embedding(text: &str) -> Result<Vec<f32>> {
-    // TODO(L3): deterministic dummy algorithm — fold text bytes → u64 seed →
-    // hand-rolled SplitMix64 PRNG → DEFAULT_EMBEDDING_DIM f32 samples in [0,1).
-    todo!("L3: deterministic dummy embedding via fold-seed-SplitMix64")
+    // … body at src/hydration/vector.rs:129-149 (Phase 3 Task 3) …
+    Ok(Vec::new())
 }
 ```
+
+### Embedding Property SSOT (Phase 3 Task 4)
+
+`crate::constants::EMBEDDING_PROPERTY: &str = "embedding"` (`src/constants.rs:46-55`) is the single source of truth for the Grafeo node property key under which `VectorOffloadManager::handle_text_update` stores `Value::Vector(Arc<[f32]>)`. The manager, the `tests/unit/vector_offload.rs` scaffolds, and any future `vector_search` call site (Phase 5+) all reference the SSOT constant — no inline `"embedding"` literals. Value `"embedding"` matches grafeo-engine's own example docstring at `grafeo-engine-0.5.42/src/database/index.rs:91` ("property containing vector embeddings (e.g., `\"embedding\"`)"), so it is also the convention grafeo tooling expects when auto-creating HNSW indexes. The auto-index-insert path at `crud.rs:413-426` (gated `#[cfg(feature = "vector-index")]` — transitively enabled via `grafeo` default → `embedded` → `vector-index`) fires only if an index ALREADY EXISTS for the label+property combo; callers create the index BEFORE calling `handle_text_update` (not a manager concern — anti-plenger #3 YAGNI).
 
 ### ONNX Stub Contract (Phase 3 Task 3)
 
@@ -834,6 +848,17 @@ Until real ONNX integration lands (Phase 6 hardening), `generate_local_embedding
 - **Re-export**: `pub use hydration::vector::generate_local_embedding;` at `src/lib.rs` exposes the stub at the crate root for external visibility (matches P3T1-L1 m3 + P3T2-L2 m1 precedent).
 
 Real ONNX wiring (Phase 6) uses `grafeo_engine::embedding::{EmbeddingModel, OnnxEmbeddingModel}` (`grafeo-engine-0.5.42/src/embedding/mod.rs:39` `pub trait EmbeddingModel: Send + Sync` — sync; `mod.rs:47` `fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>` — sync, batched, fallible; `mod.rs:50` `fn dimensions(&self) -> usize`). grafeo-engine also ships a `MockEmbeddingModel` at `mod.rs:62-93` (`#[cfg(test)]`-private) with a similar fold-seed-derive pattern — algorithm reference only, not reusable from grafeo-loro.
+
+### Validation (Phase 3 Task 4 — bypass-Loro test contract)
+
+The spec validation gate (`docs/implementation-plan.md` Phase 3 Task 4): **"Vector never written to Loro container."** Four `#[ignore]`'d test scaffolds live at `tests/unit/vector_offload.rs` (registered in `tests/unit/main.rs`):
+
+1. **`vector_offload_writes_embedding_to_grafeo`** — happy-path: create a node via `Session::create_node`, call `handle_text_update(node_id, "hello world")`, assert `node.get_property(EMBEDDING_PROPERTY)` returns `Some(&Value::Vector(arc))` with `arc.len() == DEFAULT_EMBEDDING_DIM`. Does NOT assert searchability (no `create_vector_index` call — Task 4 spec gate is "bypass Loro", NOT "searchable").
+2. **`vector_offload_never_writes_to_loro`** — **CRITICAL SPEC GATE**: instantiate a FRESH `LoroDoc::new()` AND a FRESH `GrafeoDB::new_in_memory()` with **NO `SyncEngine` connecting them** (the manager does NOT hold a `LoroDoc` reference — verified; only `Arc<GrafeoDB>` field). Call `handle_text_update`, walk `doc.get_deep_value()` recursively, assert NO `LoroValue::List` of `DEFAULT_EMBEDDING_DIM` `LoroValue::Double(_)` elements appears anywhere in the tree. Cross-check: the Grafeo node DOES have the embedding (proves the bypass went Grafeo-ward, not nowhere). Anti-tautology: also asserts the doc is still effectively empty.
+3. **`vector_offload_is_idempotent`** — same `text` twice → byte-identical `Vec<f32>` on readback (`assert_eq!` on the FULL vector, not just length).
+4. **`vector_offload_different_texts_different_embeddings`** — different texts on the same node → different vectors on readback (`assert_ne!` on the FULL `Vec<f32>`).
+
+All four bodies are `todo!()` at L1; L3 fills them. Scaffolds match P3T1-L1 + P3T2-L1 + P3T3-L1 precedent (`#[ignore]` until L3).
 
 ---
 
