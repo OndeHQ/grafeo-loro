@@ -4,20 +4,15 @@ use tracing::instrument;
 
 /// Ephemeral presence manager over a WebSocket channel. Never persists state.
 pub struct PresenceManager {
-    // TODO: Phase 6 T1 — wire `room_id` into broadcast() once body is implemented
-    #[allow(
-        dead_code,
-        reason = "Phase 6 T1 excluded by user; field needed once broadcast_presence is implemented"
-    )]
     room_id: String,
-    // WebSocket connection state
+    // WebSocket connection state — added in Phase 5+ when broadcast is implemented
 }
 
 impl PresenceManager {
-    /// Construct for a given room id.
+    /// Construct for a given room id. Pure constructor — stores the room_id for
+    /// later use by `broadcast` (no socket connection in this phase).
     pub fn new(room_id: String) -> Self {
-        let _ = room_id;
-        unimplemented!()
+        Self { room_id }
     }
 
     /// Broadcast a presence payload to all peers in the room.
