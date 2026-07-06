@@ -1706,3 +1706,81 @@ Stage Summary:
   * #13 Oneline code first, oneline doc only: comments are concise + cite file:line where relevant.
 - New issues for hunter: NONE identified. The 9 tests are deterministic (no flakiness observed in 5+ consecutive runs of the concurrent test + 3 runs of the full suite). The atomicity test relies on `Config::with_max_property_size(1)` which is a deterministic grafeo code path (`check_property_size` at `session/mod.rs:4631` returns `Err(Query::Execution(...))` when `value.estimated_size_bytes() > limit`). The concurrent test relies on `AtomicU64::fetch_add` (atomic, no collision risk) + grafeo MVCC (handles concurrent `create_node_with_props` without write-write conflict at SnapshotIsolation). The compensation contract (Q7) is implemented but not directly tested — a future test could mock Loro compensation failure to verify the `error!` log + original-error return; this is YAGNI for Phase 2 (the compensation path is exercised by `vertex_builder_atomicity_rollback_on_grafeo_failure` which verifies the SUCCESS case of compensation).
 - Commit hash: `9f1aaa0` (final; chain: `336d6ce` TryFrom impl → `fd02ad0` commit() body + helper → `9f1aaa0` 9 test bodies + remove #[ignore])
+
+---
+Task ID: P2T3-HUNT
+Agent: Plenger Hunter
+Task: Hunt plenger anti-patterns in P2T3-L1+P2T3-L2+P2T3-L3 (Phase 2 Task 3)
+
+Work Log:
+- Confirmed on branch `p2-vertex-builder` (HEAD = `b0013b7 P2T3-L3 worklog append`).
+- Read worklog.md end-to-end (1708 lines): Phase 1 complete, P2T1 (`p2-derives`) complete, P2T2 (`p2-tree-move`) complete via Loop 2. ORCH-P2T3-SETUP + P2T3-L1 (edb37f5) + P2T3-DEVIL (f9809aa) + P2T3-L2 (e33964b → 01c1554) + P2T3-L3 (336d6ce → fd02ad0 → 9f1aaa0 → b0013b7) all read in full.
+- Read `docs/critiques/p2t3-l1-devil.md` (663 lines): 1 BLOCKER (B1) + 5 MAJOR (M1-M5) + 5 MINOR (m1-m5) + 2 NIT (n1-n2) + 8 RESOLUTIONS (Q1-Q8).
+- Refreshed `repomix.md` (52 files, 206,208 tokens).
+
+- Task 1 (compile): `cargo check --all-targets` → EXIT 0, 5 pre-existing warnings (unchanged from P2T3-L2 baseline), 0 new warnings, 0 errors. `cargo test --no-run --all` → 3 test binaries compile clean. L3's compile claims CONFIRMED.
+
+- Task 2 (tests): `cargo test --all` → **34/34 PASS, 0 ignored, 0 failed** (6 lib + 5 integration + 23 unit + 0 doctests). L3's test claims CONFIRMED. Ran `cargo test --test unit vertex_builder_concurrent_commit` 5 times — 5/5 PASS, 0 failures, deterministic (no flakiness). Phase 1 invariants preserved: `cargo test --test integration` → 5/5 PASS; `cargo test --lib` → 6/6 PASS.
+
+- Task 3 (stubs): `grep -nE "TODO|todo!|unimplemented!" src/app.rs` → 14 matches, ALL in Phase 3-5 scope methods (`builder`, `query`, `update_text`, `generate_embedding`, `checkpoint`, `broadcast_presence`, `shutdown` + `GrafeoLoroAppBuilder` methods). Each has a phase-scope doc-comment. Zero `unimplemented!()` in `commit()` body. `grep -nE "TODO|todo!|unimplemented!" tests/unit/vertex_builder.rs` → 4 matches, ALL in doc-comment code examples (`# let doc = unimplemented!();`). `grep -rn "#\[ignore" tests/` → ZERO matches. `grep -rn "L2 HACK" src/ tests/` → ZERO matches in source/tests (only historical references in worklog + p2t2-hunt.md). L3's stub-verification claims CONFIRMED.
+
+- Task 4 (anti-Goodhart): All 9 tests assert non-trivial conditions. `vertex_builder_basic_roundtrip` asserts BOTH Loro AND Grafeo stores have the vertex. `vertex_builder_multiple_labels` verifies ALL 3 labels in BOTH stores (count + each `has_label` for Grafeo; sorted set equality for Loro). `vertex_builder_multiple_properties` verifies ALL 3 properties (Bool/Integer/String) in BOTH stores with value equality. `vertex_builder_empty_vertex` verifies empty labels vec AND empty properties map in BOTH stores. `vertex_builder_atomicity_rollback_on_grafeo_failure` asserts NO side effects (Loro V-map empty + BridgeMaps `node_id_map` + `node_key_map` both empty) after the failure. `vertex_builder_concurrent_commit` verifies all 20 (NodeId, loro_key) pairs are DISTINCT (via 2 HashSets + BridgeMaps `len() == 20` + forward+inverse round-trip). `vertex_builder_rejects_vector_property` / `_map_property` / `_list_property` assert `Err(UnsupportedLoroType(_))` AND no side effects (Loro V map empty + BridgeMaps empty). L3's anti-Goodhart claims CONFIRMED.
+
+- Task 5 (anti-hallucination): Verified ALL API calls cited by L3 against actual crate source. EVERY API exists at (or within 1 line of) the cited location:
+  * Loro: `LoroDoc::{new, get_map, set_next_commit_origin, commit}` ✅; `LoroMap::{ensure_mergeable_map, get, delete, insert}` ✅ (ensure_mergeable_map is NON-DEPRECATED successor to `get_or_create_container` at `:2217` which IS `#[deprecated]`); `ValueOrContainer::Container(Container::Map(LoroMap))` pattern ✅ (`EnumAsInner` derive).
+  * Lorosurgeon: `RootReconciler::new(LoroMap)` ✅; `<T as Reconcile>::reconcile<R: Reconciler>` ✅; `<T as Hydrate>::hydrate_map(&LoroMap)` ✅.
+  * Grafeo: `GrafeoDB::{new_in_memory, session_with_cdc, with_config}` ✅; `Config::{in_memory, with_max_property_size}` ✅; `Session::{begin_transaction, create_node_with_props, prepare_commit, get_node, delete_node}` ✅; `PreparedCommit::{set_metadata, commit}` ✅; `Session::Drop` auto-rollback at `session/mod.rs:5372-5383` ✅; `PreparedCommit::Drop` auto-rollback at `transaction/prepared.rs:144-149` ✅ (but note: `Drop` is a NO-OP on `prepared.commit()` Err because `finalized = true` is set BEFORE the actual commit — see MINOR 4); `Node::{has_label, get_property}` ✅; `Value::estimated_size_bytes` for `String(s)` returns `s.len()` ✅.
+  * Internal: `apply_loro_op` at `src/bridge/grafeo_tx.rs:86` ✅; `BridgeMaps::node_id_map` (pub) at `:28` ✅; `BridgeMaps::node_key_map` (pub) at `:30` ✅; `SyncEngine::grafeo_db` (pub(crate)) at `:97` ✅; `SyncEngine::loro_doc` (pub(crate)) at `:99` ✅; `SyncEngine::maps()` (pub) at `:179` ✅; `SyncEngine::inbound_event_count()` (pub) at `:423` ✅ (discovered by hunter, not cited by L3); `GrafeoLoroError::{Loro(#[from]), Grafeo(#[from]), UnsupportedLoroType, Bridge}` ✅; `ORIGIN_LORO_BRIDGE` + `ROOT_VERTICES` constants ✅; `VertexEntity` derives `Hydrate + Reconcile` ✅; `TryFrom<GraphValue> for LoroProperty` new impl ✅.
+  * 3 NIT off-by-one citations (`Container` at `:3636` vs `:3637`; `RootReconciler::new` at `:298` vs `:297`; `Reconcile::reconcile` at `:92` vs `:95`). 1 NIT worklog citation error (`gval_to_grafeo_value` at `:146` vs `:171`). ZERO hallucinations.
+
+- Task 6 (anti-bloat DRY): `TryFrom<GraphValue> for LoroProperty` is a NEW conversion (no existing `GraphValue → LoroProperty` conversion — existing are `lval_to_gval`, `gval_to_grafeo_value`, `grafeo_value_to_lval`). NOT bloat. `compensate_loro_vertex` helper is DRY (shared by step 5 + step 6 error arms). `apply_loro_op` reuse is DRY (no inlined `create_node_with_props + insert_node`). `ORIGIN_LORO_BRIDGE` + `ROOT_VERTICES` imported from `constants.rs` (no literal duplicates in `src/app.rs`). MINOR DRY violation in test file: 5 occurrences of literal `"V"` in code paths (lines 195, 245, 533, 567, 600) instead of `ROOT_VERTICES` constant.
+
+- Task 7 (anti-context-blindness): `commit()` correctly sets `ORIGIN_LORO_BRIDGE` on BOTH the Loro commit (line 408 `doc.set_next_commit_origin(ORIGIN_LORO_BRIDGE)`) AND the Grafeo prepared commit (line 448 `prepared.set_metadata("origin", ORIGIN_LORO_BRIDGE)` — advisory, dropped on commit per Devil Gap 1). The B1 filter at `src/bridge/sync_engine.rs:215` correctly skips `ORIGIN_LORO_BRIDGE` (filter logic verified by tracing the flow). `commit()` does NOT break any Phase 1 invariant (all 5 integration tests + 6 lib tests pass). HOWEVER: the B1 filter is NOT exercised by any P2T3-L3 test (unit tests don't install the subscriber; integration tests don't call `commit()`) — see MAJOR 2.
+
+- Task 8 (anti-happy-path-bias): `commit()` has 4 failure paths:
+  * Step 4 `begin_transaction()?` — does NOT compensate Loro (MAJOR 4, theoretical).
+  * Step 5 `apply_loro_op` Err — compensates Loro ✅, drops session ✅, returns original error ✅. BridgeMaps is clean (insert_node never called on create_node_with_props failure).
+  * Step 6 `prepare_commit()?` — does NOT compensate Loro (MAJOR 3, theoretical).
+  * Step 6 `prepared.commit()` Err — compensates Loro ✅, BUT does NOT clean up BridgeMaps (MAJOR 1, real bug — stale binding points to phantom NodeId after Grafeo rollback).
+  * `compensate_loro_vertex` failure — logs at `error!` with full context ✅, returns — caller returns original Grafeo error ✅ (Q7 contract).
+  * `BridgeMaps::node_id_map.get(&loro_key)` returns None (TOCTOU) — returns `Err(Bridge(...))` ✅ (MINOR 2, acceptable).
+
+- Task 9 (atomicity contract): L1 chose Option (a) Loro-first with compensation. Step 3 (Loro write) happens BEFORE step 5/6 (Grafeo write) ✅. On Grafeo failure (step 5 OR step 6), Loro compensation runs ✅. Compensation deletes `loro_key` from V map ✅. Compensation sets `ORIGIN_LORO_BRIDGE` on compensation commit ✅ (so it doesn't echo). On compensation failure, original Grafeo error is returned ✅ (Q7). `Session::Drop` auto-rollback handles Grafeo side ✅. HOWEVER: the contract is violated in 3 ways — (1) step 6 failure leaves stale BridgeMaps binding (MAJOR 1); (2) `prepare_commit()?` doesn't compensate Loro (MAJOR 3); (3) `begin_transaction()?` doesn't compensate Loro (MAJOR 4).
+
+- Task 10 (concurrency safety): `AtomicU64::fetch_add(1, Relaxed)` is sufficient for unique key generation (counter only needs unique values; no synchronization with other memory operations needed — ACCEPTABLE). Two concurrent `commit()` calls CAN interleave (both write Loro before either writes Grafeo) — this is safe: Loro `RwLock` serializes the write critical section; each `commit()` creates its own grafeo `Session` (no shared session state); grafeo MVCC handles concurrent `create_node_with_props` at `SnapshotIsolation`. Loro `RwLock` properly serializes `set_next_commit_origin + commit` (held across the critical section in step 3). TOCTOU between `apply_loro_op` (step 5 insert) and `node_id_map.get` (step 7 read) — another thread could delete the binding between insert and read (MINOR 2, theoretical, error propagated safely). The `concurrent_commit` test uses real `std::thread::spawn` (not faked) — ACCEPTABLE.
+
+- Task 11 (test fixture soundness): `build_app()` constructs a fresh `GrafeoLoroApp` with real `SyncEngine` (fresh `LoroDoc` + fresh in-memory `GrafeoDB`) ✅. `build_app_with_tiny_property_limit()` uses `Config::in_memory().with_max_property_size(1)` which DOES cause `create_node_with_props` to fail for any property > 1 byte (verified: `Value::String("x".repeat(1024)).estimated_size_bytes() = 1024 > 1` → `check_property_size` returns `Err(Query::Execution(...))` at `session/mod.rs:4631`). Each test constructs its own `GrafeoLoroApp` (no state leaks between tests) ✅. The `loro_key_counter` is on `GrafeoLoroApp` (not global), so each test starts fresh at 0 ✅.
+
+Stage Summary:
+- BLOCKER count: 0
+- MAJOR count: 4
+  * MAJOR 1: Step 6 `prepared.commit()` failure does NOT clean up `BridgeMaps` (stale binding → phantom NodeId). Fix: add `self.sync_engine.maps().remove_node(&loro_key);` at `src/app.rs:456`.
+  * MAJOR 2: B1 inbound filter extension (`ORIGIN_LORO_BRIDGE` skip) is NOT exercised by any test (unit tests don't install subscriber; integration tests don't call `commit()`). Fix: add `vertex_builder_commit_does_not_echo_through_subscriber` test + expose `sync_engine` accessor on `GrafeoLoroApp`.
+  * MAJOR 3: Step 6 `prepare_commit()?` does NOT compensate Loro (theoretical — `prepare_commit` only fails on InvalidState which is impossible after `begin_transaction` succeeded). Fix: convert `?` to `match` with `compensate_loro_vertex` on Err.
+  * MAJOR 4: Step 4 `begin_transaction()?` does NOT compensate Loro (theoretical — fresh session has no active tx). Fix: convert `?` to `match` with `compensate_loro_vertex` on Err.
+- MINOR count: 4
+  * MINOR 1: Test file uses literal `"V"` instead of `ROOT_VERTICES` constant (5 occurrences, DRY violation).
+  * MINOR 2: TOCTOU between `apply_loro_op` (step 5) and `node_id_map.get` (step 7) — theoretical, error propagated safely.
+  * MINOR 3: `compensate_loro_vertex` does not call `doc.commit()` on `v_map.delete()` failure (pending origin tag leak — mitigated by Phase 2 architecture).
+  * MINOR 4: Misleading comment at `src/app.rs:450-452` (says "Drop auto-rolled back" but actually `PreparedCommit::Drop` is a no-op on `commit()` Err because `finalized = true` is set before the actual commit; real rollback happens inside `session.commit()` → `commit_inner()` catch block).
+- NIT count: 2
+  * NIT 1: Worklog citation `gval_to_grafeo_value` at `values.rs:146` is inaccurate (actual `:171`).
+  * NIT 2: L3 doc-comment cites `Container` enum at `lib.rs:3636` (off-by-one; actual `:3637`).
+- ACCEPTABLE count: 8
+  * ACCEPTABLE 1: `AtomicU64::fetch_add(1, Relaxed)` correct for unique key generation.
+  * ACCEPTABLE 2: `TryFrom<GraphValue> for LoroProperty` is NEW conversion (not bloat).
+  * ACCEPTABLE 3: `compensate_loro_vertex` helper is DRY (shared by step 5 + step 6).
+  * ACCEPTABLE 4: `apply_loro_op` reuse is DRY (no inlined `create_node_with_props + insert_node`).
+  * ACCEPTABLE 5: All 9 tests assert non-trivial conditions (anti-Goodhart compliant).
+  * ACCEPTABLE 6: Concurrency test uses real `std::thread::spawn` (not faked).
+  * ACCEPTABLE 7: Test fixtures construct fresh `GrafeoLoroApp` per test (no state leaks).
+  * ACCEPTABLE 8: `commit()` does not break any Phase 1 invariant (all Phase 1 tests pass).
+- PUSH-READINESS verdict: **LOOP BACK TO FIXER** (4 MAJORs — all related to atomicity contract violations; total fix size ~30-40 LOC + 1 new test).
+- Top findings:
+  1. MAJOR 1: Step 6 `prepared.commit()` failure leaves stale `BridgeMaps` binding (real bug; fix is 1 line — `maps.remove_node(&loro_key)`).
+  2. MAJOR 2: B1 filter (`ORIGIN_LORO_BRIDGE` skip) is dead code in the test suite (Tautology/Goodhart risk; fix is a new test + public accessor).
+  3. MAJOR 3: `prepare_commit()?` doesn't compensate Loro (theoretical; fix is `match` instead of `?`).
+  4. MAJOR 4: `begin_transaction()?` doesn't compensate Loro (theoretical; fix is `match` instead of `?`).
+  5. MINOR 1: Test file uses literal `"V"` instead of `ROOT_VERTICES` constant (DRY violation; fix is import + replace 5 occurrences).
+- Critique artifact: docs/critiques/p2t3-hunt.md
+- Commit hash: (will be created after `git add` + `git commit` of this worklog append + critique artifact)
