@@ -103,3 +103,21 @@ No `EncFuzzOp`/`EncFuzzValue` mirror types remain. Gap E consolidation verified.
 **Verdict**: CLEAN.
 **Counts**: blockers 0, majors 0, minors 0, nits 0.
 
+## #6 Hallucination — CLEAN
+
+**Hunt 1**: `rg -n 'grafeo::Value::Int64|grafeo::Value::Integer' fuzz/fuzz_targets/consistency.rs` → 5 hits:
+- L568-569: doc-comment explicitly calling out that I12 uses `Int64` NOT hallucinated `Integer` (Devil B1/CA.1)
+- L602: `grafeo::Value::Int64(2)` (write 2 — production API)
+- L622: `Some(grafeo::Value::Int64(1))` (assertion 2)
+- L633: `Some(grafeo::Value::Int64(2))` (assertion 3)
+
+All grafeo API uses reference the REAL `Int64` variant. The codebase's `GraphValue::Integer(1)` at L578 is a DIFFERENT enum (codebase-internal type, not grafeo's). Distinct types — no shadowing.
+
+**Hunt 2**: `rg -n 'pub fn set_viewing_epoch' ~/.cargo/registry/src/*/grafeo-engine-*/src/` → 1 hit:
+- `grafeo-engine-0.5.42/src/session/mod.rs:730` — `pub fn set_viewing_epoch(&self, epoch: EpochId)` exists for real.
+
+API surface verified. No fabricated methods.
+
+**Verdict**: CLEAN. Devil B1 critical hallucination risk eliminated.
+**Counts**: blockers 0, majors 0, minors 0, nits 0.
+
