@@ -5250,3 +5250,131 @@ Stage Summary:
 - cargo check: pass — 0 errors, 2 pre-existing warnings (unchanged from P4-L1 baseline), 0 new warnings from P4-L2 work.
 - cargo test --lib: pass — 6 passed / 0 failed / 0 ignored.
 - Commit hash: `d528e47` (prior P4-L2 code commit, pushed to `phase-4`) + this worklog-entry commit (hash to be filled in after commit).
+
+---
+
+Task ID: P4-L3
+Agent: L3 Deep Implementation
+Task: Fill in every TODO(P4-L3) marker from P4-L2. CompressedPayload wire format, delta-import loop, loro_key_counter re-seed, shallow_snapshot verification, idempotent delta-delete. Add unit tests for compression round-trip, builder validation, and cold-boot round-trip.
+
+Work Log:
+- Step 1: Read worklog tail (P4-L1 + P4-DEVIL + P4-L2 entries — last ~250 lines). Confirmed on `phase-4` branch via `git branch --show-current`. Latest commit `7cc5902` (repomix config tweak — irrelevant to scope). Read `docs/critiques/p4-l1-devil.md` (846 lines) end-to-end — Devil decisions authoritative per task spec.
+- Step 2: Found 11 `TODO(P4-L3)` markers via `grep -rn "TODO(P4-L3)" src/ tests/`:
+  - `src/app.rs:226,335,359,407,441,555,583,599,603,631` (10 markers — doc-comments + bodies in `hydrate`/`checkpoint`)
+  - `src/constants.rs:94` (1 marker — doc-comment for `STORAGE_KEY_BASE_LORO`)
+  - Verified each by direct file read of `src/app.rs` (1345 lines) + `src/constants.rs` (152 lines).
+- Step 3: **CompressedPayload wire format implementation** (`src/compression/wrapper.rs`):
+  - Added `const WIRE_FORMAT_VERSION: u8 = 1` (SSOT for version byte — reserved for forward-compat).
+  - Added `pub fn to_wire(&self) -> Vec<u8>` — serializes `[version:u8][codec_tag:u8][raw_data..]` with `Vec::with_capacity(2 + raw_data.len())` (no reallocation).
+  - Added `pub fn from_wire(bytes: &[u8]) -> Result<Self>` — parses wire format; rejects `bytes.len() < 2` with `Compression("too few bytes ...")`, unknown versions with `Compression("unknown version ...")`, unknown tags via `tag_to_compression_type`.
+  - Added `pub fn compress_to_wire(&[u8], CompressionType) -> Result<Vec<u8>>` convenience (compress + serialize in one call — used by `checkpoint`).
+  - Added `pub fn decompress_from_wire(&[u8]) -> Result<Vec<u8>>` convenience (parse + decompress in one call — used by `hydrate`).
+  - Added `const fn compression_type_to_tag(c: CompressionType) -> u8` — maps `None=0x00`, `Lz4=0x01`, `Zstd=0x02` (mirrors `CompressionType` discriminant order — `src/config.rs:8-14`).
+  - Added `fn tag_to_compression_type(tag: u8) -> Result<CompressionType>` — inverse; rejects unknown tags with `Compression(format!("wire format: unknown codec tag {tag:#04x} ..."))`.
+- Step 4: **hydrate delta-import loop implementation** (`src/app.rs:574-675`):
+  - Step 2 (decompress base): replaced in-memory `CompressedPayload { compression: self.compression, raw_data: base_bytes }` construction with `CompressedPayload::decompress_from_wire(&base_bytes)?` (parses codec tag from the wire format — no longer assumes codec matches `self.compression`).
+  - Step 3 (import base): kept existing `doc.import_with(&loro_bytes, ORIGIN_LORO_BRIDGE)?` + `status.pending.is_some()` warn; removed the `TODO(P4-L3)` comment about Phase 5 missing-range fetch (kept the warn log; replaced the TODO with a forward-reference comment explaining Phase 5+ will fetch missing ranges via `doc.export(ExportMode::updates(&oplog_vv()))`).
+  - Step 4 (delta-import loop body): for each delta key returned by `storage.list(delta_prefix)` — `storage.load(k)` (with idempotent-retry log+continue on `Err`), `CompressedPayload::decompress_from_wire(&delta_bytes)?`, `doc.import_with(&delta_loro_bytes, ORIGIN_LORO_BRIDGE)?`, `status.pending.is_some()` warn per delta, `tracing::debug!` per delta + `tracing::info!(delta_count, imported, ...)` at end. Sorted `delta_keys.sort_unstable()` before the loop — documented the forward-compat assumption: lexicographic sort matches numeric epoch order IF epoch is zero-padded (Phase 5+ MUST zero-pad the `{epoch}` slot per `src/constants.rs:122` doc-comment).
+- Step 5: **loro_key_counter re-seed implementation** (`src/app.rs:696-741`):
+  - Read LoroDoc root V map: `doc.get_map(ROOT_VERTICES)` (verified at `loro-1.13.6/src/lib.rs:489`).
+  - Iterate keys: `v_map.keys()` returns `impl Iterator<Item = InternalString>` (verified at `loro-1.13.6/src/lib.rs:2315`); `InternalString` implements `AsRef<str>` + `Deref<Target=str>` (verified at `loro-common-1.13.1/src/internal_string.rs:127,200`).
+  - Filter by `V/` prefix + parse rest as `u64`: `.filter_map(|k| { let s: &str = k.as_ref(); s.strip_prefix("V/").and_then(|n| n.parse::<u64>().ok()) })`.
+  - Take max: `.max()`.
+  - `Some(max) => self.loro_key_counter.fetch_max(max + 1, Ordering::Relaxed)` + `tracing::info!(max_existing, new_counter, prev_counter, ...)`. `fetch_max` is used (not `store`) for defensive correctness — if a concurrent `VertexBuilder::commit()` ran between `from_sync_engine_with_config` and `hydrate`, the live counter already exceeds `max + 1` and `fetch_max` preserves the higher value (anti-plenger #7).
+  - `None => tracing::info!("hydrate: no V/* keys found; loro_key_counter stays at 0")` (fresh-graph no-op).
+- Step 6: **checkpoint shallow_snapshot verification** (`src/app.rs:322-333`):
+  - Verified via `rg -n "shallow_snapshot|enum ExportMode|Snapshot" /home/z/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/loro-internal-1.13.6/src/encoding.rs`:
+    - `ExportMode` enum at `encoding.rs:53` — variants `Snapshot` (full history), `Updates { from: VersionVector }`, `UpdatesInRange { spans }`, `ShallowSnapshot(Cow<Frontiers>)`, `StateOnly(Option<Cow<Frontiers>>)`, `SnapshotAt { version }`.
+    - `pub fn shallow_snapshot(frontiers: &'a Frontiers) -> Self` at `encoding.rs:108` — confirmed the right call signature.
+  - Added a 12-line comment block in `checkpoint` step 2 doc-comment citing the API source + explaining why `shallow_snapshot` is the right variant per architecture §4 Step D "History discarded to prevent storage bloat" (NOT the deep `Snapshot` variant — would re-bloat storage; NOT `StateOnly` — would break `import_with` on `hydrate`).
+- Step 7: **Idempotent delta-delete** (`src/app.rs:359-374`):
+  - Replaced `storage.delete(k).await?` with `if let Err(e) = storage.delete(k).await { tracing::warn!(...); }` — log + continue on delete failure (anti-plenger #9 idempotent retry). Added 5-line comment citing P4-DEVIL Q3 + the dedup mechanism (`trim_the_known_part_of_change` at `loro-internal-1.13.6/src/oplog.rs:350`).
+- Step 8: **Test additions** (3 new test modules + 3 new pub accessors on `GrafeoLoroApp`):
+  - `tests/unit/compression_payload.rs` (8 test fns — exceeds the MINIMUM of 3 explicit codec round-trips + 1 unknown-tag rejection):
+    1. `compression_wire_roundtrip_none` — None codec round-trip; asserts wire header bytes `[1, 0x00, ...INPUT]`.
+    2. `compression_wire_roundtrip_lz4` — LZ4 codec round-trip; asserts `wire[2..] != INPUT` (anti-Goodhart).
+    3. `compression_wire_roundtrip_zstd` — Zstd codec round-trip; asserts `wire[2..] != INPUT` (anti-Goodhart).
+    4. `compression_wire_empty_input_roundtrip` — empty input across all 3 codecs; pins the test shape so a regression in any one codec is caught.
+    5. `compression_wire_unknown_codec_tag_rejected` — synthetic payload with `tag=0xFF` → `Err(Compression("unknown codec tag ..."))`.
+    6. `compression_wire_unknown_version_rejected` — synthetic payload with `version=0x42` → `Err(Compression("unknown version ..."))`.
+    7. `compression_wire_too_short_rejected` — 0-byte and 1-byte payloads → `Err(Compression("too few bytes ..."))`.
+    8. `compression_wire_to_wire_from_wire_symmetric` — `to_wire` followed by `from_wire` recovers the original `CompressedPayload` struct byte-for-byte (anti-tautology — previous tests only validated the decompressed bytes, not the parsed struct shape).
+  - `tests/unit/hydrate_checkpoint.rs` (3 test fns — exceeds the MINIMUM of 1 cold-boot round-trip):
+    1. `cold_boot_roundtrip_loro_mode` — full integration: build app + install subscriber + create vertex + `checkpoint("test-graph")` → verify storage has `test-graph/base.loro` with wire-format bytes (≥2 bytes + valid `decompress_from_wire`) → build FRESH app over same storage → `hydrate("test-graph")` → verify (a) `loro_key_counter() == 1` (re-seed), (b) vertex is observable in new LoroDoc via `VertexEntity::hydrate_map` (labels + name property), (c) `BridgeMaps::node_id_map` non-empty, (d) `inbound_event_count` UNCHANGED (no echo) + `inbound_filtered_count` INCREMENTED (B1 filter fired — P2T3-L2R2 MAJOR 2). Anti-Goodhart: REAL bytes through REAL Zstd compression + REAL `export(shallow_snapshot)` + REAL `import_with`. In-memory `StorageBackend` impl in the test file (anti-plenger #11 native-first — no mockall).
+    2. `cold_boot_fresh_graph_no_snapshot` — empty storage → `hydrate` succeeds + counter stays at 0 + BridgeMaps empty.
+    3. `checkpoint_idempotent_double_call` — two `checkpoint("g")` calls in succession → no error + exactly one `base.loro` key in storage (overwrite semantics).
+  - `tests/unit/builder_validation.rs` (5 test fns — exceeds the MINIMUM of 4 rejection paths):
+    1. `build_rejects_zero_batch_interval_ms` — `batch_interval_ms(0)` → `Err(Config("batch_interval_ms must be > 0"))`.
+    2. `build_rejects_zero_batch_max_size` — `batch_max_size(0)` → `Err(Config("batch_max_size must be > 0"))`.
+    3. `build_rejects_missing_storage` — no `.storage(...)` call → `Err(Config("storage backend not set"))`.
+    4. `build_rejects_grafeo_mode_without_grafeo_dir` — `SsotMode::Grafeo` + no `grafeo_dir` → `Err(Config("grafeo_dir required for SsotMode::Grafeo"))`.
+    5. `build_accepts_valid_loro_config` — positive control (anti-tautology — proves the rejection tests above are not just rejecting EVERY config).
+  - Added 3 pub accessors on `GrafeoLoroApp` (`src/app.rs:170-189`) for test verifiability:
+    - `pub fn loro_key_counter(&self) -> u64` — snapshot of `Arc<AtomicU64>` via `load(Ordering::Relaxed)`.
+    - `pub fn ssot_mode(&self) -> SsotMode` — returns the dispatch field.
+    - `pub fn compression(&self) -> CompressionType` — returns the dispatch field.
+  - Updated `tests/unit/main.rs` to declare the 3 new submodules + module-level doc-comments.
+- Step 9: **API verifications performed (anti-hallucination — plenger-traits.md #6)**:
+  - `ExportMode::shallow_snapshot(&Frontiers) -> Self` at `loro-internal-1.13.6/src/encoding.rs:108` ✅
+  - `ExportMode` enum at `:53` (variants: `Snapshot`, `Updates`, `UpdatesInRange`, `ShallowSnapshot`, `StateOnly`, `SnapshotAt`) ✅
+  - `pub use loro_internal::encoding::{EncodedBlobMode, ExportMode}` at `loro-1.13.6/src/lib.rs:56` ✅
+  - `LoroDoc::get_map<I: IntoContainerId>(&self, I) -> LoroMap` at `loro-1.13.6/src/lib.rs:489` ✅
+  - `LoroMap::keys(&self) -> impl Iterator<Item = InternalString> + '_` at `loro-1.13.6/src/lib.rs:2315` ✅
+  - `InternalString: AsRef<str>` at `loro-common-1.13.1/src/internal_string.rs:127` ✅
+  - `InternalString: Deref<Target=str>` at `loro-common-1.13.1/src/internal_string.rs:200` ✅
+  - `AtomicU64::fetch_max(&self, u64, Ordering) -> u64` (std — verified via existing usage in `src/bridge/sync_engine.rs:282`) ✅
+  - `lz4_flex::compress_prepend_size(&[u8]) -> Vec<u8>` (verified Phase 3 at `src/compression/wrapper.rs:44`) ✅
+  - `lz4_flex::decompress_size_prepended(&[u8]) -> Result<Vec<u8>, DecompressError>` (verified Phase 3 at `:69`) ✅
+  - `zstd::stream::encode_all(&[u8], i32) -> Result<Vec<u8>, io::Error>` (verified Phase 3 at `:50`) ✅
+  - `zstd::stream::decode_all(&[u8]) -> Result<Vec<u8>, io::Error>` (verified Phase 3 at `:76`) ✅
+  - `LoroDoc::import_with(&self, &[u8], &str) -> Result<ImportStatus, LoroError>` at `loro-1.13.6/src/lib.rs:721` (verified P4-L2 Step 13) ✅
+  - `LoroDoc::export(&self, ExportMode) -> Result<Vec<u8>, LoroEncodeError>` at `loro-1.13.6/src/lib.rs:1306` (verified P4-L2 Step 13) ✅
+  - `LoroDoc::oplog_frontiers(&self) -> Frontiers` at `loro-1.13.6/src/lib.rs:948` (verified P4-L2 Step 13) ✅
+- Step 10: **`cargo check --all-targets`** — exit 0, 2 pre-existing lib warnings (`presence::socket::room_id` never read; `telemetry::health` fields `doc`/`db`/`last_sync_ts` never read — both unchanged from P4-L1 baseline), 0 errors, 0 NEW warnings from P4-L3 work.
+- Step 11: **`cargo test --lib`** — 6 tests, 6 passed, 0 failed, 0 ignored (`bridge::sync_engine::tests::edge_key_roundtrip`, `edge_key_parse_rejects_missing_separator`, `types::values::tests::lval_to_gval_recursive`, `gval_to_grafeo_maps_all_variants`, `lval_to_gval_rejects_binary_and_container`, `lval_to_gval_scalars`). No regressions — P4-L2's 6 tests still pass.
+- Step 12: **`cargo test --all`** — 70 tests across 4 test targets:
+  - lib (6 tests): 6 passed / 0 failed / 0 ignored.
+  - integration (5 tests): 5 passed / 0 failed / 0 ignored.
+  - unit (59 tests): 59 passed / 0 failed / 2 ignored (1 manual smoke `generate_local_embedding_logs_onnx_warning`; 1 benchmark `parallel_hydrate_10k_nodes_under_500ms` — both unchanged from prior phases).
+  - doc-tests (0 tests).
+  - Total: 70 passed / 0 failed / 2 ignored.
+- Step 13: **`grep -rn "TODO(P4-L3)" src/ tests/`** returns 0 matches (exit code 1 = no matches). All 11 TODO markers from Step 2 are filled in or removed (doc-comments updated to reference the L3 implementation).
+- Step 14: Commits + push to `phase-4`:
+  - Commit `49331d7`: "P4-L3: CompressedPayload wire format + hydrate/checkpoint wiring" — 3 files changed, +268/-63.
+  - Commit `61c9bad`: "P4-L3: unit tests for wire format + cold-boot round-trip + builder validation" — 5 files changed, +727.
+  - Both pushed to `phase-4` (`git push https://x-access-token:<redacted>@github.com/OndeHQ/grafeo-loro.git phase-4`).
+
+Stage Summary:
+- Files touched:
+  - `src/compression/wrapper.rs` (modified — +85): added `WIRE_FORMAT_VERSION` const; added `CompressedPayload::{to_wire, from_wire, compress_to_wire, decompress_from_wire}`; added `compression_type_to_tag` + `tag_to_compression_type` helpers.
+  - `src/app.rs` (modified — +90/-22): `checkpoint` step 2 doc-comment (shallow_snapshot verification); `checkpoint` step 3 (`compress_to_wire`); `checkpoint` step 5+6 (idempotent delta-delete); `hydrate` step 2 (`decompress_from_wire`); `hydrate` step 4 (delta-import loop body); `hydrate` step 6 (loro_key_counter re-seed); 3 new pub accessors (`loro_key_counter`, `ssot_mode`, `compression`); doc-comment cleanup (removed `TODO(P4-L3)` markers).
+  - `src/constants.rs` (modified — +13/-12): `STORAGE_KEY_BASE_LORO` doc-comment updated to reflect the L3 wire format implementation (no more `TODO(P4-L3)`).
+  - `tests/unit/main.rs` (modified — +6): added 3 new submodule declarations.
+  - `tests/unit/compression_payload.rs` (new — 192 lines): 8 wire-format tests.
+  - `tests/unit/hydrate_checkpoint.rs` (new — 312 lines): 3 cold-boot round-trip tests.
+  - `tests/unit/builder_validation.rs` (new — 196 lines): 5 builder-validation tests.
+  - `worklog.md` (modified — appended this entry).
+- TODO(P4-L3) markers filled: 11 (10 in `src/app.rs` — doc-comments + bodies in `hydrate`/`checkpoint`; 1 in `src/constants.rs` — doc-comment for `STORAGE_KEY_BASE_LORO`).
+- TODO(P4-L3) markers remaining: 0 (verified via `grep -rn "TODO(P4-L3)" src/ tests/` returning exit code 1 = no matches).
+- New tests added (15 total):
+  - `compression_payload::compression_wire_roundtrip_none` — pass ✅
+  - `compression_payload::compression_wire_roundtrip_lz4` — pass ✅
+  - `compression_payload::compression_wire_roundtrip_zstd` — pass ✅
+  - `compression_payload::compression_wire_empty_input_roundtrip` — pass ✅
+  - `compression_payload::compression_wire_unknown_codec_tag_rejected` — pass ✅
+  - `compression_payload::compression_wire_unknown_version_rejected` — pass ✅
+  - `compression_payload::compression_wire_too_short_rejected` — pass ✅
+  - `compression_payload::compression_wire_to_wire_from_wire_symmetric` — pass ✅
+  - `hydrate_checkpoint::cold_boot_roundtrip_loro_mode` — pass ✅
+  - `hydrate_checkpoint::cold_boot_fresh_graph_no_snapshot` — pass ✅
+  - `hydrate_checkpoint::checkpoint_idempotent_double_call` — pass ✅
+  - `builder_validation::build_rejects_zero_batch_interval_ms` — pass ✅
+  - `builder_validation::build_rejects_zero_batch_max_size` — pass ✅
+  - `builder_validation::build_rejects_missing_storage` — pass ✅
+  - `builder_validation::build_rejects_grafeo_mode_without_grafeo_dir` — pass ✅
+  - `builder_validation::build_accepts_valid_loro_config` — pass ✅ (positive control)
+- API verifications performed: 15 symbols grep-confirmed against `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/` (see Step 9 above for full list with file:line citations).
+- cargo check: pass — 0 errors, 2 pre-existing warnings (unchanged from P4-L1 baseline), 0 new warnings from P4-L3 work.
+- cargo test --lib: pass — 6 passed / 0 failed / 0 ignored.
+- cargo test --all: pass — 70 passed / 0 failed / 2 ignored (across 4 test targets: lib 6/6, integration 5/5, unit 59/59 [2 ignored], doc-tests 0/0).
+- Commit hashes: `49331d7` + `61c9bad` (both pushed to `phase-4`).
