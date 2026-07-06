@@ -1,5 +1,9 @@
 name: CI
 
+# Per P6-DEVIL C4.1: fmt + clippy jobs require the Phase 5 baseline to be clean.
+# L2 baseline cleanup (commit 568ea7e) ran `cargo fmt --all` + fixed 30 clippy warnings;
+# both gates now pass. See docs/phase-6/p6-l1-devil.md C4.1 for the original blocker analysis.
+
 on:
   push:
     branches:
@@ -10,25 +14,35 @@ on:
 jobs:
   fmt:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      # TODO: L2 — run: cargo fmt --all --check
+      - run: cargo fmt --all --check
 
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      # TODO: L2 — run: cargo clippy --all-targets -- -D warnings
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+      # --all-targets added beyond user spec to catch test-code issues; see P6-DEVIL C4.2
+      - run: cargo clippy --all-targets -- -D warnings
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # TODO: L2 — run: cargo test --all
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - run: cargo test --all
