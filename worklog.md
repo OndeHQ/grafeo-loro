@@ -350,3 +350,25 @@ Stage Summary:
   1. The `spawn_blocking` task in `flush_inner` is NOT cancellable on timeout — tokio's blocking pool doesn't support task cancellation. The orphaned task continues to completion in the background. This is acceptable (if it commits, the epoch lands in the side-channel and the outbound poller filters the CDC events; if it errors, the error is logged by the spawned task itself via the `?` operator returning early). However, if a grafeo transaction genuinely deadlocks (not just slow), the blocking pool thread is leaked forever. A future Phase could add a `tokio::task::block_in_place` + abort mechanism, or a grafeo-level transaction timeout.
   2. The `inbound_event_count` counter is `Ordering::Relaxed` — sufficient for test assertions (which read after `settle_outbound` provides a happens-before edge via the `tokio::time::sleep` await), but if production code ever reads it for alerting, it should be `Ordering::SeqCst` or paired with a fence.
   3. The `node_delete_round_trip` test's re-creation step uses `inbound_sender()` directly because LoroMap::insert is a no-op when the value is unchanged. This is a Loro CRDT semantic (documented in loro-1.13.6/src/lib.rs:2131-2137) that could surprise future test authors — worth a note in the test file's module doc (not added here to avoid scope creep, but flagged for awareness).
+
+---
+Task ID: ORCH-P2-SETUP
+Agent: Orchestrator (Super Z)
+Task: Initialize Plonga-Plongo-Loop for Phase 2, pick first $stn, prepare environment
+
+Work Log:
+- Environment setup: bun upgraded to 1.4.0-canary, repomix 1.16.0 installed, rust 1.96.1 (minimal profile) installed; PATH persisted in ~/.bashrc.
+- Repo clone: `phase-2` branch did NOT exist on remote (only `main` and `phase-1`). Cloned `phase-1` as base. Stripped token from remote URL; configured git credential helper to read `GH_TOKEN` env var (no token in `.git/config`).
+- Read docs/implementation-plan.md: identified Phase 2 = 3 tasks (lorosurgeon derives, sync_tree_move_to_grafeo, VertexBuilder).
+- Read prior worklog: Phase 1 fully complete (10/10 tests pass, all hunter MAJORs fixed in FIX-L2-R2). 41 `unimplemented!()` remain in non-Phase-1 modules — explicitly out of Phase 1 scope, candidates for later phases.
+- Read source: src/schema/{vertex,edge,tree,mod}.rs, src/app.rs, src/types/{values,ids}.rs, src/lib.rs.
+- Architecture doc review: §6 (lorosurgeon), §7 (OrderedCollection + T_CHILD tree move), §8 (concurrency).
+- Picked $stn = `p2-derives` (Phase 2 Task 1: Wire lorosurgeon derives). Foundational — Tasks 2 & 3 depend on these entities compiling + roundtripping.
+- Branch `p2-derives` created off `phase-1`. repomix.md refreshed (4855 lines, 57,873 tokens).
+
+Stage Summary:
+- $stn = `p2-derives`
+- Phase 2 Task 1 selected for first loop iteration
+- Branch off phase-1 @ e079e47
+- Discrepancy flagged for L1: Cargo.toml pins `lorosurgeon = "0.2"` but architecture doc §27 (deps) says `lorosurgeon = "0.3"`. L1 should verify which version actually resolves and whether API differs.
+- Next: spawn L1 scaffolder (Task ID `P2-L1`) to verify derives compile + write roundtrip test scaffolds (no bodies).
