@@ -1077,7 +1077,7 @@ impl HealthProbe {
     /// - Last sync occurred within `max_staleness_ms`
     pub fn check(&self, max_staleness_ms: u64) -> HealthStatus {
         let loro_ok = self.doc.try_read().is_some();
-        let grafeo_ok = self.db.execute("MATCH (n) RETURN count(n) LIMIT 1").is_ok();
+        let grafeo_ok = self.db.session().execute("MATCH (n) RETURN count(n) LIMIT 1").is_ok();
         let now = unix_timestamp_ms();
         let sync_ok = now - self.last_sync_ts.load(Ordering::Relaxed) < max_staleness_ms;
 

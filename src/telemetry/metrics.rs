@@ -23,7 +23,39 @@
 //! `GrafeoLoroAppBuilder::build` via [`Self::init`] from a `Meter` obtained
 //! via `opentelemetry::global::meter("grafeo-loro")` (L2 territory).
 
+use std::fmt;
+
 use opentelemetry::metrics::{Counter, Histogram, Meter};
+
+/// Hydration mode for `record_hydration` attribute labelling (architecture
+/// §23.1 row 5 label `mode` ∈ {`"loro"`, `"grafeo"}`).
+///
+/// Type-safe replacement for the `&str` form per Devil m1 (Q6 ruling): the
+/// enum prevents typos at compile time; [`Display`](fmt::Display) renders the
+/// OTLP attribute value (`"loro"` / `"grafeo"`) for the histogram record.
+///
+/// # L2 contract (P5-L2 — Devil m1)
+///
+/// - `Loro` → `"loro"` (architecture §23.1 row 5).
+/// - `Grafeo` → `"grafeo"`.
+/// - Callers (`GrafeoLoroApp::hydrate`) map `SsotMode::Loro →
+///   HydrationMode::Loro` / `SsotMode::Grafeo → HydrationMode::Grafeo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HydrationMode {
+    /// Loro SSOT hydration (snapshot → Loro → Grafeo indexes).
+    Loro,
+    /// Grafeo SSOT hydration (Grafeo graph → Loro mirror).
+    Grafeo,
+}
+
+impl fmt::Display for HydrationMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HydrationMode::Loro => f.write_str("loro"),
+            HydrationMode::Grafeo => f.write_str("grafeo"),
+        }
+    }
+}
 
 /// Registry of bridge/batcher/hydration counters and histograms.
 ///
@@ -64,7 +96,8 @@ impl MetricsRegistry {
     ///   construction).
     pub fn init(meter: Meter) -> Self {
         let _ = meter;
-        unimplemented!("P5-L2: wire `meter.u64_counter(...)` + `meter.f64_histogram(...)` per architecture §23.1")
+        // TODO(P5-L3): wire `meter.u64_counter(...)` + `meter.f64_histogram(...)` per architecture §23.1
+        unimplemented!("P5-L3: wire `meter.u64_counter(...)` + `meter.f64_histogram(...)` per architecture §23.1")
     }
 
     /// Record a single batch flush. Called from `MutationBatcher::flush_inner`
@@ -78,7 +111,8 @@ impl MetricsRegistry {
     /// - No-op if the registry's instruments are no-ops (test mode).
     pub fn record_batch_flush(&self, duration_ms: f64, batch_size: u64) {
         let _ = (duration_ms, batch_size);
-        unimplemented!("P5-L2: call self.batch_flush_duration.record(...) with [batch_size] attribute")
+        // TODO(P5-L3): self.batch_flush_duration.record(duration_ms, &[KeyValue::new("batch_size", batch_size)])
+        unimplemented!("P5-L3: call self.batch_flush_duration.record(...) with [batch_size] attribute")
     }
 
     /// Record a hydration run. Called from `GrafeoLoroApp::hydrate` after
@@ -86,14 +120,15 @@ impl MetricsRegistry {
     ///
     /// # L1 contract
     ///
-    /// - `duration_ms` → `hydration_duration.record(duration_ms, [mode=...])`
+    /// - `duration_ms` → `hydration_duration.record(duration_ms, &[mode=...])`
     /// - `mode` → attribute set on the histogram record (architecture §23.1
-    ///   row 5 labels: `mode` ∈ {`"loro"`, `"grafeo"`}).
-    /// - `mode` is `&str` (not enum) to match the OTLP attribute model; the
-    ///   caller is responsible for using one of the two architecture-defined
-    ///   values. Devil Q6 — should this be a `HydrationMode` enum?
-    pub fn record_hydration(&self, duration_ms: f64, mode: &str) {
+    ///   row 5 labels: `mode` ∈ {`"loro"`, `"grafeo"`}). Type-safe
+    ///   [`HydrationMode`] enum per Devil m1 (Q6 ruling) — `&str` form
+    ///   replaced by the enum to prevent typos at compile time; the enum's
+    ///   `Display` impl renders the OTLP attribute value (`"loro"` / `"grafeo"`).
+    pub fn record_hydration(&self, duration_ms: f64, mode: HydrationMode) {
         let _ = (duration_ms, mode);
-        unimplemented!("P5-L2: call self.hydration_duration.record(...) with [mode] attribute")
+        // TODO(P5-L3): self.hydration_duration.record(duration_ms, &[KeyValue::new("mode", mode.to_string())])
+        unimplemented!("P5-L3: call self.hydration_duration.record(...) with [mode=HydrationMode::to_string()] attribute")
     }
 }

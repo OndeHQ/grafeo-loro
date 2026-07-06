@@ -857,18 +857,25 @@ impl GrafeoLoroApp {
                 tracing::info!("hydrate: parallel_hydrate_grafeo (Loro → Grafeo)");
                 {
                     let doc = self.sync_engine.loro_doc.read();
-                    // TODO(P5-L2): pass `self.metrics.as_ref()` + `self.tracer.as_ref()`
-                    // (architecture §23.2 tree row 1.3 — `parallel_hydrate_grafeo`
-                    // span). For L1 we pass `None, None` to preserve the cold-boot
-                    // path; L2 will thread the real telemetry handles.
+                    // P5-L2 wiring (Devil M3): thread telemetry handles into
+                    // `parallel_hydrate_grafeo` so L3 can emit the
+                    // `parallel_hydrate_grafeo` child span (architecture §23.2
+                    // tree row 1.3) + record `hydration_duration` histogram.
+                    // `None, None` only fires when the app was built without
+                    // telemetry (test mode); production builds thread `Some`.
                     parallel_hydrate_grafeo(
                         &self.sync_engine.grafeo_db,
                         &doc,
                         self.sync_engine.maps(),
-                        None,
-                        None,
+                        self.metrics.as_ref(),
+                        self.tracer.as_ref(),
                     )?;
                 }
+                // TODO(P5-L3): record hydration_duration via
+                // `self.metrics.record_hydration(elapsed_ms, mode)` where
+                // `mode` is `HydrationMode::Loro` for this arm (matches
+                // `self.ssot_mode == SsotMode::Loro`). The `Grafeo` arm below
+                // will use `HydrationMode::Grafeo` once P5 implements it.
 
                 // Step 6: re-seed loro_key_counter to max(V/* keys) + 1.
                 //
@@ -1265,27 +1272,54 @@ impl GrafeoLoroAppBuilder {
         // 3. Init LoroDoc.
         let loro_doc = Arc::new(parking_lot::RwLock::new(loro::LoroDoc::new()));
 
-        // 4. Init SyncEngine (P4-DEVIL Q7 + P5-L1 Task 4 — with_telemetry
-        //    threads builder batch params + telemetry handles into the
-        //    MutationBatcher).
-        //
-        // TODO(P5-L2): if `self.metrics` / `self.tracer` are `None` AND
-        //   Devil Q14/Q17 ruling allows auto-construction, build them here
-        //   from `opentelemetry::global::meter("grafeo-loro")` + `global::
-        //   tracer("grafeo-loro")` respectively. For L1 we just pass through
-        //   whatever the builder has (Option so test builds without telemetry
-        //   configured remain `None`).
+        // 4. Auto-construct telemetry handles if their builder slots are
+        //    `None` (Devil m2 — Q14/Q16/Q17 rulings). `opentelemetry::global`
+        //    is verified to expose `meter(name)` + `tracer(name)` (Devil
+        //    step 3). The bodies of `MetricsRegistry::init` + `HealthProbe::new`
+        //    remain `// TODO(P5-L3):` — until L3 fills them, the auto-construction
+        //    branches return `None` so tests that do not configure telemetry
+        //    (e.g. `build_accepts_valid_loro_config`) remain unaffected.
+        //    Once L3 implements the bodies, the `// TODO(P5-L3):` lines below
+        //    become `Some(Arc::new(...))` and production auto-construction
+        //    fires whenever the builder slots are unset.
+        let metrics = self.metrics.clone().or_else(|| {
+            // Verified API (Devil step 3): opentelemetry-0.23.0/src/global/metrics.rs:115
+            let _meter = opentelemetry::global::meter("grafeo-loro");
+            // TODO(P5-L3): Some(Arc::new(MetricsRegistry::init(_meter)))
+            let _ = _meter;
+            None
+        });
+        let tracer = self.tracer.clone().or_else(|| {
+            // Verified API (Devil step 3): opentelemetry-0.23.0/src/global/trace.rs:394
+            // TODO(P5-L3): Some(Arc::new(opentelemetry::global::tracer("grafeo-loro")))
+            None
+        });
+        let health = self.health.clone().or_else(|| {
+            // HealthProbe needs the just-constructed loro_doc + grafeo_db
+            // (Devil Q16 ruling — auto-construction is feasible in build()
+            // because both handles exist at this point).
+            // TODO(P5-L3): Some(Arc::new(HealthProbe::new(
+            //     loro_doc.clone(),
+            //     grafeo_db.clone(),
+            // )))
+            None
+        });
+
+        // 5. Init SyncEngine (P4-DEVIL Q7 + P5-L1 Task 4 + P5-L2 Devil M3 —
+        //    `with_telemetry` threads builder batch params + metrics + tracer
+        //    + health into the MutationBatcher).
         let (engine, inbound_rx, outbound_rx) = SyncEngine::with_telemetry(
             grafeo_db,
             loro_doc,
             self.batch_max_size,
             self.batch_interval_ms,
-            self.metrics.clone(),
-            self.tracer.clone(),
+            metrics.clone(),
+            tracer.clone(),
+            health.clone(),
         );
         let engine = Arc::new(engine);
 
-        // 5. Spawn tokio tasks (init_loro_subscriber is called inside
+        // 6. Spawn tokio tasks (init_loro_subscriber is called inside
         //    spawn_all — subscriber is active when build() returns; hydrate()
         //    handles this via ORIGIN_LORO_BRIDGE per P4-DEVIL M10).
         //
@@ -1294,21 +1328,16 @@ impl GrafeoLoroAppBuilder {
         // in L2/L3 (P4-HUNT CB-1 — previously discarded as `_join_handles`).
         let worker_handles = engine.clone().spawn_all(inbound_rx, outbound_rx).await;
 
-        // TODO(P5-L2): if `self.health` is `None` AND Devil Q16 ruling allows
-        //   auto-construction, build `HealthProbe::new(loro_doc.clone(),
-        //   grafeo_db.clone())` here. For L1 we just pass through `self.health`
-        //   (Option so test builds without telemetry remain `None`).
-
         tracing::info!(
             ssot_mode = ?self.ssot_mode,
             compression = ?self.compression,
-            metrics_configured = self.metrics.is_some(),
-            health_configured = self.health.is_some(),
-            tracer_configured = self.tracer.is_some(),
+            metrics_configured = metrics.is_some(),
+            health_configured = health.is_some(),
+            tracer_configured = tracer.is_some(),
             "GrafeoLoroAppBuilder::build: runtime spawned"
         );
 
-        // 6. Wrap into GrafeoLoroApp (P4-DEVIL M8 + P5-L1 Task 4 —
+        // 7. Wrap into GrafeoLoroApp (P4-DEVIL M8 + P5-L1 Task 4 —
         //    from_sync_engine_with_telemetry threads ssot_mode + storage +
         //    compression + metrics + health + tracer + worker_handles into
         //    the app struct).
@@ -1317,9 +1346,9 @@ impl GrafeoLoroAppBuilder {
             self.ssot_mode,
             Some(storage),
             self.compression,
-            self.metrics,
-            self.health,
-            self.tracer,
+            metrics,
+            health,
+            tracer,
             Some(worker_handles),
         ))
     }

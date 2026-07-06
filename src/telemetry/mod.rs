@@ -37,7 +37,7 @@ pub mod traces;
 pub mod health;
 
 pub use health::{HealthProbe, HealthStatus};
-pub use metrics::MetricsRegistry;
+pub use metrics::{HydrationMode, MetricsRegistry};
 
 /// Shared tracer handle. `Arc<BoxedTracer>` so the same tracer can be cloned
 /// into `SyncEngine`, `MutationBatcher`, and `GrafeoLoroApp` without each

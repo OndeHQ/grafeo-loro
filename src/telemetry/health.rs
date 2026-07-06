@@ -18,7 +18,11 @@
 //! `check` body with the three probes specified in architecture §23.3:
 //!
 //! 1. **LoroDoc lock poison** — `self.doc.try_read().is_some()`.
-//! 2. **Grafeo dummy query** — `self.db.execute("MATCH (n) RETURN count(n) LIMIT 1").is_ok()`.
+//! 2. **Grafeo dummy query** — `self.db.session().execute("MATCH (n) RETURN count(n) LIMIT 1").is_ok()`
+//!    (Devil M1 — correct API per grafeo-engine-0.5.42; `GrafeoDB::execute(&str)` does NOT
+//!    exist; the actual API is `db.session() -> Session` + `Session::execute(&self, query:
+//!    &str) -> Result<QueryResult>` verified at `grafeo-engine-0.5.42/src/database/mod.rs:1663`
+//!    + `session/mod.rs:2636`).
 //! 3. **Sync staleness** — `now - last_sync_ts < max_staleness_ms`.
 //!
 //! ## Storage convention
@@ -80,7 +84,8 @@ impl HealthProbe {
     ///   make `check` always fail staleness on first call).
     pub fn new(doc: Arc<RwLock<LoroDoc>>, db: Arc<GrafeoDB>) -> Self {
         let _ = (doc, db);
-        unimplemented!("P5-L2: store doc + db Arc clones; init last_sync_ts = unix_timestamp_ms()")
+        // TODO(P5-L3): store doc + db Arc clones; init last_sync_ts = unix_timestamp_ms()
+        unimplemented!("P5-L3: store doc + db Arc clones; init last_sync_ts = unix_timestamp_ms()")
     }
 
     /// Stamp `last_sync_ts` with the current wall-clock ms.
@@ -95,7 +100,8 @@ impl HealthProbe {
     /// - `self.last_sync_ts.store(now_ms, Ordering::Relaxed)`.
     /// - `now_ms` from `SystemTime::now().duration_since(UNIX_EPOCH)`.
     pub fn update_sync_ts(&self) {
-        unimplemented!("P5-L2: self.last_sync_ts.store(now_ms, Ordering::Relaxed)")
+        // TODO(P5-L3): self.last_sync_ts.store(now_ms, Ordering::Relaxed)
+        unimplemented!("P5-L3: self.last_sync_ts.store(now_ms, Ordering::Relaxed)")
     }
 
     /// Probe all three components; returns [`HealthStatus`] with
@@ -104,26 +110,34 @@ impl HealthProbe {
     ///
     /// # L1 contract
     ///
-    /// Per architecture §23.3:
+    /// Per architecture §23.3 (Devil M1 — correct Grafeo API):
     /// - `loro_ok = self.doc.try_read().is_some()`
-    /// - `grafeo_ok = self.db.execute("MATCH (n) RETURN count(n) LIMIT 1").is_ok()`
+    /// - `grafeo_ok = self.db.session().execute("MATCH (n) RETURN count(n) LIMIT 1").is_ok()`
+    ///   (NOT `self.db.execute(...)` — `GrafeoDB::execute(&str)` does NOT exist in
+    ///   grafeo 0.5.42; correct API is `db.session() -> Session` + `Session::execute(&self,
+    ///   query: &str) -> Result<QueryResult>`, verified at
+    ///   `grafeo-engine-0.5.42/src/database/mod.rs:1663` + `session/mod.rs:2636`.)
     /// - `sync_ok = now - self.last_sync_ts.load(Relaxed) < max_staleness_ms`
     /// - `overall = loro_ok && grafeo_ok && sync_ok`
     /// - `components = vec![("loro_doc", loro_ok), ("grafeo_db", grafeo_ok), ("sync_freshness", sync_ok)]`
     ///
-    /// # Devil questions
+    /// # Devil questions resolved
     ///
-    /// - Q4: `GrafeoDB::execute` — is this the correct API in grafeo 0.5.42?
-    ///   Architecture §23.3 line 1080 uses `self.db.execute(...)` but the
-    ///   grafeo-engine API surface needs verification. If `execute` is
-    ///   wal-gated or absent, fall back to `db.session_with_cdc(false)`
-    ///   + `begin_transaction` + `prepare_commit` + `commit` as the dummy
-    ///   probe (no-op transaction).
-    /// - Q5: Should `check` log a `WARN` for each failing component, or
-    ///   return silently? Architecture §23.4 says WARN is for echo loops +
-    ///   batch flush backpressure — silent return seems consistent.
+    /// - Q4 (Devil M1): API verified — `GrafeoDB::execute(&str)` does NOT exist;
+    ///   correct API is `db.session().execute(query: &str) -> Result<QueryResult>`.
+    ///   Architecture §23.3 line 1080 was patched in P5-L2 to use `db.session().execute(...)`.
+    /// - Q5: Silent return on failure (no `WARN` log) per architecture §23.4 — WARN list
+    ///   covers echo loops + batch flush backpressure, NOT health checks.
     pub fn check(&self, max_staleness_ms: u64) -> HealthStatus {
         let _ = max_staleness_ms;
-        unimplemented!("P5-L3: three-component probe per architecture §23.3")
+        // TODO(P5-L3): three-component probe per architecture §23.3:
+        //   let loro_ok = self.doc.try_read().is_some();
+        //   let grafeo_ok = self.db.session()
+        //       .execute("MATCH (n) RETURN count(n) LIMIT 1")
+        //       .is_ok();
+        //   let now = unix_timestamp_ms();
+        //   let sync_ok = now - self.last_sync_ts.load(Ordering::Relaxed) < max_staleness_ms;
+        //   HealthStatus { overall: loro_ok && grafeo_ok && sync_ok, components: vec![...] }
+        unimplemented!("P5-L3: three-component probe per architecture §23.3 (Devil M1 — use db.session().execute)")
     }
 }
