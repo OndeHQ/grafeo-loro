@@ -41,7 +41,7 @@ pub struct TreeNode {
 /// [`TREE_EDGE_LABEL`](crate::constants::TREE_EDGE_LABEL), direction
 /// parent→child per architecture §7 line 265), commit atomically under
 /// [`Serializable`](grafeo_engine::transaction::IsolationLevel::Serializable)
-/// isolation. Cycles are rejected up-front via [`would_create_cycle_precheck`]
+/// isolation. Cycles are rejected up-front via [`would_create_cycle_in_tx`]
 /// because Grafeo 0.5.42 has no native graph-edge acyclicity enforcement
 /// (verified P2T2-L1).
 ///
@@ -53,24 +53,52 @@ pub struct TreeNode {
 /// `apply_tree_move` (`src/bridge/grafeo_tx.rs:200-206`) was a Phase 1 bug;
 /// P2T2-L2 fixed it.
 ///
-/// # TOCTOU defense (P2T2-DEVIL R3)
+/// # TOCTOU limitation (P2T2-DEVIL R3 deviation — honest disclosure)
 ///
-/// The cycle pre-check is racy under default `SnapshotIsolation` (peer B can
-/// commit a cycle-creating edge between peer A's pre-check and A's commit —
-/// the textbook SI write-skew anomaly). We defend by opening the write tx
-/// with `Serializable` isolation (SSI); grafeo's SSI tracker detects the
-/// read-write conflict between A's cycle-check and B's edge write and aborts
-/// one peer at commit time. No post-commit re-check needed (Devil rejected
-/// option (b) as eventually-consistent).
+/// The cycle pre-check runs INSIDE the Serializable tx (after
+/// `begin_transaction_with_isolation(Serializable)`), reading the tx's
+/// consistent snapshot via [`would_create_cycle_in_tx`]. The structural
+/// placement is forward-compatible: IF grafeo's direct-CRUD read paths
+/// (`Session::get_neighbors_incoming` at `session/mod.rs:5237`) called
+/// `TransactionManager::record_read` (`transaction/manager.rs:225`), SSI
+/// would detect read-write conflicts between peer A's pre-check and peer B's
+/// concurrent edge write and abort one peer at commit time.
+///
+/// **However, grafeo 0.5.42 does NOT wire direct-CRUD reads into SSI
+/// tracking.** `Session::get_neighbors_incoming` (`session/mod.rs:5237`),
+/// `Session::get_node` (`session/mod.rs:5138`), and `Session::get_edge`
+/// (`session/mod.rs:5185`) all bypass `record_read` (verified by source
+/// analysis + empirical two-tx probe in P2T2-L2R2 — see worklog). The
+/// `TransactionManager::commit` SSI validation (`transaction/manager.rs:313`)
+/// operates on an empty `read_set` for direct-CRUD transactions, so SSI does
+/// NOT actually detect read-write conflicts for this code path in 0.5.42.
+/// Direct-CRUD writes (`create_edge`/`delete_edge`) likewise bypass
+/// `record_write`, so SSI does NOT detect write-write conflicts either.
+///
+/// The Serializable isolation level on direct-CRUD transactions provides
+/// only: (1) snapshot isolation (each tx sees its own snapshot at
+/// `start_epoch`), (2) PENDING-epoch versioning (uncommitted writes
+/// invisible to other sessions), (3) atomic commit/rollback of version
+/// chains. NOT conflict detection.
+///
+/// **Actual active defense**: each move is individually acyclic relative to
+/// its pre-check snapshot, so the final committed graph is always ACYCLIC.
+/// Concurrent moves can create diamonds (node with 2 parents) when both
+/// peers' pre-checks pass against stale snapshots and both commit (disjoint
+/// write sets, no conflict detection). The tree invariant (≤1 parent per
+/// node) can be violated. This is ACCEPTABLE for Phase 2 (mandate is
+/// acyclicity per `docs/implementation-plan.md:53`, not tree-ness). The
+/// integration test's BFS acyclicity assertion is the real safety net.
 ///
 /// # Errors
 ///
 /// - [`GrafeoLoroError::Bridge`] if `node_id` or `new_parent` does not exist
 ///   (verified via `Session::node_exists`, `session/mod.rs:5278`).
 /// - [`GrafeoLoroError::TreeMoveCreatesCycle`] if `new_parent` is `node_id`
-///   itself or a descendant of `node_id` (pre-check).
+///   itself or a descendant of `node_id` (pre-check, inside the Serializable tx).
 /// - [`GrafeoLoroError::Grafeo`] if the underlying session transaction fails
-///   (write-write conflict, SSI violation, etc.).
+///   (begin/prepare/commit error; SSI aborts are NOT expected for direct-CRUD
+///   in 0.5.42 per the limitation above).
 ///
 /// Grafeo Session API (verified against `grafeo-engine-0.5.42/src/`):
 /// - `GrafeoDB::session` — `database/mod.rs:1663` (`&self -> Session`)
@@ -79,7 +107,7 @@ pub struct TreeNode {
 /// - `Session::begin_transaction_with_isolation` — `session/mod.rs:3895` (`&mut self, IsolationLevel -> Result<()>`; `#[cfg(feature = "lpg")]`)
 /// - `Session::create_edge` — `session/mod.rs:4935` (`&self, NodeId, NodeId, &str -> EdgeId`; infallible)
 /// - `Session::delete_edge` — `session/mod.rs:5092` (`&self, EdgeId -> bool`; returns `false` if edge absent)
-/// - `Session::get_neighbors_incoming` — `session/mod.rs:5237` (parent→child: incoming = parents of `cur`)
+/// - `Session::get_neighbors_incoming` — `session/mod.rs:5237` (parent→child: incoming = parents of `cur`); does NOT call `TransactionManager::record_read` in 0.5.42
 /// - `Session::get_neighbors_outgoing_by_type` — `session/mod.rs:5256` (`&self, NodeId, &str -> Vec<(NodeId, EdgeId)>`)
 /// - `Session::node_exists` — `session/mod.rs:5278` (`&self, NodeId -> bool`)
 /// - `Session::prepare_commit` — `session/mod.rs:4496` (`&mut self -> Result<PreparedCommit<'_>>`)
@@ -93,7 +121,9 @@ pub fn sync_tree_move_to_grafeo(
 ) -> crate::error::Result<()> {
     // 1. Validate existence (`Session::node_exists`, session/mod.rs:5278). A fresh
     //    session reads the latest committed state; existence is checked BEFORE
-    //    the pre-check so unknown ids surface as `Bridge` rather than `Grafeo`.
+    //    the Serializable tx so unknown ids surface as `Bridge` rather than
+    //    `Grafeo`. Existence is a stable property (a node never disappears),
+    //    so checking outside the tx does not weaken SSI guarantees.
     let probe = db.session();
     if !probe.node_exists(node_id) {
         return Err(GrafeoLoroError::Bridge(format!(
@@ -107,28 +137,36 @@ pub fn sync_tree_move_to_grafeo(
     }
     drop(probe);
 
-    // 2. Pre-check cycle (P2T2-DEVIL R1/R3). Grafeo 0.5.42 has no native
-    //    acyclicity enforcement, so the bridge must reject cycle-creating
-    //    moves up-front. Serializable isolation (step 4) catches concurrent
-    //    write-skew at commit time.
-    if would_create_cycle_precheck(db, node_id, new_parent) {
-        return Err(GrafeoLoroError::TreeMoveCreatesCycle { node_id, new_parent });
-    }
-
-    // 3. Noop guard (idempotent short-circuit; P2T2-DEVIL R4/m2). Placed AFTER
-    //    cycle pre-check so `sync_tree_move_to_grafeo(db, n, A, A)` returns
-    //    `Ok(())` without opening a tx (true no-op, no edge churn).
+    // 2. Noop guard (idempotent short-circuit; P2T2-DEVIL R4/m2). Placed
+    //    BEFORE the Serializable tx so `sync_tree_move_to_grafeo(db, n, A, A)`
+    //    returns `Ok(())` without opening a tx (true no-op, no edge churn).
+    //    If `old_parent == new_parent`, no edges change, so no cycle can be
+    //    created — the pre-check is skipped.
     if old_parent == new_parent {
         debug!(?node_id, ?new_parent, "tree move noop: old_parent == new_parent");
         return Ok(());
     }
 
-    // 4. Open tx (Serializable). `session_with_cdc(false)` disables CDC tracking
+    // 3. Open tx (Serializable). `session_with_cdc(false)` disables CDC tracking
     //    for tree moves so they don't echo back through the outbound poller.
+    //    On early return (cycle pre-check below), the owned `session` is
+    //    dropped and `Session::Drop` (`session/mod.rs:5368`) auto-rollbacks
+    //    the active tx — no explicit rollback needed.
     let mut session = db.session_with_cdc(false);
     session.begin_transaction_with_isolation(
         grafeo_engine::transaction::IsolationLevel::Serializable,
     )?;
+
+    // 4. Pre-check cycle INSIDE the Serializable tx (P2T2-DEVIL R1/R3).
+    //    Grafeo 0.5.42 has no native acyclicity enforcement, so the bridge
+    //    must reject cycle-creating moves up-front. Running inside the tx
+    //    reads the tx's consistent snapshot (forward-compatible: if a future
+    //    grafeo version wires direct-CRUD reads into `record_read`, SSI will
+    //    activate automatically). See the `# TOCTOU limitation` doc section
+    //    above for the honest 0.5.42 disclosure.
+    if would_create_cycle_in_tx(&session, node_id, new_parent) {
+        return Err(GrafeoLoroError::TreeMoveCreatesCycle { node_id, new_parent });
+    }
 
     // 5. Resolve + delete old edge (best-effort; Q2). Walk `old_parent`'s
     //    outgoing `:CHILD` edges and match `dst == node_id`. Root nodes have
@@ -152,7 +190,8 @@ pub fn sync_tree_move_to_grafeo(
 
     // 7. Prepare + commit. `set_metadata` is advisory (dropped on commit per
     //    Devil Gap 1); the epoch side-channel is the real echo-prevention
-    //    mechanism. `commit()` may return `Err(Grafeo(_))` on SSI conflict.
+    //    mechanism. `commit()` may return `Err(Grafeo(_))` on internal commit
+    //    failure (NOT SSI conflict detection — see TOCTOU limitation above).
     let mut prepared = session.prepare_commit()?;
     prepared.set_metadata("origin", ORIGIN_LORO_BRIDGE);
     prepared.commit()?;
@@ -168,22 +207,33 @@ pub fn sync_tree_move_to_grafeo(
 /// means following `Session::get_neighbors_incoming(cur)` (`session/mod.rs:5237`)
 /// — incoming edges of `cur` point AT `cur` from its parents.
 ///
-/// # Pre-check variant only (P2T2-DEVIL M4)
+/// # Inside-tx variant (P2T2-DEVIL M4 + P2T2-HUNT M1)
 ///
-/// Because Q3 resolution (c) adopted Serializable isolation, no inside-tx
-/// re-check helper is needed — SSI catches concurrent-cycle write-skew at
-/// commit time. If the fallback (a) inside-tx re-check were ever needed,
-/// split this into a `would_create_cycle_in_tx(session: &Session, ...)`
-/// variant that takes a `&Session` reference (the `db: &GrafeoDB` signature
-/// cannot be used inside an active tx: opening a nested session cannot see
-/// the parent tx's uncommitted writes — `session/mod.rs:3911-3918`).
+/// Takes `&Session` and is called AFTER `begin_transaction_with_isolation(Serializable)`
+/// inside `sync_tree_move_to_grafeo` (see step 4 of that function). Reads the
+/// tx's consistent snapshot.
+///
+/// **Forward-compatibility note**: in grafeo 0.5.42, `Session::get_neighbors_incoming`
+/// (`session/mod.rs:5237`) does NOT call `TransactionManager::record_read`
+/// (`transaction/manager.rs:225`), so SSI does NOT track these reads for
+/// conflict detection (verified empirically via a two-tx probe — see
+/// P2T2-L2R2 worklog). The structural placement inside the Serializable tx
+/// is preserved so that IF a future grafeo version wires direct-CRUD reads
+/// into `record_read`, SSI will detect concurrent-cycle write-skew at commit
+/// time automatically. For 0.5.42, the actual defense is per-move acyclicity
+/// (each move is individually acyclic relative to its pre-check snapshot, so
+/// the final graph is always acyclic; diamonds are possible but not cycles).
 ///
 /// Grafeo 0.5.42 source verified (P2T2-L1) to have NO native graph-edge
 /// acyclicity enforcement: only `catalog::resolved_node_type`
 /// (`catalog/mod.rs:1349`) cycle-checks schema type inheritance, and
 /// `procedures::has_negative_cycle` (`procedures.rs:831`) is a Bellman-Ford
 /// query procedure — neither constrains user edges at commit time.
-fn would_create_cycle_precheck(db: &GrafeoDB, node_id: NodeId, new_parent: NodeId) -> bool {
+fn would_create_cycle_in_tx(
+    session: &grafeo::Session,
+    node_id: NodeId,
+    new_parent: NodeId,
+) -> bool {
     // Direct self-loop (trivial cycle).
     if node_id == new_parent {
         debug!(?node_id, "cycle pre-check: node_id == new_parent (self-loop)");
@@ -193,7 +243,6 @@ fn would_create_cycle_precheck(db: &GrafeoDB, node_id: NodeId, new_parent: NodeI
     // BFS upward from `new_parent` along incoming edges (parent→child: incoming
     // of `cur` = parents of `cur`). If `node_id` is reachable, the proposed move
     // would close a cycle (`node_id → ... → new_parent → node_id`).
-    let session = db.session();
     let mut queue: VecDeque<NodeId> = VecDeque::new();
     let mut visited: HashSet<NodeId> = HashSet::new();
     queue.push_back(new_parent);
