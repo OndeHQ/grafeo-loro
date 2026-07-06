@@ -359,7 +359,9 @@ impl GrafeoLoroApp {
     #[instrument(skip(self, gql), level = "info")]
     pub fn query(&self, gql: &str) -> Result<grafeo::QueryResult> {
         let _ = gql;
-        unimplemented!("query is Phase 4+ scope")
+        Err(GrafeoLoroError::NotYetImplemented(
+            "query: Phase 4+ scope".into(),
+        ))
     }
 
     /// Update a collaborative text field on a vertex.
@@ -367,7 +369,9 @@ impl GrafeoLoroApp {
     #[instrument(skip(self, text), level = "info")]
     pub async fn update_text(&self, node_id: NodeId, field: &str, text: &str) -> Result<()> {
         let _ = (node_id, field, text);
-        unimplemented!("update_text is Phase 3 scope")
+        Err(GrafeoLoroError::NotYetImplemented(
+            "update_text: Phase 3 scope".into(),
+        ))
     }
 
     /// Regenerate the embedding vector for a vertex's text field. App-level
@@ -381,7 +385,10 @@ impl GrafeoLoroApp {
     #[instrument(skip(self), level = "info")]
     pub async fn generate_embedding(&self, node_id: NodeId, field: &str) -> Result<()> {
         let _ = (node_id, field);
-        unimplemented!("generate_embedding is Phase 4+ scope (depends on Task 4's VectorOffloadManager::handle_text_update)")
+        Err(GrafeoLoroError::NotYetImplemented(
+            "generate_embedding: Phase 4+ scope (depends on VectorOffloadManager::handle_text_update)"
+                .into(),
+        ))
     }
 
     /// Export a shallow snapshot and persist via the storage backend.
@@ -583,10 +590,9 @@ impl GrafeoLoroApp {
                 //     would leave SyncEngine with a closed handle.
                 // P5 needs: wal feature + tar crate + ArcSwap grafeo_db field
                 //           + non-destructive backup_full.
-                unimplemented!(
-                    "P5: SsotMode::Grafeo checkpoint — requires wal feature + \
-                     ArcSwap grafeo_db field — see P4-DEVIL Q2/B1/B2/M3"
-                )
+                return Err(GrafeoLoroError::NotYetImplemented(
+                    "SsotMode::Grafeo checkpoint: requires wal feature + ArcSwap grafeo_db field".into(),
+                ));
             }
         }
     }
@@ -979,10 +985,9 @@ impl GrafeoLoroApp {
                 // Q6/M4: P5 needs `parallel_hydrate_loro` (mirror of
                 //     `parallel_hydrate_grafeo` using `graph_store().node_ids()`
                 //     + `entity.reconcile(RootReconciler::new(node_map))`).
-                unimplemented!(
-                    "P5: SsotMode::Grafeo hydrate — requires wal feature + \
-                     ArcSwap grafeo_db field — see P4-DEVIL Q2/B1/B2"
-                )
+                return Err(GrafeoLoroError::NotYetImplemented(
+                    "SsotMode::Grafeo hydrate: requires wal feature + ArcSwap grafeo_db field".into(),
+                ));
             }
         }
     }
@@ -992,7 +997,9 @@ impl GrafeoLoroApp {
     #[instrument(skip(self, payload), level = "info")]
     pub async fn broadcast_presence(&self, payload: PresencePayload) -> Result<()> {
         let _ = payload;
-        unimplemented!("broadcast_presence is Phase 5 scope")
+        Err(GrafeoLoroError::NotYetImplemented(
+            "broadcast_presence: Phase 5 scope (no WebSocket transport wired)".into(),
+        ))
     }
 
     /// Graceful shutdown: cancel workers, flush buffers, close stores.
