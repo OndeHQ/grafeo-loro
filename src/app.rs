@@ -434,9 +434,9 @@ impl GrafeoLoroApp {
     ///
     /// ## `SsotMode::Grafeo` (architecture §4 Step D) — **deferred to Phase 5**
     ///
-    /// P4-DEVIL Q2 decision (option (d)): the `SsotMode::Grafeo` arm is
-    /// `unimplemented!("P5: requires wal feature + ArcSwap grafeo_db field —
-    ///    see P4-DEVIL Q2/B1/B2/M3")` for Phase 4. The Phase 5 plan:
+    /// P4-DEVIL Q2 decision (option (d)): the `SsotMode::Grafeo` arm returns
+    /// `Err(GrafeoLoroError::NotYetImplemented("requires wal feature + ArcSwap
+    ///    grafeo_db field"))` for Phase 4/7. The future-phase plan:
     ///
     /// 1. Flush the on-disk `GrafeoDB` to its directory — `GrafeoDB::close()`
     ///    takes `&self` (NOT `self` — verified at
@@ -660,9 +660,9 @@ impl GrafeoLoroApp {
     ///
     /// ## `SsotMode::Grafeo` (architecture §4 Step A) — **deferred to Phase 5**
     ///
-    /// P4-DEVIL Q2 decision (option (d)): the `SsotMode::Grafeo` arm is
-    /// `unimplemented!("P5: requires wal feature + ArcSwap grafeo_db field —
-    ///    see P4-DEVIL Q2/B1/B2")` for Phase 4. The Phase 5 plan:
+    /// P4-DEVIL Q2 decision (option (d)): the `SsotMode::Grafeo` arm returns
+    /// `Err(GrafeoLoroError::NotYetImplemented("requires wal feature + ArcSwap
+    ///    grafeo_db field"))` for Phase 4/7. The future-phase plan:
     ///
     /// 1. `StorageBackend::load(format!("{graph_id}/{STORAGE_KEY_GRAFEO_TAR_ZST}"))`
     ///    — download the compressed tarball. `NotFound` = fresh graph.
@@ -1008,8 +1008,7 @@ impl GrafeoLoroApp {
     ///
     /// # Phase 5 Task 4 (P5-L1)
     ///
-    /// L1 contract only — body remains `unimplemented!()`. L2/L3 fills the
-    /// algorithm per the following sequence (architecture §4 Step D):
+    /// Fully implemented in P5-L3 per architecture §4 Step D:
     ///
     /// 1. `self.sync_engine.shutdown()` — trigger the broadcast (already
     ///    implemented at `src/bridge/sync_engine.rs:611`).
