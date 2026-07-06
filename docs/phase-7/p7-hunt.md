@@ -86,3 +86,20 @@ No `#[allow]` masks deferred rot. None use TODO/deferred language. No band-aids 
 **Verdict**: CLEAN.
 **Counts**: blockers 0, majors 0, minors 0, nits 0.
 
+## #5 Bloat (DRY Violations) — CLEAN
+
+**Hunt 1**: `rg -n 'fn enc_|fn decode_' fuzz/fuzz_targets/gen_corpus.rs` → 7 fns:
+- `enc_u64/u16/u8/string` — primitive byte encoders (seed-corpus file format only; NOT production wire format)
+- `enc_fuzz_op`/`enc_fuzz_value`/`enc_fuzz_input` — fuzz seed serializers operating on `FuzzOp`/`FuzzValue` (the shared types from lib.rs)
+
+These are FUZZ FILE FORMAT serializers (deterministic seed .bin layout) — NOT reinventions of the production `%EPH` envelope (which lives in `src/presence/socket.rs` and uses `magic + u16 room_id_len + room_id + u8 msg_type + serde_json`). Distinct concerns: file format ≠ wire format.
+
+**Hunt 2**: `rg -n 'EncFuzz' fuzz/ src/` → 2 hits, both historical comments:
+- `fuzz/fuzz_targets/lib.rs:7` — module doc explaining the removal rationale
+- `fuzz/fuzz_targets/gen_corpus.rs:51` — comment marking the prior anti-plenger #5 violation site (removed in P7-L2-E)
+
+No `EncFuzzOp`/`EncFuzzValue` mirror types remain. Gap E consolidation verified.
+
+**Verdict**: CLEAN.
+**Counts**: blockers 0, majors 0, minors 0, nits 0.
+
