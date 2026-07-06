@@ -1212,3 +1212,138 @@ Stage Summary:
 - grep verification: TODO/precheck/old-name all gone. `would_create_cycle_precheck` → 0 matches. `would_create_cycle_in_tx` → 6 matches. `would_create_cycle\b` (bare) → 0 matches. `unreachable!|panic!()` in tree.rs → 0 matches.
 - SSI defense actually works now? **NO — and the doc no longer claims it does.** grafeo 0.5.42's direct-CRUD API (`Session::get_neighbors_incoming`, `get_node`, `get_edge`, `create_edge`, `delete_edge`, `create_node`) does NOT call `TransactionManager::record_read`/`record_write` (verified by source analysis at session/mod.rs:5237,5138,5185,4935,5092,4860 + transaction/manager.rs:225,180 + empirical two-tx probe). The Serializable isolation level on direct-CRUD txs provides only snapshot isolation + PENDING-epoch versioning + atomic commit/rollback — NOT conflict detection. The structural placement of `would_create_cycle_in_tx` inside the Serializable tx is preserved for forward-compatibility (IF a future grafeo version wires direct-CRUD reads into `record_read`, SSI will activate automatically with no code change). For 0.5.42, the actual active defense is per-move acyclicity: each move is individually acyclic relative to its pre-check snapshot, so the final graph is always ACYCLIC (diamonds possible but not cycles — ACCEPTABLE for Phase 2 per docs/implementation-plan.md:53). The integration test's BFS acyclicity assertion is the real safety net.
 - Commit hash: `4c2b876` (final commit on `p2-tree-move` after 4 logical commits: 6f581d4 M1, 72b658a m1, 4b1335b m2+m4, 4c2b876 m3)
+
+---
+Task ID: ORCH-P2T3-SETUP
+Agent: Orchestrator (Super Z)
+Task: Initialize Plonga-Plongo-Loop iteration 3 for Phase 2 Task 3 (VertexBuilder)
+
+Work Log:
+- Loop 2 (Phase 2 Task 2: sync_tree_move_to_grafeo) COMPLETE — pushed to origin/p2-tree-move (25/25 tests pass).
+- Loop 3 = Phase 2 Task 3: implement `app::VertexBuilder` fluent API.
+- Branch `p2-vertex-builder` created off `p2-tree-move`.
+- Read existing src/app.rs: `VertexBuilder` struct has empty body comment ("// Fluent API state"). All 3 methods (`with_label`, `with_property`, `commit`) are `unimplemented!()`. `GrafeoLoroApp::create_vertex() -> VertexBuilder` also `unimplemented!()`. The `GrafeoLoroApp` struct itself has empty body comment ("// Internal Arc states for Doc, DB, SyncEngine, Batchers").
+- Implementation plan §Phase 2 Task 3:
+  > 3. Implement `app::VertexBuilder` fluent API
+  >    - Accumulate labels/properties.
+  >    - `commit()`: Generate NodeId, write Loro + Grafeo atomically.
+- Key architectural question for L1: what is the MINIMAL scope? Task 3 nominally says "VertexBuilder fluent API" but `commit()` requires LoroDoc + GrafeoDB access, which means `VertexBuilder` must hold references to them. That implies `GrafeoLoroApp` must also have real fields. But implementing the full `GrafeoLoroApp` (hydrate, checkpoint, broadcast_presence, shutdown, etc.) is Phase 4/5 scope. L1 should clarify the scope boundary: implement just enough of `GrafeoLoroApp` to construct a `VertexBuilder`, leaving the other app methods `unimplemented!()` (Phase 4/5 scope).
+- The `commit()` writes "Loro + Grafeo atomically" — but Phase 1 established that grafeo transactions and Loro commits are separate mechanisms. "Atomic" here means: if either write fails, roll back the other (or fail before committing the second). L1 should think about the atomicity contract carefully.
+- `commit()` also "Generate NodeId" — verify how NodeId is generated (random? sequential? hash of labels+props?). Architecture doc may have guidance.
+- Validation: no specific test listed in implementation plan for Task 3, but the umbrella Phase 2 validation is "Unit test: Tree move cycle rejection. Integration test: Concurrent tree moves from 3 peers → consistent acyclic result." — those are Task 2. For Task 3, the implicit validation is: roundtrip test (create vertex via VertexBuilder → read back from both Loro and Grafeo → assert labels + properties match).
+
+Stage Summary:
+- $stn = `p2-vertex-builder`
+- Branch off p2-tree-move @ 6ce7cb4
+- Phase 2 Task 3 selected
+- Key constraints for L1:
+  1. VertexBuilder.commit() needs LoroDoc + GrafeoDB references — design how VertexBuilder gets them
+  2. Scope boundary: implement minimal GrafeoLoroApp to construct VertexBuilder; leave other app methods unimplemented (Phase 4/5 scope)
+  3. "Atomic" Loro+Grafeo write — define the atomicity contract (what happens on partial failure)
+  4. NodeId generation strategy — verify against architecture doc or pick a sensible default
+  5. Test scaffolds needed: roundtrip test (VertexBuilder → read both stores → assert equality); empty vertex; multiple labels; nested property values
+- Next: spawn L1 scaffolder (Task ID `P2T3-L1`)
+
+---
+Task ID: P2T3-L1
+Agent: L1 Scaffolder
+Task: Wire VertexBuilder contracts (Phase 2 Task 3) — skeletons only
+
+Work Log:
+- Confirmed on branch `p2-vertex-builder` (HEAD = `6ce7cb4 P2T2-L2R2`).
+- Read worklog.md end-to-end (1246 lines): Phase 1 complete (10/10 tests, all hunter MAJORs fixed), Phase 2 Task 1 (`p2-derives`) complete via Loop 1, Phase 2 Task 2 (`p2-tree-move`) complete via Loop 2 (25/25 tests pass, SSI reality empirically verified).
+- Read existing src/app.rs (143 lines): `GrafeoLoroApp` struct had empty body comment; `VertexBuilder` struct had empty body comment; all 3 VertexBuilder methods + `GrafeoLoroApp::create_vertex()` were `unimplemented!()`; `GrafeoLoroAppBuilder` had fields but all setters + `build()` were `unimplemented!()`.
+- Read src/bridge/sync_engine.rs (740 lines): confirmed `SyncEngine` struct holds `pub(crate) grafeo_db: Arc<GrafeoDB>`, `pub(crate) loro_doc: Arc<RwLock<LoroDoc>>`, `pub(crate) maps: Arc<BridgeMaps>`, `pub(crate) bridge_origin_epochs: Arc<RwLock<HashSet<EpochId>>>`, `pub(crate) batcher: Arc<MutationBatcher>`. Public accessor: `maps()` returns `&Arc<BridgeMaps>`. Constructor: `SyncEngine::new(grafeo_db, loro_doc) -> (Self, inbound_rx, outbound_rx)`.
+- Read src/bridge/grafeo_tx.rs (218 lines): confirmed `BridgeMaps::insert_node(loro_key, grafeo::NodeId)` exists; `apply_loro_op` uses `session.create_node_with_props(&[&str], impl IntoIterator<Item = (&str, Value)>) -> Result<NodeId>`.
+- Read src/types/events.rs: confirmed `LoroOp::UpsertNode { loro_key: String, labels: Vec<String>, properties: HashMap<String, GraphValue> }` shape.
+- Read src/types/values.rs: confirmed `GraphValue::{Null, Bool, Integer, Float, String, Vector, Map, List}` (full superset) and `LoroProperty::{Null, Bool, Integer, Float, String}` (limited subset — no Vector/Map/List). Identified the properties shape mismatch as a key open question.
+- Read src/schema/vertex.rs: confirmed `VertexEntity { labels: Vec<String>, properties: HashMap<String, LoroProperty>, description: String }` (with `#[loro(text)]` on `description`).
+- Verified Grafeo Session API against `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/grafeo-engine-0.5.42/src/`:
+  * `GrafeoDB::new_in_memory() -> Self` — `database/mod.rs:267`
+  * `GrafeoDB::session() -> Session` — `database/mod.rs:1663`
+  * `GrafeoDB::session_with_cdc(bool) -> Session` — `database/mod.rs:1728` (cfg(feature = "cdc"))
+  * `GrafeoDB::with_config(Config) -> Result<Self>` — `database/mod.rs:346`
+  * `Config { max_property_size: Option<usize>, .. }` — `config.rs:259`, default `Some(16 * 1024 * 1024)` (16 MiB) at `config.rs:408`
+  * `Config::in_memory() -> Self` — `config.rs:425`
+  * `Session::begin_transaction() -> Result<()>` — `session/mod.rs:3883`
+  * `Session::begin_transaction_with_isolation(IsolationLevel) -> Result<()>` — `session/mod.rs:3895`
+  * `Session::create_node(&[&str]) -> NodeId` — `session/mod.rs:4860` (infallible)
+  * `Session::create_node_with_props<'a>(&[&str], impl IntoIterator<Item = (&'a str, Value)>) -> Result<NodeId>` — `session/mod.rs:4885` (calls `check_property_size` at `:4892`; returns `Err` if exceeded)
+  * `Session::check_property_size(&str, &Value) -> Result<()>` — `session/mod.rs:4631` (private)
+  * `Session::prepare_commit(&mut self) -> Result<PreparedCommit<'_>>` — `session/mod.rs:4496`
+  * `Session::delete_node(NodeId) -> bool` — `session/mod.rs:5073` (returns false if node absent)
+  * `Session::get_node(NodeId) -> Option<Node>` — `session/mod.rs:5138`
+  * `PreparedCommit::set_metadata(impl Into<String>, impl Into<String>)` — `transaction/prepared.rs:107`
+  * `PreparedCommit::commit(self) -> Result<EpochId>` — `transaction/prepared.rs:124`
+  * `PreparedCommit::abort(self) -> Result<()>` — `transaction/prepared.rs:135`
+  * `PreparedCommit::Drop` auto-rollbacks active tx if not finalized — `transaction/prepared.rs:141-148`
+  * `Node::labels: SmallVec<[ArcStr; 2]>`, `Node::properties: PropertyMap`, `Node::has_label(&str)`, `Node::get_property(&str)` — `grafeo-core-0.5.42/src/graph/lpg/node.rs:30-93`
+- Verified Loro API against `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/loro-1.13.6/src/lib.rs`:
+  * `LoroDoc::new() -> Self` — `lib.rs:137`
+  * `LoroDoc::get_map<I: IntoContainerId>(&self, I) -> LoroMap` — `lib.rs:489`
+  * `LoroMap::insert(&self, &str, impl Into<LoroValue>) -> LoroResult<()>` — `lib.rs:2135` (no-op if key exists with same value)
+  * `LoroDoc::set_next_commit_origin(&self, &str)` — `lib.rs:626` (NOT persisted)
+  * `LoroDoc::commit(&self)` — `lib.rs:593` (fires subscriber synchronously)
+- Verified lorosurgeon API against `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lorosurgeon-0.2.1/src/`:
+  * `RootReconciler::new(LoroMap) -> Self` — `reconcile.rs:298`
+  * `<T as Reconcile>::reconcile<R: Reconciler>(&self, R) -> Result<(), ReconcileError>` — `reconcile.rs:92`
+  * `MapReconciler::entry<R: Reconcile>(&mut self, &str, &R) -> Result<(), ReconcileError>` — `reconcile/map.rs:14`
+  * `<T as Hydrate>::hydrate_map(&LoroMap) -> Result<T, HydrateError>` — `hydrate.rs:64`
+- Read src/bridge/sync_engine.rs::init_loro_subscriber (lines 193-219): confirmed inbound subscriber filter at `:201` skips ONLY `ORIGIN_GRAFEO_BRIDGE`. This is the DEVIL GAP for L3 — `commit()` will tag the Loro write with `ORIGIN_LORO_BRIDGE`, which is NOT filtered, causing the inbound worker to re-create the same vertex in Grafeo (duplicate node). L3 MUST extend the filter to also skip `ORIGIN_LORO_BRIDGE`.
+- Read src/bridge/sync_engine.rs::apply_change_event_to_loro (lines 561-689): confirmed outbound CDC poller skips CDC events for NodeIds not in `node_key_map` (line 569-577 — logs warn + returns Ok). This means if `commit()` writes Grafeo with CDC enabled AND does NOT populate `BridgeMaps::node_key_map` BEFORE the CDC event is polled, the outbound worker would skip the echo. But the cleaner approach is `session_with_cdc(false)` — no CDC event emitted at all.
+- Read existing src/schema/tree.rs (222 lines, post-P2T2-L3): confirmed `sync_tree_move_to_grafeo` uses `session_with_cdc(false)` + `begin_transaction_with_isolation(Serializable)` + `prepare_commit` + `set_metadata` + `commit` pattern. P2T3 `commit()` can follow the same pattern.
+- Wrote src/app.rs (replaced 143-line stub with 308-line scaffold):
+  * `GrafeoLoroApp` struct: single field `pub(crate) sync_engine: Arc<SyncEngine>` (DRY: SyncEngine is SSOT for doc+db+maps; no redundant Arc fields).
+  * `GrafeoLoroApp::create_vertex(&self) -> VertexBuilder`: implemented as wiring (`Arc::clone` + struct literal).
+  * `VertexBuilder` struct: 3 fields (`sync_engine: Arc<SyncEngine>`, `labels: Vec<String>`, `properties: HashMap<String, GraphValue>`).
+  * `VertexBuilder::with_label(mut self, &str) -> Self`: implemented as wiring (push to labels vec, return self).
+  * `VertexBuilder::with_property(mut self, &str, impl Into<GraphValue>) -> Self`: implemented as wiring (insert into properties map, return self).
+  * `VertexBuilder::commit(self) -> Result<NodeId>`: skeleton returning `Err(GrafeoLoroError::Bridge("VertexBuilder::commit not yet implemented".into()))` with 16 detailed `// TODO(P2T3-L3)` comments covering the full atomicity contract (steps 1-16).
+  * Struct-level doc-comment on `VertexBuilder` declares: atomicity contract (Option a — Loro-first with compensation), echo prevention plan (origin tag + CDC-disabled session + DEVIL GAP note about inbound filter), NodeId generation strategy (grafeo assigns via `create_node_with_props`), properties shape mismatch policy (strict reject for Vector/Map/List recommended).
+  * All other `GrafeoLoroApp` methods (`builder`, `hydrate`, `query`, `update_text`, `generate_embedding`, `checkpoint`, `broadcast_presence`, `shutdown`) and `GrafeoLoroAppBuilder` methods (`storage`, `ssot_mode`, `compression`, `sync_compression`, `batch_interval_ms`, `batch_max_size`, `build`) remain `unimplemented!()` with phase-scope doc-comments (Phase 3-5 scope per implementation-plan.md).
+- Wrote tests/unit/vertex_builder.rs (NEW, 5 ignored scaffolds):
+  * `vertex_builder_basic_roundtrip` — 1 label + 1 property, commit, read back from BOTH stores, assert equality.
+  * `vertex_builder_multiple_labels` — 3 labels, commit, assert all 3 in both stores.
+  * `vertex_builder_multiple_properties` — 3 properties (Bool, Integer, String), commit, assert all 3 in both stores.
+  * `vertex_builder_empty_vertex` — 0 labels + 0 properties, commit, assert succeeds.
+  * `vertex_builder_atomicity_rollback_on_grafeo_failure` — force grafeo failure (via `Config::max_property_size` constraint — option 2 in the test doc-comment), assert Loro state rolled back + BridgeMaps empty.
+  * Module-level doc-comment declares the test fixture strategy (`build_app()` helper that L3 must add — either via a `pub fn new_for_testing(sync_engine)` constructor on `GrafeoLoroApp` OR via `GrafeoLoroAppBuilder::build` Phase 4 scope — option (a) recommended), the roundtrip read-back strategy (`VertexEntity::hydrate_map` for Loro, `session.get_node` for Grafeo), and the `loro_key` recovery strategy (via `BridgeMaps::node_key_map` since `commit()` returns the grafeo NodeId, not the loro_key).
+- Updated tests/unit/main.rs: added `mod vertex_builder;` to the aggregator.
+- Verified compile: `cargo check --all-targets` → EXIT 0; 5 pre-existing warnings (`src/app.rs:36` GrafeoLoroAppBuilder fields, `src/hydration/vector.rs:9+27` VectorOffloadManager + generate_local_embedding, `src/presence/socket.rs:6` room_id, `src/telemetry/health.rs:9` HealthProbe fields); 0 new warnings; 0 errors.
+- Verified tests: `cargo test --all` → **25 PASS + 5 IGNORED + 0 FAIL** (6 lib + 5 integration + 14 unit + 0 doctests; the 5 ignored are the new P2T3-L1 scaffolds). Matches Phase 2 Task 2 baseline (25 PASS) + 5 new ignored scaffolds.
+
+Stage Summary:
+- API verification (with file:line citations):
+  * Grafeo: `GrafeoDB::new_in_memory` (database/mod.rs:267), `session` (database/mod.rs:1663), `session_with_cdc` (database/mod.rs:1728), `with_config` (database/mod.rs:346), `Config::in_memory` (config.rs:425), `Config::max_property_size` (config.rs:259), `Session::begin_transaction` (session/mod.rs:3883), `Session::begin_transaction_with_isolation` (session/mod.rs:3895), `Session::create_node` (session/mod.rs:4860 infallible), `Session::create_node_with_props` (session/mod.rs:4885 — `&self, &[&str], impl IntoIterator<Item = (&'a str, Value)> -> Result<NodeId>`), `Session::check_property_size` (session/mod.rs:4631 private, called from create_node_with_props at :4892), `Session::prepare_commit` (session/mod.rs:4496), `Session::delete_node` (session/mod.rs:5073 returns bool), `Session::get_node` (session/mod.rs:5138), `PreparedCommit::set_metadata` (transaction/prepared.rs:107), `PreparedCommit::commit` (transaction/prepared.rs:124), `PreparedCommit::abort` (transaction/prepared.rs:135), `PreparedCommit::Drop` auto-rollback (transaction/prepared.rs:141-148), `Node::labels/properties/has_label/get_property` (grafeo-core-0.5.42/src/graph/lpg/node.rs:30-93).
+  * Loro: `LoroDoc::new` (lib.rs:137), `LoroDoc::get_map` (lib.rs:489), `LoroMap::insert` (lib.rs:2135), `LoroDoc::set_next_commit_origin` (lib.rs:626), `LoroDoc::commit` (lib.rs:593).
+  * lorosurgeon: `RootReconciler::new` (reconcile.rs:298), `Reconcile::reconcile` (reconcile.rs:92), `MapReconciler::entry` (reconcile/map.rs:14), `Hydrate::hydrate_map` (hydrate.rs:64).
+  * Internal: `SyncEngine::new` (sync_engine.rs:139), `SyncEngine::maps` (sync_engine.rs:179), `BridgeMaps::insert_node` (grafeo_tx.rs:45), `apply_loro_op` (grafeo_tx.rs:86), `ORIGIN_LORO_BRIDGE`/`ORIGIN_GRAFEO_BRIDGE`/`ROOT_VERTICES`/`ROOT_EDGES` (constants.rs:2-7), inbound subscriber filter at `ORIGIN_GRAFEO_BRIDGE` only (sync_engine.rs:201 — DEVIL GAP).
+- Atomicity contract: **Option (a) — Loro-first with compensation**. Rationale: (1) grafeo's `create_node_with_props` is the SSOT for NodeId generation (caller cannot pass one in); (2) Loro-first lets the synchronous subscriber fire+filter under a single `RwLock` write guard (per sync_engine module doc); (3) Option (b) Grafeo-first would require populating `BridgeMaps` before the Loro write so the outbound CDC poller can reverse-translate, widening the Grafeo↔Loro echo window. On Grafeo failure: COMPENSATE by re-acquiring the Loro write lock, deleting `v_map[loro_key]`, committing with `ORIGIN_LORO_BRIDGE`. On Loro failure: return Err immediately, Grafeo untouched. Final state on Grafeo failure: both stores clean.
+- NodeId strategy: **grafeo-assigned via `Session::create_node_with_props`**. The caller cannot pass a `NodeId` in (verified at session/mod.rs:4885 — signature returns `Result<NodeId>`, no `NodeId` parameter). The Loro-side `loro_key` (a stable string under the `"V"` root map) is generated freshly per `commit()` call — strategy deferred to L3 (suggested: `format!("V/{}", atomic_counter.fetch_add(1))` since `uuid` crate is NOT in Cargo.toml; a counter is dependency-free and deterministic for tests). The `loro_key ↔ grafeo::NodeId` binding is recorded in `BridgeMaps::insert_node` so future CDC events translate correctly.
+- Scope boundary: 
+  * IN SCOPE (P2T3-L1 implemented): `GrafeoLoroApp` field set (single `sync_engine` field); `GrafeoLoroApp::create_vertex` (wiring); `VertexBuilder` field set; `VertexBuilder::with_label` + `with_property` (wiring); `VertexBuilder::commit` skeleton with detailed TODO comments.
+  * OUT OF SCOPE (remains `unimplemented!()` with phase-scope doc-comments): `GrafeoLoroApp::builder`, `hydrate`, `query`, `update_text`, `generate_embedding`, `checkpoint`, `broadcast_presence`, `shutdown` (Phase 3-5 per implementation-plan.md §Phase 3-5); `GrafeoLoroAppBuilder::storage`, `ssot_mode`, `compression`, `sync_compression`, `batch_interval_ms`, `batch_max_size`, `build` (Phase 4 per implementation-plan.md §Phase 4 Task 4).
+  * DEVIL GAP for L3: `bridge::sync_engine::init_loro_subscriber` filter at `:201` skips ONLY `ORIGIN_GRAFEO_BRIDGE`. L3 MUST extend the filter to also skip `ORIGIN_LORO_BRIDGE`, otherwise the inbound worker will re-create the same vertex in Grafeo (duplicate node + stale `BridgeMaps` entry).
+  * Test fixture gap for L3: tests need a way to construct `GrafeoLoroApp` from a fresh `SyncEngine`. Recommended: add `pub fn new_for_testing(sync_engine: Arc<SyncEngine>) -> Self` on `GrafeoLoroApp` (matches P2T2's `build_chain_fixture` pattern of test-only construction). Alternative: implement `GrafeoLoroAppBuilder::build` (Phase 4 scope — too heavy for unit tests).
+- Files touched:
+  * `src/app.rs` — replaced 143-line stub with 308-line scaffold (GrafeoLoroApp + VertexBuilder field sets, wiring for create_vertex/with_label/with_property, commit skeleton with 16 TODO comments, struct-level atomicity contract doc).
+  * `tests/unit/vertex_builder.rs` — NEW, 5 ignored test scaffolds (basic roundtrip, multiple labels, multiple properties, empty vertex, atomicity rollback).
+  * `tests/unit/main.rs` — added `mod vertex_builder;` to aggregator.
+- Test scaffolds (all `#[test] #[ignore = "P2T3-L1 scaffold: L3 implements the body"]` with `todo!()` bodies):
+  * `fn vertex_builder_basic_roundtrip()` — 1 label + 1 property, commit, read BOTH stores, assert equality.
+  * `fn vertex_builder_multiple_labels()` — 3 labels, commit, assert all 3 in both stores.
+  * `fn vertex_builder_multiple_properties()` — 3 properties (Bool, Integer, String), commit, assert all 3 in both stores.
+  * `fn vertex_builder_empty_vertex()` — 0 labels + 0 properties, commit, assert succeeds.
+  * `fn vertex_builder_atomicity_rollback_on_grafeo_failure()` — force grafeo failure via `Config::max_property_size` constraint (option 2 in test doc-comment), assert Loro state rolled back + BridgeMaps empty.
+- Compile status: `cargo check --all-targets` → **EXIT 0**; 5 pre-existing warnings (unchanged from P2T2-L2R2 baseline); 0 new warnings; 0 errors.
+- Test status: `cargo test --all` → **25 PASS + 5 IGNORED + 0 FAIL** (6 lib + 5 integration + 14 unit + 0 doctests). The 5 ignored are the new P2T3-L1 scaffolds.
+- Open questions for Devil's Advocate:
+  1. **DEVIL GAP (echo prevention filter)**: The Phase 1 inbound subscriber filter at `sync_engine.rs:201` skips ONLY `ORIGIN_GRAFEO_BRIDGE`. `VertexBuilder::commit()` will tag the Loro write with `ORIGIN_LORO_BRIDGE` (semantically correct — it's a Loro-side write that the bridge has already accounted for). Without extending the filter, the inbound worker will re-create the same vertex in Grafeo (duplicate node). Options: (a) extend the filter to also skip `ORIGIN_LORO_BRIDGE` (minimal, semantic fit); (b) introduce a new `ORIGIN_APP_VERTEX_BUILDER` origin tag and filter that (cleaner separation but adds a constant + filter branch); (c) route `commit()` through `sync_engine.inbound_sender().blocking_send(InboundMsg::Op(...))` instead of writing Loro directly (would still need the filter to avoid the subscriber ALSO picking up the diff). Recommendation: (a) — reuses existing constant, minimal change.
+  2. **Properties shape mismatch policy**: `with_property` accepts `GraphValue` (full superset); `VertexEntity::properties` uses `LoroProperty` (limited subset — no Vector/Map/List). Options: (a) strict reject at `commit()` with `GrafeoLoroError::UnsupportedLoroType` (recommended for Phase 2 — fail loud); (b) write Vector/Map/List to Grafeo only and skip the Loro field (lossy, but matches architecture §17 vector-offload pattern); (c) extend `LoroProperty` to cover Vector/Map/List (schema change, out of Task 3 scope). Recommendation: (a) for Phase 2 (strict), revisit (b) when vectors are wired in Phase 3 §17.
+  3. **NodeId generation strategy**: grafeo's `create_node_with_props` returns a `NodeId` (caller cannot pass one in). `commit()` returns that grafeo-assigned id. The Loro-side `loro_key` is generated freshly per call — strategy deferred to L3. Options: (a) `format!("V/{}", AtomicU64::fetch_add)` — dependency-free, deterministic for tests, but requires an `AtomicU64` field on `SyncEngine` or `GrafeoLoroApp`; (b) `format!("V/{}", uuid::Uuid::new_v4())` — requires adding `uuid` crate to Cargo.toml; (c) hash of `labels + properties` — deterministic but collision-prone for identical vertices. Recommendation: (a) — simplest, no new deps, deterministic for tests.
+  4. **Test fixture construction**: tests need a way to construct `GrafeoLoroApp` from a fresh `SyncEngine`. Options: (a) `pub fn new_for_testing(sync_engine: Arc<SyncEngine>) -> Self` on `GrafeoLoroApp` (recommended — matches P2T2 pattern); (b) implement `GrafeoLoroAppBuilder::build` (Phase 4 scope, too heavy); (c) make `sync_engine` field `pub` (breaks encapsulation). Recommendation: (a).
+  5. **loro_key recovery in tests**: `commit()` returns the grafeo `NodeId`, not the `loro_key`. Roundtrip tests need the `loro_key` to read back from Loro. Options: (a) recover via `BridgeMaps::node_key_map.read().get(&node_id).cloned()` (recommended — uses existing bridge state); (b) change `commit()` to return `(NodeId, String)` (the loro_key) — changes the public API; (c) expose a `VertexBuilder::last_loro_key()` accessor — adds state. Recommendation: (a) — no API change, leverages existing bridge state.
+  6. **Grafeo failure mock strategy for atomicity test**: options documented in `vertex_builder_atomicity_rollback_on_grafeo_failure` test doc-comment. Option (2) preferred: build `GrafeoDB::with_config(Config { max_property_size: Some(1), ..Config::in_memory() })` to force `check_property_size` rejection at `session/mod.rs:4892`. L3 must verify `Config` struct is public + `Config::in_memory()` is accessible from the test crate (it is — `pub fn in_memory() -> Self` at `config.rs:425`, and `Config` is `pub struct` at `config.rs:186`).
+  7. **Atomicity contract edge case — Loro compensation failure**: if the Loro write succeeds but the Grafeo write fails AND the Loro compensation (delete `v_map[loro_key]` + commit) ALSO fails, the system is in an inconsistent state (Loro has the vertex, Grafeo does not). Options: (a) return the original Grafeo error and log the Loro compensation failure at `error!` level (best-effort, caller responsible for retry); (b) wrap both errors in a new `GrafeoLoroError::AtomicityFailure { loro_error, grafeo_error }` variant (more structured, but adds a new error variant); (c) panic (unacceptable for production). Recommendation: (a) for Phase 2 (simplest), revisit (b) if production needs structured recovery.
+  8. **Concurrency — multiple `commit()` calls from the same app**: `commit()` acquires the Loro write lock for the Loro write, releases it, then opens a Grafeo session. Two concurrent `commit()` calls on the same `GrafeoLoroApp` would serialize on the Loro write lock, but the Grafeo sessions would run concurrently (grafeo is internally thread-safe). The `BridgeMaps::insert_node` calls are individually atomic (each writes to a `RwLock<HashMap>`), but the `loro_key` generation strategy must be thread-safe (AtomicU64 counter is; UUID is; sequential non-atomic counter is NOT). Recommendation: ensure the `loro_key` generator is `Send + Sync` (AtomicU64 or UUID).
+- Commit hash: <to be filled in after commit>
