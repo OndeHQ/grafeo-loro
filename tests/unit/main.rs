@@ -16,6 +16,7 @@ mod compression;
 mod compression_payload;
 mod parallel_hydrate;
 mod schema_roundtrip;
+mod telemetry;
 mod tree_move;
 mod vector_embedding;
 mod vector_offload;

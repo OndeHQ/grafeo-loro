@@ -60,10 +60,12 @@ use opentelemetry::trace::Tracer;
 /// Called at the top of `GrafeoLoroApp::hydrate`. The span wraps the entire
 /// cold-start sequence: storage load → decompress → `doc.import_with` →
 /// `parallel_hydrate_grafeo` → `loro_key_counter` re-seed.
-pub fn create_cold_start_span<T: Tracer>(tracer: &T) -> BoxedSpan {
-    let _ = tracer;
-    // TODO(P5-L3): tracer.span_builder("cold_start_hydration").start(tracer)
-    unimplemented!("P5-L3: tracer.span_builder(\"cold_start_hydration\").start(tracer)")
+pub fn create_cold_start_span<T: Tracer<Span = BoxedSpan>>(tracer: &T) -> BoxedSpan {
+    // P5-L3: architecture §23.2 tree row 1 — `cold_start_hydration` parent
+    // span. `tracer.span_builder(name).start(tracer)` is the verified API
+    // (`opentelemetry-0.23.0/src/trace/tracer.rs:162` + `:374`). The
+    // returned span is held by the caller; dropping it ends the span.
+    tracer.span_builder("cold_start_hydration").start(tracer)
 }
 
 /// Open an inbound-sync loop span (parent of receive / batch / commit spans
@@ -79,10 +81,11 @@ pub fn create_cold_start_span<T: Tracer>(tracer: &T) -> BoxedSpan {
 /// Called at the top of `SyncEngine::spawn_inbound_worker`'s `tokio::spawn`
 /// closure. The span wraps the entire inbound loop lifetime. Child spans
 /// (`receive_loro_event`, `batch_flush`) are created inside the loop by L2.
-pub fn create_inbound_sync_span<T: Tracer>(tracer: &T) -> BoxedSpan {
-    let _ = tracer;
-    // TODO(P5-L3): tracer.span_builder("inbound_sync_loop").start(tracer)
-    unimplemented!("P5-L3: tracer.span_builder(\"inbound_sync_loop\").start(tracer)")
+pub fn create_inbound_sync_span<T: Tracer<Span = BoxedSpan>>(tracer: &T) -> BoxedSpan {
+    // P5-L3: architecture §23.2 tree row 2 — `inbound_sync_loop` parent
+    // span. One per worker lifetime (NOT one per op) — caller holds the
+    // returned span for the duration of the worker loop.
+    tracer.span_builder("inbound_sync_loop").start(tracer)
 }
 
 /// Open an outbound-sync loop span (parent of `receive_cdc_event` /
@@ -101,10 +104,12 @@ pub fn create_inbound_sync_span<T: Tracer>(tracer: &T) -> BoxedSpan {
 /// (`receive_cdc_event`, `loro_commit`) are created inside the loop by L3.
 /// Added in P5-L2 per Devil M4 — required for symmetry + architecture
 /// alignment with §23.2 lines 1050-1052.
-pub fn create_outbound_sync_span<T: Tracer>(tracer: &T) -> BoxedSpan {
-    let _ = tracer;
-    // TODO(P5-L3): tracer.span_builder("outbound_sync_loop").start(tracer)
-    unimplemented!("P5-L3: tracer.span_builder(\"outbound_sync_loop\").start(tracer)")
+pub fn create_outbound_sync_span<T: Tracer<Span = BoxedSpan>>(tracer: &T) -> BoxedSpan {
+    // P5-L3: architecture §23.2 tree row 3 (lines 1050-1052) —
+    // `outbound_sync_loop` parent span. Symmetric with
+    // [`create_inbound_sync_span`]; one per worker lifetime (NOT one per
+    // CDC event). Added P5-L2 per Devil M4.
+    tracer.span_builder("outbound_sync_loop").start(tracer)
 }
 
 /// Open a hybrid-query span (parent of HNSW + traversal spans per
@@ -119,8 +124,9 @@ pub fn create_outbound_sync_span<T: Tracer>(tracer: &T) -> BoxedSpan {
 ///
 /// Called at the top of `GrafeoLoroApp::query`. The span wraps the GQL
 /// parse + HNSW search + graph traversal sequence.
-pub fn create_hybrid_query_span<T: Tracer>(tracer: &T) -> BoxedSpan {
-    let _ = tracer;
-    // TODO(P5-L3): tracer.span_builder("hybrid_query").start(tracer)
-    unimplemented!("P5-L3: tracer.span_builder(\"hybrid_query\").start(tracer)")
+pub fn create_hybrid_query_span<T: Tracer<Span = BoxedSpan>>(tracer: &T) -> BoxedSpan {
+    // P5-L3: architecture §23.2 tree row 5 — `hybrid_query` parent span.
+    // One per `GrafeoLoroApp::query` call; caller holds the returned span
+    // for the GQL parse + HNSW search + graph traversal sequence.
+    tracer.span_builder("hybrid_query").start(tracer)
 }

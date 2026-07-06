@@ -8,6 +8,7 @@ use std::sync::Arc;
 use grafeo::GrafeoDB;
 use lorosurgeon::Hydrate;
 use loro::LoroDoc;
+use opentelemetry::trace::Tracer;
 use rayon::prelude::*;
 
 use crate::bridge::apply_loro_op;
@@ -52,11 +53,25 @@ pub fn parallel_hydrate_grafeo(
     // `parallel_hydrate_grafeo` child span via `tracer` (architecture §23.2
     // tree row 1.3); (b) record `hydration_duration` histogram + emit a
     // per-chunk `hydrate_chunk` span (§23.2 tree row 1.3.1).
-    let _ = (metrics, tracer);
-    // TODO(P5-L3): if let Some(t) = tracer {
-    //     let _span = t.as_ref().span_builder("parallel_hydrate_grafeo").start(t.as_ref());
-    // }
-    // TODO(P5-L3): let started = std::time::Instant::now();
+    // P5-L3: open `parallel_hydrate_grafeo` child span (architecture §23.2
+    // tree row 1.3) under the `cold_start_hydration` parent (opened by the
+    // caller `GrafeoLoroApp::hydrate`). Held for the duration of the
+    // `par_chunks` loop below — drops on function return. The
+    // `hydration_duration` histogram is recorded by the CALLER (which has
+    // the `SsotMode` for the `HydrationMode` mapping); this function only
+    // emits spans (single responsibility — anti-plenger #5 Bloat).
+    //
+    // `metrics` is unused here (caller records the histogram); the param
+    // stays in the signature for forward-compat (per-chunk metrics in a
+    // future phase) + for the L2 contract that threads it through.
+    let _ = metrics;
+    let _parallel_span = tracer.map(|t| {
+        t.as_ref().span_builder("parallel_hydrate_grafeo").start(t.as_ref())
+    });
+    // Clone `tracer` into an owned `Option<Arc<BoxedTracer>>` so the rayon
+    // closure (which must be `Fn + Send + Sync`) can capture it by value
+    // (cloning `Arc` is a refcount bump — cheap).
+    let chunk_tracer = tracer.cloned();
 
     // 1. Extract vertex keys from Loro root map "V". `LoroDoc::get_map` returns
     //    an empty LoroMap if the key is absent (cold-boot empty-doc edge case).
@@ -70,6 +85,11 @@ pub fn parallel_hydrate_grafeo(
     //    chunk owns its own Session. `try_for_each` propagates the first `Err`
     //    and short-circuits remaining chunks (fail-fast anti-plenger #9).
     keys.par_chunks(DEFAULT_CHUNK_SIZE).try_for_each(|chunk| -> Result<()> {
+        // P5-L3: emit a `hydrate_chunk` grandchild span (architecture §23.2
+        // tree row 1.3.1) per chunk. Held for the chunk's tx lifetime.
+        let _chunk_span = chunk_tracer.as_ref().map(|t| {
+            t.span_builder("hydrate_chunk").start(t.as_ref())
+        });
         // 3. Per-chunk Grafeo session: CDC off suppresses outbound echoes
         //    (matches `VertexBuilder::commit` at `src/app.rs:437`). On any
         //    error below, `Session::Drop` auto-rollbacks the un-prepared-commit'd

@@ -16,7 +16,7 @@ use crate::constants::{
 use crate::error::{GrafeoLoroError, Result};
 use crate::schema::VertexEntity;
 use crate::storage::StorageBackend;
-use crate::telemetry::{HealthProbe, MetricsRegistry, SharedTracer};
+use crate::telemetry::{HealthProbe, HydrationMode, MetricsRegistry, SharedTracer};
 use crate::types::events::LoroOp;
 use crate::types::{GraphValue, LoroProperty, NodeId, PresencePayload};
 use crate::hydration::parallel_hydrate_grafeo;
@@ -720,6 +720,23 @@ impl GrafeoLoroApp {
         );
         let _enter = span.enter();
 
+        // P5-L3: open `cold_start_hydration` OTel parent span (architecture
+        // §23.2 tree row 1) — wraps the entire cold-start sequence (storage
+        // load → decompress → import → parallel_hydrate → re-seed counter).
+        // `parallel_hydrate_grafeo` opens the `parallel_hydrate_grafeo` child
+        // span (row 1.3); `cold_start_hydration` is held for the whole
+        // function body. Drops on function return.
+        let _cold_start_span = self.tracer.as_ref().map(|t| {
+            crate::telemetry::traces::create_cold_start_span(t.as_ref())
+        });
+
+        // P5-L3: capture start time for the `hydration_duration` histogram
+        // (architecture §23.1 row 5). Recorded AFTER `parallel_hydrate_grafeo`
+        // returns — measures the parallel Grafeo hydration wall-clock. The
+        // cold-start sequence as a whole is timed by the `_cold_start_span`
+        // span lifetime (separate observability axis).
+        let hydrate_started = std::time::Instant::now();
+
         let storage = self.storage.as_ref().ok_or_else(|| {
             GrafeoLoroError::Config("storage backend not set".into())
         })?;
@@ -871,11 +888,21 @@ impl GrafeoLoroApp {
                         self.tracer.as_ref(),
                     )?;
                 }
-                // TODO(P5-L3): record hydration_duration via
-                // `self.metrics.record_hydration(elapsed_ms, mode)` where
-                // `mode` is `HydrationMode::Loro` for this arm (matches
-                // `self.ssot_mode == SsotMode::Loro`). The `Grafeo` arm below
-                // will use `HydrationMode::Grafeo` once P5 implements it.
+                // P5-L3: record `hydration_duration` histogram (architecture
+                // §23.1 row 5) with the `mode` label mapped from `SsotMode`.
+                // `SsotMode::Loro → HydrationMode::Loro` (this arm);
+                // `SsotMode::Grafeo → HydrationMode::Grafeo` (the Grafeo arm
+                // below is unimplemented — P5 wal-feature scope). The mapping
+                // is inline (NOT a `From<SsotMode>` impl) — fewer LOC + no
+                // new trait impl to maintain (anti-plenger #5 Bloat).
+                if let Some(m) = &self.metrics {
+                    let mode = match self.ssot_mode {
+                        SsotMode::Loro => HydrationMode::Loro,
+                        SsotMode::Grafeo => HydrationMode::Grafeo,
+                    };
+                    let elapsed_ms = hydrate_started.elapsed().as_secs_f64() * 1000.0;
+                    m.record_hydration(elapsed_ms, mode);
+                }
 
                 // Step 6: re-seed loro_key_counter to max(V/* keys) + 1.
                 //
@@ -970,8 +997,57 @@ impl GrafeoLoroApp {
     /// 5. Close `GrafeoDB` (currently no-op — `GrafeoDB::close` is wal-gated
     ///    per P4-DEVIL M3; deferred to Phase 5 wal feature work).
     pub async fn shutdown(self) -> Result<()> {
-        let _ = self;
-        unimplemented!("P5-L2/L3: drain worker_handles + flush telemetry + close stores per architecture §4 Step D")
+        // P5-L3: 5-step graceful shutdown per architecture §4 Step D +
+        // Devil Q15 (no auto-checkpoint) + Devil M3 (flush telemetry).
+        //
+        // Step 1: signal all worker loops to drain + exit via the broadcast.
+        // `SyncEngine::shutdown` is non-async (just sends on the broadcast
+        // channel) — safe to call from this async context without `.await`.
+        self.sync_engine.shutdown();
+
+        // Step 2: drain `worker_handles` — await each `JoinHandle<()>` so
+        // the workers have fully exited (drained their buffers + dropped
+        // their spans) before we flush telemetry. `None` if the app was
+        // constructed via `from_sync_engine*` (test path) — skip silently.
+        // Errors are logged + discarded: a worker that panicked during
+        // shutdown should NOT abort the rest of the shutdown sequence
+        // (anti-plenger #7 defensive programming — best-effort drain).
+        if let Some(handles) = self.worker_handles {
+            for (idx, handle) in handles.into_iter().enumerate() {
+                if let Err(err) = handle.await {
+                    tracing::warn!(
+                        worker_idx = idx,
+                        error = %err,
+                        "shutdown: worker join failed (continuing)"
+                    );
+                }
+            }
+        }
+
+        // Step 3: NO auto-checkpoint (Devil Q15 ruling — checkpoint is the
+        // caller's responsibility; separation of concerns). The shutdown
+        // sequence is purely about graceful worker drain + telemetry flush,
+        // NOT durable state persistence. Callers that need a final checkpoint
+        // must call `app.checkpoint(...)` BEFORE `app.shutdown().await`.
+
+        // Step 4: flush telemetry exporters. `shutdown_tracer_provider()`
+        // flushes any buffered spans to the configured exporter (no-op if
+        // no SDK is installed — tests). Verified API:
+        // `opentelemetry-0.23.0/src/global/trace.rs:421`. The meter provider
+        // in OTel 0.23 does NOT have a public `shutdown_meter_provider` —
+        // meters are flushed implicitly on drop of the SDK-owned provider.
+        // We call `shutdown_tracer_provider` only (correct + sufficient).
+        // Anti-plenger #6 (Performance & Security): graceful flush prevents
+        // span loss on process exit.
+        opentelemetry::global::shutdown_tracer_provider();
+
+        // Step 5: GrafeoDB closes on drop — no explicit close needed (the
+        // `Arc<GrafeoDB>` is released when `self` drops at function return;
+        // if other Arc holders exist they keep the DB alive — correct
+        // shared-ownership semantics). Devil Q15 confirmed: no auto-close
+        // hook needed.
+
+        Ok(())
     }
 }
 
@@ -1275,34 +1351,32 @@ impl GrafeoLoroAppBuilder {
         // 4. Auto-construct telemetry handles if their builder slots are
         //    `None` (Devil m2 — Q14/Q16/Q17 rulings). `opentelemetry::global`
         //    is verified to expose `meter(name)` + `tracer(name)` (Devil
-        //    step 3). The bodies of `MetricsRegistry::init` + `HealthProbe::new`
-        //    remain `// TODO(P5-L3):` — until L3 fills them, the auto-construction
-        //    branches return `None` so tests that do not configure telemetry
-        //    (e.g. `build_accepts_valid_loro_config`) remain unaffected.
-        //    Once L3 implements the bodies, the `// TODO(P5-L3):` lines below
-        //    become `Some(Arc::new(...))` and production auto-construction
-        //    fires whenever the builder slots are unset.
+        //    step 3). P5-L3 fills the bodies: production auto-construction
+        //    fires whenever the builder slots are unset; tests that do not
+        //    configure telemetry (e.g. `build_accepts_valid_loro_config`)
+        //    get real no-op instruments from `global::meter` / `global::tracer`
+        //    (without an SDK installed, these are no-op — no behavior change
+        //    vs the prior `None` returns).
         let metrics = self.metrics.clone().or_else(|| {
             // Verified API (Devil step 3): opentelemetry-0.23.0/src/global/metrics.rs:115
-            let _meter = opentelemetry::global::meter("grafeo-loro");
-            // TODO(P5-L3): Some(Arc::new(MetricsRegistry::init(_meter)))
-            let _ = _meter;
-            None
+            Some(Arc::new(MetricsRegistry::init(
+                opentelemetry::global::meter("grafeo-loro"),
+            )))
         });
         let tracer = self.tracer.clone().or_else(|| {
             // Verified API (Devil step 3): opentelemetry-0.23.0/src/global/trace.rs:394
-            // TODO(P5-L3): Some(Arc::new(opentelemetry::global::tracer("grafeo-loro")))
-            None
+            Some(Arc::new(opentelemetry::global::tracer("grafeo-loro")))
         });
         let health = self.health.clone().or_else(|| {
-            // HealthProbe needs the just-constructed loro_doc + grafeo_db
-            // (Devil Q16 ruling — auto-construction is feasible in build()
-            // because both handles exist at this point).
-            // TODO(P5-L3): Some(Arc::new(HealthProbe::new(
-            //     loro_doc.clone(),
-            //     grafeo_db.clone(),
-            // )))
-            None
+            // HealthProbe auto-constructed from the just-created loro_doc +
+            // grafeo_db (Devil Q16 ruling — both handles exist at this point
+            // in `build()`). `HealthProbe::new` initializes `last_sync_ts`
+            // to current wall-clock ms (P5-L3) so a freshly-constructed probe
+            // does NOT immediately fail the staleness check.
+            Some(Arc::new(HealthProbe::new(
+                loro_doc.clone(),
+                grafeo_db.clone(),
+            )))
         });
 
         // 5. Init SyncEngine (P4-DEVIL Q7 + P5-L1 Task 4 + P5-L2 Devil M3 —

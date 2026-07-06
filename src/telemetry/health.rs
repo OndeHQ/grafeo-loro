@@ -33,9 +33,26 @@
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use parking_lot::RwLock;
 use loro::LoroDoc;
 use grafeo::GrafeoDB;
+
+/// Wall-clock milliseconds since UNIX epoch.
+///
+/// Returns 0 if the system clock is set before `UNIX_EPOCH` (defensive —
+/// `duration_since` errors only on time going backwards; in practice this
+/// is unreachable on commodity OSes, but the fallback keeps `check()`
+/// non-panicking). Used to stamp `last_sync_ts` and to compute staleness
+/// in [`HealthProbe::check`].
+fn unix_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// Health probe: checks Loro lock poison, Grafeo dummy query, sync staleness.
 ///
@@ -83,9 +100,15 @@ impl HealthProbe {
     /// - Initializes `last_sync_ts` to `now_ms` (NOT 0 — a 0 init would
     ///   make `check` always fail staleness on first call).
     pub fn new(doc: Arc<RwLock<LoroDoc>>, db: Arc<GrafeoDB>) -> Self {
-        let _ = (doc, db);
-        // TODO(P5-L3): store doc + db Arc clones; init last_sync_ts = unix_timestamp_ms()
-        unimplemented!("P5-L3: store doc + db Arc clones; init last_sync_ts = unix_timestamp_ms()")
+        // P5-L3: store Arc clones; init `last_sync_ts` to current wall-clock
+        // ms so a freshly-constructed probe does NOT immediately fail the
+        // staleness check (Devil L1 contract — `0` init would fail `check`
+        // on first call since `now - 0` always exceeds `max_staleness_ms`).
+        Self {
+            doc,
+            db,
+            last_sync_ts: AtomicU64::new(unix_timestamp_ms()),
+        }
     }
 
     /// Stamp `last_sync_ts` with the current wall-clock ms.
@@ -100,8 +123,11 @@ impl HealthProbe {
     /// - `self.last_sync_ts.store(now_ms, Ordering::Relaxed)`.
     /// - `now_ms` from `SystemTime::now().duration_since(UNIX_EPOCH)`.
     pub fn update_sync_ts(&self) {
-        // TODO(P5-L3): self.last_sync_ts.store(now_ms, Ordering::Relaxed)
-        unimplemented!("P5-L3: self.last_sync_ts.store(now_ms, Ordering::Relaxed)")
+        // P5-L3: stamp current wall-clock ms. `Ordering::Relaxed` per
+        // architecture §23.3 — staleness is a soft signal, not a sync
+        // primitive; no accompanying memory payload needs stronger ordering.
+        self.last_sync_ts
+            .store(unix_timestamp_ms(), Ordering::Relaxed);
     }
 
     /// Probe all three components; returns [`HealthStatus`] with
@@ -129,15 +155,55 @@ impl HealthProbe {
     /// - Q5: Silent return on failure (no `WARN` log) per architecture §23.4 — WARN list
     ///   covers echo loops + batch flush backpressure, NOT health checks.
     pub fn check(&self, max_staleness_ms: u64) -> HealthStatus {
-        let _ = max_staleness_ms;
-        // TODO(P5-L3): three-component probe per architecture §23.3:
-        //   let loro_ok = self.doc.try_read().is_some();
-        //   let grafeo_ok = self.db.session()
-        //       .execute("MATCH (n) RETURN count(n) LIMIT 1")
-        //       .is_ok();
-        //   let now = unix_timestamp_ms();
-        //   let sync_ok = now - self.last_sync_ts.load(Ordering::Relaxed) < max_staleness_ms;
-        //   HealthStatus { overall: loro_ok && grafeo_ok && sync_ok, components: vec![...] }
-        unimplemented!("P5-L3: three-component probe per architecture §23.3 (Devil M1 — use db.session().execute)")
+        // P5-L3: three-component probe per architecture §23.3 (Devil M1 —
+        // correct Grafeo API is `db.session().execute(...)`, NOT `db.execute(...)`).
+        //
+        // 1. LoroDoc lock poison: `try_read()` returns `Option` (parking_lot
+        //    API) — `Some` if the lock is unpoisoned, `None` if poisoned.
+        // 2. Grafeo dummy query: `MATCH (n) RETURN count(n) LIMIT 1` is the
+        //    lightest possible probe that still exercises the storage layer
+        //    (parse + plan + execute + return). `is_ok()` collapses any
+        //    error (panic, IO, schema, query-parse) into a single `false`.
+        // 3. Sync staleness: `now - last_sync_ts.load(Relaxed) <=
+        //    max_staleness_ms`. Uses `saturating_sub` to handle the
+        //    time-went-backwards edge case (clock skew, NTP step) — yields 0
+        //    which is always `<= max_staleness_ms` (treats backwards clock
+        //    as "just synced" rather than "infinitely stale"; anti-plenger
+        //    #7 defensive programming).
+        let loro_ok = self.doc.try_read().is_some();
+        let grafeo_ok = self
+            .db
+            .session()
+            .execute("MATCH (n) RETURN count(n) LIMIT 1")
+            .is_ok();
+        let now = unix_timestamp_ms();
+        let last = self.last_sync_ts.load(Ordering::Relaxed);
+        let sync_ok = now.saturating_sub(last) <= max_staleness_ms;
+        HealthStatus {
+            overall: loro_ok && grafeo_ok && sync_ok,
+            components: vec![
+                ("loro_doc", loro_ok),
+                ("grafeo_db", grafeo_ok),
+                ("sync_freshness", sync_ok),
+            ],
+        }
+    }
+
+    /// Test-only accessor for the `last_sync_ts` field (P5-L3). Used by
+    /// `tests/unit/telemetry.rs` to deterministically construct stale-sync
+    /// scenarios without relying on `tokio::time::sleep` (which is slow +
+    /// flaky on CI). Hidden from docs to discourage production use.
+    #[doc(hidden)]
+    pub fn _last_sync_ts_for_test(&self) -> u64 {
+        self.last_sync_ts.load(Ordering::Relaxed)
+    }
+
+    /// Test-only setter for the `last_sync_ts` field (P5-L3). Used by
+    /// `tests/unit/telemetry.rs` to deterministically simulate stale sync
+    /// (e.g., set to `now - 10_000` then call `check(5_000)` to assert
+    /// `sync_ok=false`). Hidden from docs to discourage production use.
+    #[doc(hidden)]
+    pub fn _set_last_sync_ts_for_test(&self, ts: u64) {
+        self.last_sync_ts.store(ts, Ordering::Relaxed);
     }
 }

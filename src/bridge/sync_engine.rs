@@ -54,6 +54,8 @@ use std::sync::Arc;
 use grafeo::GrafeoDB;
 use grafeo_common::types::EpochId;
 use loro::LoroDoc;
+use opentelemetry::KeyValue;
+use opentelemetry::trace::Tracer;
 use parking_lot::RwLock;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -141,7 +143,7 @@ pub struct SyncEngine {
     /// / `Self::with_batch_config`. Worker loops record counters via this
     /// handle: `init_loro_subscriber`'s origin-filter path bumps
     /// `echo_filtered`, `spawn_outbound_worker` bumps `outbound_events`.
-    /// P5-L3 territory — bodies are `// TODO(P5-L3): record metrics`.
+    /// P5-L3 — worker loops bump counters via this handle.
     pub(crate) metrics: Option<Arc<MetricsRegistry>>,
     /// Optional shared tracer (P5-L1 Task 4 wiring contact point). `Some`
     /// in production; `None` in tests. `spawn_inbound_worker` opens an
@@ -390,12 +392,13 @@ impl SyncEngine {
             // would NOT increment `inbound_event_count`.
             if event.origin == ORIGIN_GRAFEO_BRIDGE || event.origin == ORIGIN_LORO_BRIDGE {
                 inbound_filtered_count.fetch_add(1, Ordering::Relaxed);
-                // TODO(P5-L3): if let Some(m) = metrics.as_ref() {
-                //     m.echo_filtered.add(1, &[KeyValue::new("direction", "inbound")]);
-                // }
-                // Architecture §23.1 row 3: `grafeo_loro.sync.echo_filtered_total`
-                // label `direction` (set to "inbound" here; "outbound" filter is
-                // the epoch side-channel in `spawn_outbound_worker`/`spawn_cdc_poller`).
+                // P5-L3: bump OTel `echo_filtered` counter with
+                // `direction=inbound` label (architecture §23.1 row 3).
+                // The `inbound_filtered_count` test counter coexists with
+                // this OTel counter (Devil Q12 — different boundaries).
+                if let Some(m) = metrics.as_ref() {
+                    m.echo_filtered.add(1, &[KeyValue::new("direction", "inbound")]);
+                }
                 return;
             }
             let ops = translate_diff_event(&event);
@@ -428,7 +431,7 @@ impl SyncEngine {
     /// (architecture §23.1 row 1; per-op forward boundary — Devil Q12: the
     /// subscriber-boundary `inbound_event_count` test counter coexists with
     /// the OTel `inbound_events` counter at the per-op forward boundary).
-    /// Actual span + counter calls remain `// TODO(P5-L3):` — L3 fills bodies.
+    /// Actual span + counter calls filled P5-L3.
     pub async fn spawn_inbound_worker(
         self: Arc<Self>,
         mut rx: mpsc::Receiver<InboundMsg>,
@@ -448,10 +451,14 @@ impl SyncEngine {
         });
 
         tokio::spawn(async move {
-            // TODO(P5-L3): let _parent_span = tracer.as_ref()
-            //     .map(|t| crate::telemetry::traces::create_inbound_sync_span(t.as_ref()));
-            let _ = &tracer; // suppress unused warning until L3 fills body
-            let _ = &metrics; // suppress unused warning until L3 fills body
+            // P5-L3: open `inbound_sync_loop` parent span (architecture
+            // §23.2 tree row 2). One per worker lifetime (NOT one per op) —
+            // held in `_parent_span` for the duration of the loop below.
+            // Child spans (`receive_loro_event`, `batch_flush`) are emitted
+            // by the batcher's `flush_inner` (separate concern).
+            let _parent_span = tracer.as_ref().map(|t| {
+                crate::telemetry::traces::create_inbound_sync_span(t.as_ref())
+            });
             loop {
                 tokio::select! {
                     biased;
@@ -460,9 +467,15 @@ impl SyncEngine {
                         let Some(msg) = msg else { break };
                         match msg {
                             InboundMsg::Op(op) => {
-                                // TODO(P5-L3): if let Some(m) = metrics.as_ref() {
-                                //     m.inbound_events.add(1, &[origin=..., event_type=...]);
-                                // }
+                                // P5-L3: bump `inbound_events` counter per op
+                                // forwarded to the batcher (architecture §23.1
+                                // row 1 — per-op forward boundary, distinct
+                                // from the subscriber-boundary
+                                // `inbound_event_count` test counter per Devil
+                                // Q12).
+                                if let Some(m) = metrics.as_ref() {
+                                    m.inbound_events.add(1, &[]);
+                                }
                                 if batch_tx.send(op).await.is_err() {
                                     break;
                                 }
@@ -492,7 +505,7 @@ impl SyncEngine {
     /// helper (architecture §23.2 tree row 3 + Devil M4); (c) capture of
     /// `self.health.clone()` to call `health.update_sync_ts()` after each
     /// successful Loro commit (Devil M3 / Q10 — batcher also stamps inbound
-    /// flush path). Actual span + counter + health calls remain `// TODO(P5-L3):`.
+    /// flush path). Actual span + counter + health calls filled P5-L3.
     pub async fn spawn_outbound_worker(
         self: Arc<Self>,
         mut rx: mpsc::Receiver<OutboundMsg>,
@@ -509,11 +522,12 @@ impl SyncEngine {
         let health = self.health.clone();
 
         tokio::spawn(async move {
-            // TODO(P5-L3): let _parent_span = tracer.as_ref()
-            //     .map(|t| crate::telemetry::traces::create_outbound_sync_span(t.as_ref()));
-            let _ = &tracer; // suppress unused warning until L3 fills body
-            let _ = &metrics; // suppress unused warning until L3 fills body
-            let _ = &health; // suppress unused warning until L3 fills body
+            // P5-L3: open `outbound_sync_loop` parent span (architecture
+            // §23.2 tree row 3, lines 1050-1052 — Devil M4). One per worker
+            // lifetime; held in `_parent_span` for the duration of the loop.
+            let _parent_span = tracer.as_ref().map(|t| {
+                crate::telemetry::traces::create_outbound_sync_span(t.as_ref())
+            });
             loop {
                 tokio::select! {
                     biased;
@@ -524,9 +538,13 @@ impl SyncEngine {
                         // an epoch could in principle have been pruned between
                         // poll and apply. Skip if still in the set.
                         if bridge_epochs.read().contains(&msg.epoch) {
-                            // TODO(P5-L3): if let Some(m) = metrics.as_ref() {
-                            //     m.echo_filtered.add(1, &[KeyValue::new("direction", "outbound")]);
-                            // }
+                            // P5-L3: bump `echo_filtered` with
+                            // `direction=outbound` (architecture §23.1 row 3 —
+                            // symmetric with the inbound subscriber's
+                            // `direction=inbound` filter).
+                            if let Some(m) = metrics.as_ref() {
+                                m.echo_filtered.add(1, &[KeyValue::new("direction", "outbound")]);
+                            }
                             continue;
                         }
                         let outcome = {
@@ -542,12 +560,17 @@ impl SyncEngine {
                             doc.set_next_commit_origin(ORIGIN_GRAFEO_BRIDGE);
                             doc.commit();
                         }
-                        // TODO(P5-L3): if let Some(m) = metrics.as_ref() {
-                        //     m.outbound_events.add(1, &[origin=..., event_type=...]);
-                        // }
-                        // TODO(P5-L3): if let Some(h) = health.as_ref() {
-                        //     h.update_sync_ts();
-                        // }
+                        // P5-L3: bump `outbound_events` counter per CDC event
+                        // successfully applied to Loro (architecture §23.1
+                        // row 2). Then stamp `last_sync_ts` (Devil M3 / Q10
+                        // — architecture §23.3 "last sync" = both inbound
+                        // flush AND outbound commit).
+                        if let Some(m) = metrics.as_ref() {
+                            m.outbound_events.add(1, &[]);
+                        }
+                        if let Some(h) = health.as_ref() {
+                            h.update_sync_ts();
+                        }
                     }
                 }
             }
@@ -567,7 +590,7 @@ impl SyncEngine {
     /// `direction="inbound"` filter); (b) capture of `self.tracer.clone()` to
     /// open `outbound_sync_loop` + `receive_cdc_event` child spans
     /// (architecture §23.2 tree row 3.1). Actual span + counter calls remain
-    /// `// TODO(P5-L3):`.
+    /// filled P5-L3.
     pub async fn spawn_cdc_poller(self: Arc<Self>) -> JoinHandle<()> {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let grafeo_db = self.grafeo_db.clone();
@@ -585,8 +608,6 @@ impl SyncEngine {
             // does not re-replay the entire CDC history from epoch 0.
             let mut last_epoch = grafeo_db.current_epoch();
             let poll_interval = std::time::Duration::from_millis(OUTBOUND_POLL_MS);
-            let _ = &tracer; // suppress unused warning until L3 fills body
-            let _ = &metrics; // suppress unused warning until L3 fills body
 
             loop {
                 tokio::select! {
@@ -606,10 +627,28 @@ impl SyncEngine {
                             }
                         };
                         for ev in events {
+                            // P5-L3: open a `receive_cdc_event` child span
+                            // per event (architecture §23.2 tree row 3.1).
+                            // Held only for the duration of the filter check
+                            // + channel send below — short-lived by design.
+                            // `outbound_sync_loop` parent (row 3) is opened
+                            // by `spawn_outbound_worker`; without OTel
+                            // Context propagation across tokio tasks this
+                            // becomes a root span, but the name is what
+                            // Jaeger reconstructs the hierarchy from.
+                            let _cdc_event_span = tracer.as_ref().map(|t| {
+                                t.as_ref().span_builder("receive_cdc_event").start(t.as_ref())
+                            });
                             if bridge_epochs.read().contains(&ev.epoch) {
-                                // TODO(P5-L3): if let Some(m) = metrics.as_ref() {
-                                //     m.echo_filtered.add(1, &[KeyValue::new("direction", "outbound")]);
-                                // }
+                                // P5-L3: bump `echo_filtered` with
+                                // `direction=outbound` for events filtered at
+                                // the CDC poller boundary (architecture §23.1
+                                // row 3). This is the primary outbound filter
+                                // — the outbound worker's check is a defensive
+                                // double-check that rarely fires.
+                                if let Some(m) = metrics.as_ref() {
+                                    m.echo_filtered.add(1, &[KeyValue::new("direction", "outbound")]);
+                                }
                                 continue;
                             }
                             let wrapped = OutboundMsg::new(ev.epoch, ev);

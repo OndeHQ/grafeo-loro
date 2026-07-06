@@ -25,6 +25,7 @@
 
 use std::fmt;
 
+use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 
 /// Hydration mode for `record_hydration` attribute labelling (architecture
@@ -95,9 +96,17 @@ impl MetricsRegistry {
     ///   Absolute Idempotency is about the *recordings*, not the registry
     ///   construction).
     pub fn init(meter: Meter) -> Self {
-        let _ = meter;
-        // TODO(P5-L3): wire `meter.u64_counter(...)` + `meter.f64_histogram(...)` per architecture §23.1
-        unimplemented!("P5-L3: wire `meter.u64_counter(...)` + `meter.f64_histogram(...)` per architecture §23.1")
+        // P5-L3: build all five instruments from the meter. Names match
+        // architecture §23.1 exactly. The `init()` call on each builder
+        // returns a fully-constructed instrument (no-op if `meter` came from
+        // `opentelemetry::global::meter(...)` with no SDK installed — tests).
+        Self {
+            inbound_events: meter.u64_counter("inbound_events_total").init(),
+            outbound_events: meter.u64_counter("outbound_events_total").init(),
+            echo_filtered: meter.u64_counter("echo_filtered_total").init(),
+            batch_flush_duration: meter.f64_histogram("batch_flush_duration_ms").init(),
+            hydration_duration: meter.f64_histogram("hydration_duration_ms").init(),
+        }
     }
 
     /// Record a single batch flush. Called from `MutationBatcher::flush_inner`
@@ -110,9 +119,12 @@ impl MetricsRegistry {
     ///   §23.1 row 4 labels: `batch_size`).
     /// - No-op if the registry's instruments are no-ops (test mode).
     pub fn record_batch_flush(&self, duration_ms: f64, batch_size: u64) {
-        let _ = (duration_ms, batch_size);
-        // TODO(P5-L3): self.batch_flush_duration.record(duration_ms, &[KeyValue::new("batch_size", batch_size)])
-        unimplemented!("P5-L3: call self.batch_flush_duration.record(...) with [batch_size] attribute")
+        // P5-L3: architecture §23.1 row 4 — `batch_flush_duration_ms` with
+        // label `batch_size`. `u64` → `i64` cast because OTel `Value` does
+        // not implement `From<u64>` (only `i64` / `f64` / `bool` / strings);
+        // `batch_size` realistically stays well below `i64::MAX`.
+        self.batch_flush_duration
+            .record(duration_ms, &[KeyValue::new("batch_size", batch_size as i64)]);
     }
 
     /// Record a hydration run. Called from `GrafeoLoroApp::hydrate` after
@@ -127,8 +139,11 @@ impl MetricsRegistry {
     ///   replaced by the enum to prevent typos at compile time; the enum's
     ///   `Display` impl renders the OTLP attribute value (`"loro"` / `"grafeo"`).
     pub fn record_hydration(&self, duration_ms: f64, mode: HydrationMode) {
-        let _ = (duration_ms, mode);
-        // TODO(P5-L3): self.hydration_duration.record(duration_ms, &[KeyValue::new("mode", mode.to_string())])
-        unimplemented!("P5-L3: call self.hydration_duration.record(...) with [mode=HydrationMode::to_string()] attribute")
+        // P5-L3: architecture §23.1 row 5 — `hydration_duration_ms` with
+        // label `mode` ∈ {`"loro"`, `"grafeo"`}. `mode.to_string()` is
+        // pre-computed once (not on every `record` call hot-path for the
+        // Display impl itself; the impl is a `match` + `write_str` — cheap).
+        self.hydration_duration
+            .record(duration_ms, &[KeyValue::new("mode", mode.to_string())]);
     }
 }

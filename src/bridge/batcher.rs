@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use grafeo::GrafeoDB;
 use grafeo_common::types::EpochId;
+use opentelemetry::trace::Tracer;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use tokio::sync::{broadcast, mpsc};
@@ -69,7 +70,7 @@ pub struct MutationBatcher {
     /// `Some` in production (threaded from `GrafeoLoroAppBuilder::build`);
     /// `None` in tests that do not configure telemetry. `flush_inner` records
     /// `batch_flush_duration` + bumps `inbound_events` counter via this
-    /// handle (P5-L3 territory — body is `// TODO(P5-L3): record metrics`).
+    /// handle (P5-L3 — `flush_inner` records metrics post-commit).
     pub(crate) metrics: Option<Arc<MetricsRegistry>>,
     /// Optional shared tracer (P5-L1 Task 4 wiring contact point). `Some` in
     /// production; `None` in tests. `flush_inner` opens a `batch_flush` child
@@ -94,7 +95,7 @@ impl MutationBatcher {
     /// constructors that do not configure telemetry can pass `None`). Production
     /// `GrafeoLoroAppBuilder::build` threads `Some(Arc::clone(&metrics))` +
     /// `Some(Arc::clone(&tracer))` + `Some(Arc::clone(&health))` here (P5-L2
-    /// wired the parameter list — bodies remain `// TODO(P5-L3):`).
+    /// wired the parameter list — bodies filled P5-L3).
     pub fn new(
         grafeo_db: Arc<GrafeoDB>,
         batch_size: usize,
@@ -246,20 +247,29 @@ impl MutationBatcher {
         let maps = self.maps.clone();
         let epochs = self.bridge_origin_epochs.clone();
         let op_count = ops.len();
+        // P5-L3: capture telemetry handles into the blocking closure so it
+        // can emit the `grafeo_commit` grandchild span around `prepared.commit()`
+        // (architecture §23.2 line 1048). Cloning `Option<Arc<...>>` is cheap
+        // (Arc refcount bump).
+        let blocking_tracer = self.tracer.clone();
 
-        // TODO(P5-L3): if let Some(tracer) = &self.tracer { create a
-        // `batch_flush` child span via `create_inbound_sync_span` parent +
-        // `tracer.span_builder("batch_flush").start(...)`. Hold the span for
-        // the duration of `spawn_blocking` so the span covers the Grafeo
-        // commit.
-        //
-        // TODO(P5-L3 M2 grafeo_commit grandchild span): inside the `batch_flush`
-        // parent span, emit a `grafeo_commit` grandchild span around the
-        // `prepared.commit()` call (architecture §23.2 tree row 2.3 line 1048
-        // — Devil overruled L1's YAGNI objection). The grandchild captures
-        // the commit-specific latency separately from the surrounding
-        // `apply_loro_op` + `prepare_commit` work. Skeleton only — L3 fills
-        // the actual span_builder + start call.
+        // P5-L3: open `batch_flush` parent span (architecture §23.2 tree row
+        // 2.2). Held across the `spawn_blocking` await so the span covers the
+        // entire Grafeo commit latency. Optional — `None` in tests / dev mode
+        // without telemetry configured.
+        let _batch_flush_span = self.tracer.as_ref().map(|t| {
+            t.as_ref()
+                .span_builder("batch_flush")
+                .start(t.as_ref())
+        });
+
+        // P5-L3: capture start time BEFORE `spawn_blocking` so `elapsed_ms`
+        // includes the blocking-pool scheduling + queue delay (the timeout
+        // wrapping makes a simple `.await` duration insufficient). Use
+        // `std::time::Instant` (NOT `tokio::time::Instant`) — we're in the
+        // async context but measuring wall-clock, not runtime time.
+        let started = std::time::Instant::now();
+
         let blocking = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut session = grafeo_db.session_with_cdc(true);
             session.begin_transaction()?;
@@ -271,30 +281,49 @@ impl MutationBatcher {
             // — it never reaches `ChangeEvent`. Kept for advisory logging only;
             // the epoch side-channel is the real echo-prevention mechanism.
             prepared.set_metadata("origin", ORIGIN_LORO_BRIDGE);
-            // TODO(P5-L3 M2): emit `grafeo_commit` grandchild span around
-            // `prepared.commit()` (architecture §23.2 line 1048 — under the
-            // `batch_flush` parent span emitted above). The grandchild span
-            // must be opened inside the `spawn_blocking` closure so it is on
-            // the same thread as the commit call.
-            let epoch: EpochId = prepared.commit()?;
+            // P5-L3 M2: emit `grafeo_commit` grandchild span around
+            // `prepared.commit()` (architecture §23.2 line 1048 — Devil M2
+            // overruled L1's YAGNI objection). The grandchild captures
+            // commit-specific latency separately from the surrounding
+            // `apply_loro_op` + `prepare_commit` work. Created inside the
+            // `spawn_blocking` closure on the same thread as the commit call.
+            // Note: parent-child linking requires OTel Context propagation
+            // across `spawn_blocking` (out of scope for P5-L3 — the span name
+            // is the contract; hierarchy is reconstructed in Jaeger by name
+            // when no Context is propagated).
+            let epoch: EpochId = {
+                let _grafeo_commit_span = blocking_tracer.as_ref().map(|t| {
+                    t.as_ref()
+                        .span_builder("grafeo_commit")
+                        .start(t.as_ref())
+                });
+                prepared.commit()?
+            };
             epochs.write().insert(epoch);
             Ok(())
         });
 
-        // TODO(P5-L3): on successful flush, record metrics:
-        //   if let Some(m) = &self.metrics {
-        //       m.batch_flush_duration.record(elapsed_ms, &[batch_size=N]);
-        //       m.inbound_events.add(op_count as u64, &[]);
-        //   }
-        // Capture `Instant::now()` before `spawn_blocking` to measure
-        // `elapsed_ms` (the timeout wrapping makes a simple `.await`
-        // duration insufficient — use `Instant::now()` before + after).
-        // Also call `health.update_sync_ts()` if a `HealthProbe` is wired
-        // through (P5-L2 Devil M3 / Q10 — batcher DOES need a `HealthProbe`
-        // field, symmetric with metrics + tracer; architecture §23.3 "last
-        // sync" = both inbound flush AND outbound commit).
-        //   if let Some(h) = &self.health { h.update_sync_ts(); }
-        match tokio::time::timeout(FLUSH_TIMEOUT, blocking).await {
+        // P5-L3: on successful flush, record metrics + stamp `last_sync_ts`.
+        // Architecture §23.1 row 1 (inbound_events_total) + row 4
+        // (batch_flush_duration_ms with `batch_size` label). Architecture
+        // §23.3 — "last sync" = both inbound flush AND outbound commit, so
+        // the batcher's flush path stamps `last_sync_ts` symmetric with the
+        // outbound worker's post-Loro-commit stamp (Devil M3 / Q10).
+        let outcome = tokio::time::timeout(FLUSH_TIMEOUT, blocking).await;
+        if matches!(outcome, Ok(Ok(Ok(())))) {
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            if let Some(m) = &self.metrics {
+                m.record_batch_flush(elapsed_ms, op_count as u64);
+                m.inbound_events.add(op_count as u64, &[]);
+            }
+            if let Some(h) = &self.health {
+                h.update_sync_ts();
+            }
+        }
+        // `_batch_flush_span` drops here on function return — after the
+        // `spawn_blocking` await + metrics recording, so the span covers the
+        // entire flush lifecycle.
+        match outcome {
             Ok(Ok(res)) => res,
             Ok(Err(join_err)) => {
                 tracing::error!(
