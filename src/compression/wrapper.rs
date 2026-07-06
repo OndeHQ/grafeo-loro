@@ -8,7 +8,17 @@ use loro::{LoroDoc, ExportMode};
 use crate::config::CompressionType;
 use crate::error::{GrafeoLoroError, Result};
 
-/// Compressed payload envelope: codec tag + compressed bytes. In-memory only — Phase 4 `StorageBackend` adds the wire format (DEVIL M4).
+/// On-wire format version (P4-DEVIL m2 — `compress_to_wire`/`decompress_from_wire`).
+///
+/// Reserved for forward-compat with Phase 5+ codecs that may need extra header
+/// bytes (e.g. per-codec level metadata, checksum). Bumped only on incompatible
+/// layout changes; Phase 4 starts at `1`. `decompress_from_wire` rejects any
+/// other version with `Compression(...)`.
+const WIRE_FORMAT_VERSION: u8 = 1;
+
+/// Compressed payload envelope: codec tag + compressed bytes. The wire format
+/// (`to_wire`/`from_wire` — P4-L3, P4-DEVIL m2) wraps this struct into a
+/// `[version:u8][codec_tag:u8][raw_data..]` byte sequence for storage.
 // Debug: logging; Clone: caller reuse; PartialEq+Eq: roundtrip test assertions (DEVIL n1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompressedPayload {
@@ -67,6 +77,90 @@ impl CompressedPayload {
                     .map_err(|e| GrafeoLoroError::Compression(e.to_string()))
             }
         }
+    }
+
+    /// Serialize this payload to the on-wire format (P4-DEVIL m2 — L3 scope):
+    /// `[version:u8][codec_tag:u8][raw_data..]`.
+    ///
+    /// `codec_tag` matches `CompressionType` discriminant order
+    /// (`None=0x00`, `Lz4=0x01`, `Zstd=0x02` — see [`compression_type_to_tag`]).
+    /// Pre-allocates exactly `2 + raw_data.len()` so no reallocation occurs.
+    /// Symmetric with [`Self::from_wire`].
+    pub fn to_wire(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(2 + self.raw_data.len());
+        buf.push(WIRE_FORMAT_VERSION);
+        buf.push(compression_type_to_tag(self.compression));
+        buf.extend_from_slice(&self.raw_data);
+        buf
+    }
+
+    /// Parse the on-wire format produced by [`Self::to_wire`].
+    ///
+    /// Rejects payloads shorter than the 2-byte header, unknown versions, and
+    /// unknown codec tags with [`GrafeoLoroError::Compression`]. Symmetric with
+    /// [`Self::to_wire`].
+    pub fn from_wire(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < 2 {
+            return Err(GrafeoLoroError::Compression(format!(
+                "wire format: too few bytes (got {}; expected ≥2 for version+codec tag)",
+                bytes.len()
+            )));
+        }
+        let version = bytes[0];
+        if version != WIRE_FORMAT_VERSION {
+            return Err(GrafeoLoroError::Compression(format!(
+                "wire format: unknown version {version} (expected {WIRE_FORMAT_VERSION})"
+            )));
+        }
+        let compression = tag_to_compression_type(bytes[1])?;
+        Ok(Self {
+            compression,
+            raw_data: bytes[2..].to_vec(),
+        })
+    }
+
+    /// Convenience: compress raw bytes + serialize to wire format in one call.
+    /// Used by `checkpoint` (architecture §4 Step D — persist shallow snapshot
+    /// under the builder-configured codec).
+    pub fn compress_to_wire(raw_bytes: &[u8], strategy: CompressionType) -> Result<Vec<u8>> {
+        let payload = Self::compress(raw_bytes, strategy)?;
+        Ok(payload.to_wire())
+    }
+
+    /// Convenience: parse wire format + decompress in one call. Used by
+    /// `hydrate` (architecture §4 Step A — restore cold-boot state from the
+    /// storage backend).
+    pub fn decompress_from_wire(bytes: &[u8]) -> Result<Vec<u8>> {
+        let payload = Self::from_wire(bytes)?;
+        payload.decompress()
+    }
+}
+
+/// Map a [`CompressionType`] to its 1-byte wire-format tag (P4-DEVIL m2).
+///
+/// Tag values mirror `CompressionType`'s `#[derive(Default)]` discriminant
+/// order (`None=0`, `Lz4=1`, `Zstd=2` — `src/config.rs:8-14`). SSOT: any new
+/// codec variant MUST be added here AND to [`tag_to_compression_type`].
+const fn compression_type_to_tag(c: CompressionType) -> u8 {
+    match c {
+        CompressionType::None => 0x00,
+        CompressionType::Lz4 => 0x01,
+        CompressionType::Zstd => 0x02,
+    }
+}
+
+/// Inverse of [`compression_type_to_tag`]. Rejects unknown tags with
+/// [`GrafeoLoroError::Compression`] so a corrupt or future-format payload
+/// surfaces as a deterministic error instead of panicking or silently
+/// mis-decoding.
+fn tag_to_compression_type(tag: u8) -> Result<CompressionType> {
+    match tag {
+        0x00 => Ok(CompressionType::None),
+        0x01 => Ok(CompressionType::Lz4),
+        0x02 => Ok(CompressionType::Zstd),
+        _ => Err(GrafeoLoroError::Compression(format!(
+            "wire format: unknown codec tag {tag:#04x} (expected 0x00=None, 0x01=Lz4, 0x02=Zstd)"
+        ))),
     }
 }
 

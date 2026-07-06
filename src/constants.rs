@@ -81,21 +81,20 @@ pub const EPOCH_RETENTION: u64 = 10_000;
 /// Suffix of the Loro-SSOT mode base snapshot storage key. Full key:
 /// `format!("{graph_id}/{STORAGE_KEY_BASE_LORO}")` — e.g. `graph_123/base.loro`.
 ///
-/// Contents: bytes from `LoroDoc::export(ExportMode::Snapshot)` (full state +
-/// history) on `checkpoint`, optionally wrapped via
-/// `CompressedPayload::compress(&bytes, CompressionType::Zstd)` (P3T1-L3 codec
-/// envelope). On `hydrate`, decompressed + `LoroDoc::import_with(&bytes,
-/// ORIGIN_LORO_BRIDGE)` (verified at `loro-1.13.6/src/lib.rs:721` — P4-DEVIL
-/// n1 + M10: `import_with` tags the import for the B1 echo filter at
-/// `src/bridge/sync_engine.rs:234`, which skips events whose origin matches
-/// `ORIGIN_LORO_BRIDGE`. The untagged `LoroDoc::import` at `:710` is NOT
-/// used — it would re-fire the subscriber on cold-boot import).
-///
-/// `// TODO(P4-L3)`: P4-DEVIL m2 wire format — 1-byte codec tag (0=None, 1=Lz4,
-/// 2=Zstd — matches `CompressionType` discriminant order) + N bytes payload.
-/// L3 adds `compress_to_wire` / `decompress_from_wire` helpers in
-/// `src/compression/wrapper.rs`; Phase 4 L2 writes `payload.raw_data` directly
-/// assuming codec matches `self.compression` (single-codec deployment).
+/// Contents: bytes from `LoroDoc::export(ExportMode::shallow_snapshot(&frontiers))`
+/// (current state + partial history since frontiers — history-trimmed per
+/// architecture §4 Step D) on `checkpoint`, wrapped via
+/// `CompressedPayload::compress_to_wire(&bytes, CompressionType::Zstd)`
+/// (P3T1-L3 codec envelope + P4-L3 wire format — on-wire layout is
+/// `[version:u8][codec_tag:u8][raw_data..]` per P4-DEVIL m2; tags:
+/// `0x00=None`, `0x01=Lz4`, `0x02=Zstd` — matches `CompressionType` discriminant
+/// order). On `hydrate`, `CompressedPayload::decompress_from_wire(&bytes)` +
+/// `LoroDoc::import_with(&bytes, ORIGIN_LORO_BRIDGE)` (verified at
+/// `loro-1.13.6/src/lib.rs:721` — P4-DEVIL n1 + M10: `import_with` tags the
+/// import for the B1 echo filter at `src/bridge/sync_engine.rs:270`, which
+/// skips events whose origin matches `ORIGIN_LORO_BRIDGE`. The untagged
+/// `LoroDoc::import` at `:710` is NOT used — it would re-fire the subscriber
+/// on cold-boot import).
 ///
 /// `StorageBackend::load` returning `io::ErrorKind::NotFound` on this key is
 /// the "fresh graph" cold-boot path — `hydrate` initializes an empty `LoroDoc`

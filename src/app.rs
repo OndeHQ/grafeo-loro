@@ -221,17 +221,19 @@ impl GrafeoLoroApp {
     ///    (verified at `loro-internal-1.13.6/src/encoding.rs:108`) — produces
     ///    a shallow snapshot: current state + partial history since frontiers
     ///    (history-trimmed, per architecture §4 Step D).
-    /// 3. `CompressedPayload::compress(&bytes, self.compression)`
-    ///    (verified at `src/compression/wrapper.rs:23`) — wrap under the
-    ///    builder-configured codec. `// TODO(P4-L3): m2 wire format —
-    ///    `compress_to_wire(&[u8], CompressionType) -> Vec<u8>` helper for the
-    ///    1-byte codec tag + payload format (P4-DEVIL m2 — L3 scope).`
+    /// 3. `CompressedPayload::compress_to_wire(&bytes, self.compression)`
+    ///    (verified at `src/compression/wrapper.rs:125`) — wrap under the
+    ///    builder-configured codec + serialize to the on-wire format
+    ///    `[version:u8][codec_tag:u8][raw_data..]` (P4-DEVIL m2 — L3 scope).
     /// 4. `StorageBackend::save(format!("{graph_id}/{STORAGE_KEY_BASE_LORO}"),
-    ///    payload.raw_data)` — overwrite the base snapshot.
+    ///    wire_bytes)` — overwrite the base snapshot with the wire-format bytes.
     /// 5. `StorageBackend::list(format!("{graph_id}/{STORAGE_KEY_DELTA_PREFIX}"))`
     ///    — enumerate existing delta keys.
     /// 6. For each delta key, `StorageBackend::delete(key)` — clear deltas
-    ///    now folded into the base snapshot.
+    ///    now folded into the base snapshot. Delete failures are logged as a
+    ///    warn and swallowed (anti-plenger #9 idempotent retry — the next
+    ///    checkpoint retries; orphan deltas are re-imported harmlessly by
+    ///    `hydrate` via `trim_the_known_part_of_change`).
     ///
     ///    # Atomicity (P4-DEVIL Q3)
     ///
@@ -320,6 +322,17 @@ impl GrafeoLoroApp {
                 tracing::debug!(?frontiers, "checkpoint: oplog_frontiers");
 
                 // Step 2: export shallow snapshot.
+                //
+                // Verified API: `ExportMode::shallow_snapshot(&Frontiers)` at
+                // `loro-internal-1.13.6/src/encoding.rs:108` (re-exported as
+                // `loro::ExportMode::shallow_snapshot` at `loro-1.13.6/src/lib.rs:56`).
+                // P4-DEVIL m2 (architecture §4 Step D "History discarded to
+                // prevent storage bloat"): `shallow_snapshot` is the right
+                // variant — produces current state + partial history since
+                // `frontiers` (history-trimmed). NOT the deep `ExportMode::Snapshot`
+                // variant (full history) — would re-bloat storage on each
+                // checkpoint. NOT `ExportMode::StateOnly` either — that drops
+                // too much and would break `import_with` on `hydrate`.
                 let snapshot_bytes = {
                     let doc = self.sync_engine.loro_doc.read();
                     doc.export(loro::ExportMode::shallow_snapshot(&frontiers))
@@ -330,16 +343,17 @@ impl GrafeoLoroApp {
                     "checkpoint: shallow snapshot exported"
                 );
 
-                // Step 3: compress under the configured codec.
-                // P4-DEVIL m2: wire format (1-byte codec tag + payload) is
-                // TODO(P4-L3) — for now write `payload.raw_data` directly.
-                let payload =
-                    CompressedPayload::compress(&snapshot_bytes, self.compression)?;
+                // Step 3: compress under the configured codec + serialize to
+                // the wire format (P4-DEVIL m2 — `compress_to_wire` produces
+                // `[version:u8][codec_tag:u8][raw_data..]` so `hydrate`'s
+                // `decompress_from_wire` knows which codec to use).
+                let wire_bytes =
+                    CompressedPayload::compress_to_wire(&snapshot_bytes, self.compression)?;
 
                 // Step 4: save base snapshot (overwrites any prior).
                 let base_key = format!("{graph_id}/{STORAGE_KEY_BASE_LORO}");
                 tracing::debug!(key = %base_key, "checkpoint: saving base snapshot");
-                storage.save(&base_key, payload.raw_data).await?;
+                storage.save(&base_key, wire_bytes).await?;
 
                 // Step 5+6: list + delete delta keys.
                 //
@@ -356,10 +370,20 @@ impl GrafeoLoroApp {
                     "checkpoint: listing delta keys for deletion"
                 );
                 let delta_keys = storage.list(&delta_prefix).await?;
-                // TODO(P4-L3): orphan-delta partial-failure recovery (Q3 — accept risk).
+                // P4-DEVIL Q3 + anti-plenger #9 idempotent retry: log + continue
+                // on delete failure. The next `checkpoint` retries; orphan
+                // deltas are re-imported harmlessly by `hydrate` (dedup via
+                // `trim_the_known_part_of_change` at loro-internal-1.13.6/src/oplog.rs:350,
+                // NOT via `ImportStatus::pending` per P4-DEVIL M2).
                 for k in &delta_keys {
                     tracing::debug!(key = %k, "checkpoint: deleting delta");
-                    storage.delete(k).await?;
+                    if let Err(e) = storage.delete(k).await {
+                        tracing::warn!(
+                            key = %k,
+                            error = %e,
+                            "checkpoint: delta delete failed; will retry next checkpoint"
+                        );
+                    }
                 }
 
                 tracing::info!(
@@ -402,10 +426,11 @@ impl GrafeoLoroApp {
     ///    bytes). `StorageIo(io::ErrorKind::NotFound)` is the "fresh graph"
     ///    case — initialize an empty `LoroDoc` and skip ahead to step 5
     ///    (parallel hydrate over an empty doc is a no-op).
-    /// 2. `CompressedPayload::decompress` (verified at
-    ///    `src/compression/wrapper.rs:48`) — recover the raw Loro bytes.
-    ///    `// TODO(P4-L3): m2 wire format — `decompress_from_wire(&[u8])`
-    ///    helper (P4-DEVIL m2 — L3 scope).`
+    /// 2. `CompressedPayload::decompress_from_wire(&bytes)` (verified at
+    ///    `src/compression/wrapper.rs:133`) — parse the on-wire format
+    ///    `[version:u8][codec_tag:u8][raw_data..]` and decompress under the
+    ///    tagged codec (P4-DEVIL m2 — L3 scope). Rejects unknown versions /
+    ///    codec tags with `GrafeoLoroError::Compression(...)`.
     /// 3. `LoroDoc::import_with(&bytes, ORIGIN_LORO_BRIDGE)` (verified at
     ///    `loro-1.13.6/src/lib.rs:721` — P4-DEVIL M10 + n1: `import_with`
     ///    tags the import for the B1 echo filter at
@@ -438,9 +463,11 @@ impl GrafeoLoroApp {
     ///    Loro) + uses `session_with_cdc(false)` — no echo through the Loro
     ///    subscriber even when the subscriber is active (P4-DEVIL M10).
     /// 6. Re-seed `loro_key_counter` to `max(existing V/* keys) + 1` (per
-    ///    `from_sync_engine_with_config` doc-comment). `// TODO(P4-L3): scan
-    ///    LoroDoc V/* keys for max numeric suffix; `
-    ///    `self.loro_key_counter.fetch_max(max + 1, Ordering::Relaxed)`.`
+    ///    `from_sync_engine_with_config` doc-comment). L3 algorithm: scan
+    ///    `doc.get_map(ROOT_VERTICES).keys()`, filter by `V/` prefix, parse
+    ///    the suffix as `u64`, take the max, then call
+    ///    `self.loro_key_counter.fetch_max(max + 1, Ordering::Relaxed)`.
+    ///    Empty V map → counter stays at 0 (fresh-graph no-op).
     ///
     /// ## `SsotMode::Grafeo` (architecture §4 Step A) — **deferred to Phase 5**
     ///
@@ -550,18 +577,14 @@ impl GrafeoLoroApp {
                 };
 
                 if !base_bytes.is_empty() {
-                    // Step 2: decompress the base snapshot.
-                    // P4-DEVIL m2: wire format (1-byte codec tag + payload) is
-                    // TODO(P4-L3) — for now construct `CompressedPayload`
-                    // in-memory assuming codec matches `self.compression`.
-                    let payload = CompressedPayload {
-                        compression: self.compression,
-                        raw_data: base_bytes,
-                    };
-                    let loro_bytes = payload.decompress()?;
+                    // Step 2: decompress the base snapshot via the wire-format
+                    // helper (P4-DEVIL m2 — `decompress_from_wire` parses
+                    // `[version:u8][codec_tag:u8][raw_data..]` and dispatches
+                    // to the matching codec). Rejects unknown versions / tags.
+                    let loro_bytes = CompressedPayload::decompress_from_wire(&base_bytes)?;
 
                     // Step 3: import into LoroDoc with ORIGIN_LORO_BRIDGE tag
-                    // so the B1 filter at sync_engine.rs:234 skips the echo
+                    // so the B1 filter at sync_engine.rs:270 skips the echo
                     // (P4-DEVIL M10).
                     tracing::debug!(
                         bytes = loro_bytes.len(),
@@ -574,37 +597,85 @@ impl GrafeoLoroApp {
                         // tracking, NOT dedup. Dedup is automatic via
                         // trim_the_known_part_of_change (oplog.rs:350).
                         if status.pending.is_some() {
+                            // Phase 4 self-contained snapshots should always
+                            // have `pending == None`. A non-None value means
+                            // the snapshot was exported with a frontier the
+                            // hydrated doc cannot yet resolve. Phase 5+ Loro
+                            // sync wire will fetch the missing ranges via
+                            // `doc.export(ExportMode::updates(&oplog_vv()))`
+                            // and re-import; for Phase 4 we surface this as a
+                            // warn so the operator knows the cold-boot is
+                            // incomplete (anti-plenger #10 observability).
                             tracing::warn!(
                                 ?status.pending,
                                 "hydrate: ImportStatus.pending.is_some() — \
                                  missing dependencies (Phase 4 self-contained \
                                  snapshots should always be None)"
                             );
-                            // TODO(P4-L3): fetch missing ranges via
-                            // doc.export(ExportMode::updates(&oplog_vv()))
-                            // and re-import — Phase 5+ Loro sync wire scope.
                         }
                     }
 
                     // Step 4: enumerate + import delta keys.
                     //
                     // P4-DEVIL M1: Phase 4 has no delta-write path — the list
-                    // is always empty. The loop runs zero times.
+                    // is always empty. The loop runs zero times. L3 implements
+                    // the real loop for forward-compat with Phase 5's Loro sync
+                    // wire-protocol path (architecture §4 Step C
+                    // `doc.export(ExportMode::updates)`).
                     let delta_prefix = format!("{graph_id}/{STORAGE_KEY_DELTA_PREFIX}");
                     tracing::debug!(
                         prefix = %delta_prefix,
                         "hydrate: listing delta keys"
                     );
-                    let delta_keys = storage.list(&delta_prefix).await?;
-                    // TODO(P4-L3): delta-import loop body — load + decompress +
-                    // import_with(ORIGIN_LORO_BRIDGE). Phase 4 scope: no-op (M1).
+                    let mut delta_keys = storage.list(&delta_prefix).await?;
+                    // Lexicographic sort matches numeric epoch order IF the
+                    // epoch slot is zero-padded to a fixed width (e.g. 20
+                    // digits for u64::MAX). `STORAGE_KEY_DELTA_PREFIX`'s
+                    // doc-comment does NOT mandate padding, so this is a
+                    // forward-compat assumption: Phase 5+ Loro sync wire MUST
+                    // zero-pad the `{epoch}` slot — see `src/constants.rs:122`.
+                    // Phase 4 has no delta-write path so the assumption is
+                    // vacuous in practice (the list is empty).
+                    delta_keys.sort_unstable();
+                    let mut imported = 0usize;
                     for k in &delta_keys {
-                        let _ = k;
-                        tracing::debug!(key = %k, "hydrate: TODO(P4-L3) import delta");
+                        tracing::debug!(key = %k, "hydrate: loading delta");
+                        let delta_bytes = match storage.load(k).await {
+                            Ok(b) => b,
+                            Err(e) => {
+                                // Idempotent retry: a missing delta between
+                                // `list` and `load` (e.g. another writer
+                                // checkpointed) is recoverable on the next
+                                // hydrate — log + continue (anti-plenger #9).
+                                tracing::warn!(
+                                    key = %k,
+                                    error = %e,
+                                    "hydrate: delta load failed; skipping (next hydrate retries)"
+                                );
+                                continue;
+                            }
+                        };
+                        let delta_loro_bytes =
+                            CompressedPayload::decompress_from_wire(&delta_bytes)?;
+                        let status = {
+                            let doc = self.sync_engine.loro_doc.write();
+                            doc.import_with(&delta_loro_bytes, ORIGIN_LORO_BRIDGE)?
+                        };
+                        if status.pending.is_some() {
+                            tracing::warn!(
+                                key = %k,
+                                ?status.pending,
+                                "hydrate: delta ImportStatus.pending.is_some() — \
+                                 missing dependencies (Phase 4 self-contained \
+                                 deltas should always be None)"
+                            );
+                        }
+                        imported += 1;
                     }
-                    tracing::debug!(
+                    tracing::info!(
                         delta_count = delta_keys.len(),
-                        "hydrate: delta enumeration complete"
+                        imported,
+                        "hydrate: delta import complete"
                     );
                 }
 
@@ -628,10 +699,51 @@ impl GrafeoLoroApp {
                 }
 
                 // Step 6: re-seed loro_key_counter to max(V/* keys) + 1.
-                // TODO(P4-L3): scan LoroDoc V/* keys for max numeric suffix
-                // (format `V/<n>` → parse `n` → max). Then call
-                // `self.loro_key_counter.fetch_max(max + 1, Ordering::Relaxed)`.
-                // L2 wires the call site; L3 fills the algorithm.
+                //
+                // Scan the LoroDoc root `V` map for `V/<n>` keys, take the max
+                // numeric suffix, and store `max + 1` so the next
+                // `VertexBuilder::commit()` generates a non-colliding key.
+                // Empty V map (fresh graph or no commits) → counter stays at 0.
+                // `fetch_max` is used (not `store`) for defensive correctness:
+                // if a concurrent `VertexBuilder::commit()` ran between
+                // `from_sync_engine_with_config` and `hydrate`, the live
+                // counter already exceeds `max + 1` and `fetch_max` preserves
+                // the higher value (anti-plenger #7 — defensive programming).
+                //
+                // Verified API: `LoroDoc::get_map(I) -> LoroMap` at
+                // `loro-1.13.6/src/lib.rs:489`; `LoroMap::keys() -> impl
+                // Iterator<Item = InternalString>` at `:2315`; `InternalString`
+                // implements `AsRef<str>` + `Deref<Target=str>` (verified at
+                // `loro-common-1.13.1/src/internal_string.rs:127,200`).
+                {
+                    let doc = self.sync_engine.loro_doc.read();
+                    let v_map = doc.get_map(ROOT_VERTICES);
+                    let max_id = v_map
+                        .keys()
+                        .filter_map(|k| {
+                            let s: &str = k.as_ref();
+                            s.strip_prefix("V/").and_then(|n| n.parse::<u64>().ok())
+                        })
+                        .max();
+                    match max_id {
+                        Some(max) => {
+                            let prev = self
+                                .loro_key_counter
+                                .fetch_max(max + 1, Ordering::Relaxed);
+                            tracing::info!(
+                                max_existing = max,
+                                new_counter = max + 1,
+                                prev_counter = prev,
+                                "hydrate: re-seeded loro_key_counter from V/* keys"
+                            );
+                        }
+                        None => {
+                            tracing::info!(
+                                "hydrate: no V/* keys found; loro_key_counter stays at 0"
+                            );
+                        }
+                    }
+                }
                 tracing::info!("hydrate: complete (Loro mode)");
                 Ok(())
             }
