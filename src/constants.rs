@@ -24,6 +24,13 @@ pub const DEFAULT_BATCH_SIZE: usize = 256;
 pub const DEFAULT_CHUNK_SIZE: usize = 256;
 pub const DEFAULT_STALENESS_MS: u64 = 5000;
 
+/// Zstd compression level used by `compression::wrapper::CompressedPayload::compress`
+/// for `CompressionType::Zstd` (Phase 3 Task 1). Level 3 is zstd's own default
+/// (`zstd-0.13.3/src/lib.rs:36` re-exports `zstd_safe::CLEVEL_DEFAULT = 3`); named
+/// here as SSOT so Phase 4 storage can reference the same constant without
+/// reaching into the compression module (anti-plenger #2 DRY/SSOT).
+pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
+
 // Outbound CDC poller cadence (Grafeo→Loro path). Grafeo 0.5.42 CDC is
 // poll-based: the outbound worker calls `session.changes_between(start, end)`
 // on this interval. 50 ms ≈ 20 polls/sec — low latency without burning CPU.
