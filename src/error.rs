@@ -35,8 +35,8 @@ pub enum GrafeoLoroError {
     /// `catalog::resolved_node_type` cycle-checks schema type inheritance;
     /// `procedures::has_negative_cycle` is a Bellman-Ford query procedure —
     /// neither constrains user edges at commit time), so the bridge must
-    /// pre-check via `schema::tree::would_create_cycle` and reject with this
-    /// variant before opening the write transaction.
+    /// pre-check via `schema::tree::would_create_cycle_in_tx` (run INSIDE the
+    /// Serializable tx, before edge mutations) and reject with this variant.
     #[error("Tree move cycle: node {node_id:?} cannot be reparented under {new_parent:?}")]
     TreeMoveCreatesCycle {
         node_id: crate::types::ids::NodeId,
