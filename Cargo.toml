@@ -9,6 +9,13 @@ grafeo = "0.5"
 # echo-prevention set). Already loaded transitively by grafeo, so this adds no
 # new code to the build graph.
 grafeo-common = "0.5"
+# Direct dep for `grafeo_engine::transaction::IsolationLevel` (used by
+# `sync_tree_move_to_grafeo` for Serializable isolation — see P2T2-DEVIL Q3/R3).
+# The `grafeo` umbrella crate does NOT re-export the `transaction` module
+# (`grafeo-0.5.42/src/lib.rs:68-88`), so a direct dep is required to reach
+# `IsolationLevel::Serializable`. Already loaded transitively via grafeo, so
+# this adds no new code to the build graph.
+grafeo-engine = "0.5"
 loro = "1.0"
 lorosurgeon = "0.2"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "fs"] }
