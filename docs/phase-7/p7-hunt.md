@@ -165,3 +165,46 @@ All assertions are non-trivial, descriptive, and use real grafeo API responses. 
 **Verdict**: CLEAN. No Goodhart shortcuts.
 **Counts**: blockers 0, majors 0, minors 0, nits 1 (negative-path-3 prefix construction — fragile if wire format drifts, mitigated by positive-path dependency).
 
+
+## Summary Verdict
+
+**CLEAN-WITH-NITS — PUBLISH-READY.** The 16-commit gap-closure session (13b647b..a67fc1f) eliminated all 8 plenger anti-patterns previously flagged by Devil critique and Hunter session 1. T1 (11 `unimplemented!()`), I12 (MVCC snapshot isolation), Gap E (EncFuzz mirror type consolidation), Gap M2 (I15 wire format rewrite), and structural refactors (D1/D2/D3/D4) all landed cleanly. I12 implements 3 non-trivial assertions on real grafeo `Int64` variants; I15 uses production `build_eph_envelope`/`parse_eph_envelope` APIs with 1 positive + 3 negative paths using `matches!` variant checks. All 8 verification gates pass (main check/fmt/clippy/test + fuzz check/fmt/clippy). The only nits are a reserved `FuzzState.db` field (acceptable reservation) and a hand-constructed prefix in I15 negative-path-3 (mitigated by positive-path dependency on production API). Recommend orchestrator declare PUBLISH-READY.
+
+## Counts
+- Blockers: 0
+- Majors: 0
+- Minors: 0
+- Nits: 2
+  - (N1) `FuzzState.db` field has `dead_code` allow reserved for "future invariant checks"; I12 takes `db` as fn param rather than via the struct field. Acceptable reservation; consider wiring I12 through the struct or removing the field.
+  - (N2) I15 negative-path-3 hand-constructs prefix bytes (`EPH_MAGIC + room_id_len + room_id + 0x01`) instead of mutating a production-built envelope. Could silently rot if wire format changes; mitigated by positive-path using `build_eph_envelope` directly (drift breaks positive path first).
+
+## Publish-Ready Checklist
+- [x] 0 `unimplemented!()` macro calls in src/ (verified: `rg -n '^\s*unimplemented!\(' src/` → 0 hits)
+- [x] 0 `#[allow]` with TODO/deferred language (4 `#[allow]` all use permanent design language; the 3 matches on "not a TODO" are negations inside the reason strings)
+- [x] 0 stale NOTE comments (verified: `rg -n '^\s*//\s*NOTE\b' src/` → 0 hits)
+- [x] 0 stale doc-comments mentioning `unimplemented!()` (the one hit at `src/error.rs:53` — "Returned instead of panicking via `unimplemented!()` (Phase 6 T1)" — is the CURRENT and ACCURATE explanation of why the `NotYetImplemented` variant exists; not a stale mention)
+- [x] I12 does REAL snapshot isolation verification (3 non-trivial assertions: epoch advance + pinned-read sees v=1 + post-clear sees v=2; verified #8)
+- [x] I15 tests use production APIs (positive path uses `build_eph_envelope` + `parse_eph_envelope`; verified #8)
+- [x] All 8 gates pass (re-verified by Hunter G4 on 2026-07-07):
+  1. `cargo check --all` ✓
+  2. `cargo fmt --all --check` ✓ (no diff)
+  3. `cargo clippy --all-targets -- -D warnings` ✓ (no warnings)
+  4. `cargo test --all` ✓ (82 pass, 2 ignored — 6 unit + 5 integration + 71 doctests)
+  5. `cd fuzz && cargo check` ✓
+  6. `cd fuzz && cargo fmt --all --check` ✓ (no diff)
+  7. `cd fuzz && cargo clippy --all-targets -- -D warnings` ✓ (no warnings)
+  8. `cd fuzz && cargo run --bin gen_corpus` — verified by G3b worklog (5 seed files, 12/76/192/141/12446 bytes; Hunter G4 did not re-run as it's slow and corpus files are committed)
+- [x] No `EncFuzz` mirror types (verified: `rg -n 'enum EncFuzz|struct EncFuzz' fuzz/` → 0 hits; only 2 historical comments referencing the prior removal)
+
+## Top Findings
+
+1. **(No blockers, no majors — clean.)** All 8 anti-patterns previously flagged are eliminated in the gap-closure session.
+2. **(Nit N1)** `FuzzState.db` field reserved-but-unused — minor architectural reservation; not a regression.
+3. **(Nit N2)** I15 negative-path-3 prefix hand-construction — fragile to wire-format drift, but mitigated by positive-path dependency. Recommend future Hunter verify on wire-format changes.
+
+## Recommendation
+
+**PUBLISH-READY.**
+
+All 8 plenger anti-patterns cleared. All 8 publish-ready checklist items pass. 2 nits are non-blocking and well-documented. The 16-commit gap-closure session (13b647b..a67fc1f) successfully closed Gaps A/B/C/D/E/F/G/M2 per the L1 plan + Devil critique. Recommend orchestrator declare the project publish-ready.
+
