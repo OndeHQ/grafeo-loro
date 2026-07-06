@@ -419,8 +419,17 @@ impl VertexBuilder {
         //    `SnapshotIsolation` (grafeo-engine-0.5.42/src/transaction/manager.rs:55)
         //    — `commit()` is write-only (single `create_node_with_props`),
         //    no read-then-write race, so SnapshotIsolation suffices.
+        //
+        //    On `begin_transaction()` Err (theoretical — fresh session has
+        //    no active tx, so `InvalidState` is impossible), compensate Loro
+        //    (step 5 hasn't run yet, so NO BridgeMaps cleanup needed — L2-R2
+        //    MAJOR 4 + atomicity contract).
         let mut session = self.sync_engine.grafeo_db.session_with_cdc(false);
-        session.begin_transaction()?;
+        if let Err(raw_err) = session.begin_transaction() {
+            let grafeo_err: GrafeoLoroError = raw_err.into();
+            compensate_loro_vertex(&self.sync_engine, &loro_key, &grafeo_err, &self.labels, &self.properties);
+            return Err(grafeo_err);
+        }
 
         // 5. Apply via the SSOT apply path (architecture §20 — DRY).
         //    `apply_loro_op` looks up `loro_key` in `node_id_map`; on miss,
