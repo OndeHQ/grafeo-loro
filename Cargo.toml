@@ -2,6 +2,9 @@
 name = "grafeo-loro"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Local-first, in-process, dual-store graph database with CRDT consensus (Loro) + execution (Grafeo)."
+repository = "https://github.com/OndeHQ/grafeo-loro"
 
 [dependencies]
 grafeo = "0.5"
