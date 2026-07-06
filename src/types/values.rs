@@ -83,6 +83,40 @@ pub enum GraphValue {
     List(Vec<GraphValue>),
 }
 
+// Ergonomic `From` impls so `with_property(key, value)` accepts bare
+// primitives (P2T3-DEVIL m4). The 5 covered variants match `LoroProperty`'s
+// subset — the strict-reject path in `VertexBuilder::commit` keeps the
+// `Vector`/`Map`/`List` variants graph-only.
+impl From<bool> for GraphValue {
+    fn from(b: bool) -> Self {
+        Self::Bool(b)
+    }
+}
+
+impl From<i64> for GraphValue {
+    fn from(i: i64) -> Self {
+        Self::Integer(i)
+    }
+}
+
+impl From<f64> for GraphValue {
+    fn from(f: f64) -> Self {
+        Self::Float(f)
+    }
+}
+
+impl From<String> for GraphValue {
+    fn from(s: String) -> Self {
+        Self::String(s)
+    }
+}
+
+impl From<&str> for GraphValue {
+    fn from(s: &str) -> Self {
+        Self::String(s.to_string())
+    }
+}
+
 /// Pure recursive `LoroValue → GraphValue` (architecture §5). Rejects `Binary`/`Container`.
 pub fn lval_to_gval(val: loro::LoroValue) -> Result<GraphValue> {
     use loro::LoroValue as LV;
