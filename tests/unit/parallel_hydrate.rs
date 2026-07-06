@@ -36,7 +36,7 @@
 //! - Single vertex with no properties → Ok, node created with empty prop map.
 //! - Vertex sub-map is not a `Container::Map` (e.g. a `Container::List`) →
 //!   `Err(GrafeoLoroError::Bridge(...))` (originally specified as Binary
-//!   rejection; changed per L3 — see `parallel_hydrate_rejects_binary_property`).
+//!   rejection; changed per L3 — see `parallel_hydrate_rejects_non_map_container`).
 //! - 300 vertices with `DEFAULT_CHUNK_SIZE = 256` → 2 chunks (256 + 44); all
 //!   300 must commit (no chunk lost on Rayon split).
 //! - `VertexEntity::description` is Loro-only (`src/app.rs:201`) — MUST NOT
@@ -275,8 +275,12 @@ fn parallel_hydrate_preserves_property_types() {
 /// Per the L3 task spec, this test was CHANGED to assert the malformed-shape
 /// rejection arm in `parallel_hydrate_grafeo` itself (`voc.into_container()`
 /// + `c.into_map()` collapse to `None` when the sub-map is a `Container::List`).
+/// P3T2-L2R2 m1: renamed from `parallel_hydrate_rejects_binary_property` to
+/// `parallel_hydrate_rejects_non_map_container` to reflect what the test
+/// actually asserts (the original Binary-rejection coverage is preserved at
+/// `src/types/values.rs:296` `lval_to_gval_rejects_binary_and_container`).
 #[test]
-fn parallel_hydrate_rejects_binary_property() {
+fn parallel_hydrate_rejects_non_map_container() {
     let db = Arc::new(GrafeoDB::new_in_memory());
     let doc = LoroDoc::new();
     let maps = BridgeMaps::new();
@@ -298,40 +302,56 @@ fn parallel_hydrate_rejects_binary_property() {
     assert_eq!(db.node_count(), 0, "no nodes should exist after failed hydrate");
 }
 
-/// Origin tagging: `set_metadata(ORIGIN_LORO_BRIDGE, ORIGIN_LORO_BRIDGE)` is
-/// called on each per-chunk `PreparedCommit`. Per Devil Gap 1, Grafeo 0.5.42's
-/// commit metadata is advisory-only and dropped on commit (no public read API
-/// exists to query it post-commit). This test therefore verifies the SIDE
-/// EFFECT — that hydration succeeds without error (proving `set_metadata`'s
-/// infallible `&mut self` call did not fail) and produces the expected node
-/// count. The real echo-prevention side-channel is `bridge_origin_epochs` in
-/// `SyncEngine` (§9), which is exercised by Phase 1 echo-loop integration tests,
-/// NOT this cold-boot hydration unit test.
+/// Side-effect contract: `parallel_hydrate_grafeo` populates `BridgeMaps`
+/// with bidirectional `loro_key ↔ NodeId` bindings — every hydrated vertex
+/// must have a forward entry in `node_id_map` AND a matching inverse entry in
+/// `node_key_map` pointing back to the same `loro_key` (P3T2-L2R2 M3 —
+/// replaces the prior `parallel_hydrate_tags_origin_loro_bridge` tautology,
+/// which was a subset of Test 3 with no new coverage; this test verifies a
+/// real contract that Test 3's count-only assertion does NOT cover).
+///
+/// Rationale: `apply_loro_op` → `apply_upsert_node` → `BridgeMaps::insert_node`
+/// writes BOTH `node_id_map` and `node_key_map` (verified at
+/// `src/bridge/grafeo_tx.rs:45-48`); the inverse-consistency contract is a
+/// real precondition for Phase 4's `SyncEngine::new(db, doc, maps)` to
+/// correctly translate outbound Grafeo CDC events back into Loro writes.
 #[test]
-fn parallel_hydrate_tags_origin_loro_bridge() {
+fn parallel_hydrate_populates_bridge_maps() {
     let db = Arc::new(GrafeoDB::new_in_memory());
     let doc = LoroDoc::new();
     let maps = BridgeMaps::new();
 
-    for i in 0..5 {
+    let n: usize = 5;
+    let keys: Vec<String> = (0..n).map(|i| format!("V/{i}")).collect();
+    for (i, key) in keys.iter().enumerate() {
         let entity = vertex(
             vec!["Tagged".into()],
             HashMap::from([("idx".into(), LoroProperty::Integer(i as i64))]),
         );
-        let key = format!("V/{i}");
-        reconcile_vertex_into_loro(&doc, &key, &entity);
+        reconcile_vertex_into_loro(&doc, key, &entity);
     }
 
-    // `set_metadata` is infallible (`&mut self`, returns `()`); the only way
-    // hydration can fail at the per-chunk commit step is `prepare_commit` or
-    // `commit` themselves returning `Err`. A successful `Ok(())` therefore
-    // proves the metadata was set without disrupting the commit pipeline.
     let result = parallel_hydrate_grafeo(&db, &doc, &maps);
-    assert!(
-        result.is_ok(),
-        "hydrate with origin-tagged commits should succeed, got {result:?}"
-    );
-    assert_eq!(db.node_count(), 5, "all 5 tagged-vertex commits should land");
+    assert!(result.is_ok(), "hydrate should succeed, got {result:?}");
+
+    // Forward map (loro_key → NodeId) + inverse map (NodeId → loro_key) must
+    // both have exactly `n` entries and be consistent inverses of each other.
+    let id_map = maps.node_id_map.read();
+    let key_map = maps.node_key_map.read();
+    assert_eq!(id_map.len(), n, "node_id_map must have {n} entries");
+    assert_eq!(key_map.len(), n, "node_key_map must have {n} entries");
+    for key in &keys {
+        let id = id_map
+            .get(key)
+            .unwrap_or_else(|| panic!("node_id_map missing binding for {key:?}"));
+        let inverse = key_map
+            .get(id)
+            .unwrap_or_else(|| panic!("node_key_map missing inverse for NodeId {id:?}"));
+        assert_eq!(
+            inverse, key,
+            "node_key_map[{id:?}] = {inverse:?}, expected {key:?} (inverse mismatch)"
+        );
+    }
 }
 
 /// Spec validation gate (`docs/implementation-plan.md:78`): hydrating 10,000
@@ -346,10 +366,13 @@ fn parallel_hydrate_tags_origin_loro_bridge() {
 ///    (`Bool`, `I64`, `String`). DO NOT write via `LoroMap::insert` directly —
 ///    that produces a `LoroValue::Map` snapshot, exercising the wrong unwrap
 ///    path (cold-boot read uses `Container::Map`, not `LoroValue::Map` — DEVIL M5).
-/// 2. Call `parallel_hydrate_grafeo(&db, &doc, &maps)`.
+/// 2. **Time ONLY the hydration call** — `std::time::Instant::now()` is
+///    started AFTER the 10k-vertex Loro fixture setup completes, and
+///    `.elapsed()` is captured immediately after `parallel_hydrate_grafeo`
+///    returns. The 10k Loro doc setup is NOT timed (only the hydration is).
 /// 3. Assert `elapsed < 500ms` (use `std::time::Instant` — NOT `tokio::time`;
-///    hydration is sync per L1 decision 2). The threshold is generous (1s) to
-///    absorb CI variance; the 500 ms target is the documented spec gate.
+///    hydration is sync per L1 decision 2). The 500ms threshold is the
+///    documented spec gate — anti-Goodhart: do NOT relax to "CI tolerance".
 /// 4. Assert `db` has exactly 10,000 nodes (Grafeo `node_count()` API).
 ///
 /// Marked `#[ignore]` so it doesn't run in CI by default — benchmark: run
@@ -361,6 +384,8 @@ fn parallel_hydrate_10k_nodes_under_500ms() {
     let doc = LoroDoc::new();
     let maps = BridgeMaps::new();
 
+    // Fixture setup (10k Loro vertices) — NOT timed; only the hydration call
+    // below is the subject of the 500ms spec gate.
     for i in 0..10_000 {
         let entity = vertex(
             vec!["LabelA".into(), "LabelB".into()],
@@ -374,17 +399,17 @@ fn parallel_hydrate_10k_nodes_under_500ms() {
         reconcile_vertex_into_loro(&doc, &key, &entity);
     }
 
+    // Time ONLY the hydration call (per HUNT C1: spec gate measures hydration,
+    // not Loro doc fixture setup). `--release` is required for the spec gate.
     let start = std::time::Instant::now();
     let result = parallel_hydrate_grafeo(&db, &doc, &maps);
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "10k hydrate should succeed, got {result:?}");
-    // CI tolerance: 1000ms (2x the 500ms spec gate) — flag CI machines that
-    // are 2x slower than the 8-core reference. Run with `--release` for the
-    // actual 500ms gate assertion.
+    // Spec gate: 500ms — anti-Goodhart (do NOT relax to "CI tolerance").
     assert!(
-        elapsed.as_millis() < 1000,
-        "10k hydrate took {elapsed:?}; spec gate is 500ms (1s CI tolerance)"
+        elapsed.as_millis() < 500,
+        "hydration of 10k nodes took {elapsed:?}; spec gate is 500ms"
     );
     assert_eq!(db.node_count(), 10_000, "all 10k nodes must commit");
     assert_eq!(

@@ -659,7 +659,7 @@ When `LoroDoc` imports a compressed snapshot from storage, the local `GrafeoDB` 
 
 ### Chunked Parallel Processing (Rust)
 
-Use `rayon` to chunk Loro map collections and parallelize Grafeo transaction insertions. Constants (`DEFAULT_CHUNK_SIZE`, `ORIGIN_LORO_BRIDGE`, `ROOT_VERTICES`) are sourced from `crate::constants` (SSOT — no literals). Error type is `GrafeoLoroError` (see `src/error.rs`); per-vertex unwrap failures route via `Bridge(String)` (vertex missing or not a `Container::Map`), and `VertexEntity::hydrate_map` errors route via `Bridge(String)` (vertex shape mismatch). The read-path SSOT is `VertexEntity::hydrate_map(&LoroMap)` (`lorosurgeon-0.2.1/src/hydrate.rs:127`) — DO NOT manually iterate the vertex sub-map's fields. `VertexEntity::description` (`LoroText`) is Loro-only (`src/app.rs:201`) and is naturally isolated from `properties` by the SSOT read path — hydration skips it.
+Use `rayon` to chunk Loro map collections and parallelize Grafeo transaction insertions. Constants (`DEFAULT_CHUNK_SIZE`, `ORIGIN_LORO_BRIDGE`, `ROOT_VERTICES`) are sourced from `crate::constants` (SSOT — no literals). Error type is `GrafeoLoroError` (see `src/error.rs`); per-vertex unwrap failures route via `Bridge(String)` (vertex missing or not a `Container::Map`), and `VertexEntity::hydrate_map` errors route via `Hydrate(#[from] lorosurgeon::error::HydrateError)` (structured vertex-shape mismatch — P3T2-L2R2 M2 replaces the prior `Bridge(format!(...))` band-aid). The read-path SSOT is `VertexEntity::hydrate_map(&LoroMap)` (`lorosurgeon-0.2.1/src/hydrate.rs:127`) — DO NOT manually iterate the vertex sub-map's fields. `VertexEntity::description` (`LoroText`) is Loro-only (`src/app.rs:201`) and is naturally isolated from `properties` by the SSOT read path — hydration skips it.
 
 > **Preconditions** (DEVIL M3): hydration MUST run BEFORE `bridge::sync_engine`'s Loro subscriber starts (or Phase 4 must tag the storage-import commit with `ORIGIN_LORO_BRIDGE` and rely on the B1 filter). `session_with_cdc(false)` only suppresses the outbound Grafeo→Loro echo; it does NOT suppress the inbound Loro→Grafeo echo from the live subscriber. See §9 echo prevention.
 
@@ -706,16 +706,24 @@ pub fn parallel_hydrate_grafeo(
         for key in chunk {
             let voc = v_root.get(key) // verified at lib.rs:2150 → Option<ValueOrContainer>
                 .ok_or_else(|| GrafeoLoroError::Bridge(format!("vertex {key} missing")))?;
+            // `into_container()` returns `Result<Container, Self>` and
+            // `into_map()` returns `Result<LoroMap, Self>` (both via
+            // `EnumAsInner` at lib.rs:3813 / :3636); the two error types
+            // differ, so collapse both to `Option` via `.ok()` before
+            // `and_then` + `ok_or_else` (the original enum variants are
+            // diagnostic-only — the user-facing message is "not a Container::Map").
             let vertex_map = voc.into_container() // lib.rs:3813 (EnumAsInner)
-                .and_then(|c| c.into_map()) // lib.rs:3636 (EnumAsInner on Container)
+                .ok()
+                .and_then(|c| c.into_map().ok()) // lib.rs:3636 (EnumAsInner on Container)
                 .ok_or_else(|| GrafeoLoroError::Bridge(format!("vertex {key} not a Container::Map")))?;
-            let entity: VertexEntity = VertexEntity::hydrate_map(&vertex_map) // SSOT
-                .map_err(|e| GrafeoLoroError::Bridge(format!("hydrate vertex {key}: {e}")))?;
+            // `hydrate_map` errors route via `From<HydrateError> for GrafeoLoroError`
+            // (P3T2-L2R2 M2) — `?` preserves the structured `HydrateError`
+            // (Missing/Unexpected/Overflow/Json variants carry property-level
+            // context). `From<LoroProperty> for GraphValue` impl lives at
+            // `src/types/values.rs:120-135` (P3T2-L3 added).
+            let entity: VertexEntity = VertexEntity::hydrate_map(&vertex_map)?; // SSOT
 
             // 4. Build LoroOp::UpsertNode + apply via SSOT (grafeo_tx.rs:86).
-            //    FLAG(L3): no existing `From<LoroProperty> for GraphValue` —
-            //    add impl OR manual match (Null/Bool/Integer/Float/String) at
-            //    src/types/values.rs.
             let op = LoroOp::UpsertNode {
                 loro_key: key.clone(),
                 labels: entity.labels,
@@ -742,8 +750,8 @@ Loro 1.13.6 verified API surface (DEVIL M1 — replaces pre-verification sketch)
 - `LoroDoc::get_map<I: IntoContainerId>(&self, I) -> LoroMap` — `loro-1.13.6/src/lib.rs:489` (no `txn` arg; LoroDoc uses interior mutability).
 - `LoroMap::keys(&self) -> impl Iterator<Item = InternalString> + '_` — `:2315` (collect `Vec<String>` via `Display`).
 - `LoroMap::get(&self, &str) -> Option<ValueOrContainer>` — `:2150` (NOT `Option<LoroValue>`).
-- `ValueOrContainer::into_container() -> Option<Container>` + `Container::into_map() -> Option<LoroMap>` — `:3813`, `:3636` (both derive `EnumAsInner`).
-- `VertexEntity::hydrate_map(&LoroMap) -> Result<VertexEntity, HydrateError>` — `lorosurgeon-0.2.1/src/hydrate.rs:127` (via `#[derive(Hydrate)]` at `src/schema/vertex.rs:5`).
+- `ValueOrContainer::into_container() -> Result<Container, Self>` + `Container::into_map() -> Result<LoroMap, Self>` — `:3813`, `:3636` (both derive `EnumAsInner`; return `Result<T, Self>` NOT `Option<T>` — collapse via `.ok().and_then(|c| c.into_map().ok())` before `ok_or_else`).
+- `VertexEntity::hydrate_map(&LoroMap) -> Result<VertexEntity, HydrateError>` — `lorosurgeon-0.2.1/src/hydrate.rs:127` (via `#[derive(Hydrate)]` at `src/schema/vertex.rs:5`); errors route into `GrafeoLoroError::Hydrate(#[from] HydrateError)` via `From` impl at `src/error.rs` (P3T2-L2R2 M2).
 - `GrafeoDB::session_with_cdc(false) -> Session` — `grafeo-engine-0.5.42/src/database/mod.rs:1728` (CDC off — outbound echoes suppressed).
 - `Session::begin_transaction(&mut self) -> Result<()>` — `session/mod.rs:3883` (default isolation = `SnapshotIsolation`; write-only chunk has no read-then-write race).
 - `Session::prepare_commit(&mut self) -> Result<PreparedCommit<'_>>` — `:4496`.

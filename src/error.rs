@@ -30,6 +30,12 @@ pub enum GrafeoLoroError {
     #[error("Bridge error: {0}")]
     Bridge(String),
 
+    /// Cold-boot hydration failure surfaced by `VertexEntity::hydrate_map`
+    /// (lorosurgeon). Structured `HydrateError` is preserved (P3T2-L2R2 M2 —
+    /// replaces the prior `Bridge(format!(...))` band-aid at the call site).
+    #[error("Hydrate error: {0}")]
+    Hydrate(#[from] lorosurgeon::error::HydrateError),
+
     /// Tree reparenting would create a cycle. Grafeo 0.5.42 has NO native
     /// graph-edge acyclicity enforcement (verified P2T2-L1: only
     /// `catalog::resolved_node_type` cycle-checks schema type inheritance;

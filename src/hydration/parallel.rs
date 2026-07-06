@@ -31,7 +31,8 @@ use crate::types::values::GraphValue;
 /// # Errors
 ///
 /// - [`GrafeoLoroError::Grafeo`][crate::error::GrafeoLoroError::Grafeo] if any per-chunk tx fails (begin / mutate / prepare / commit). The failing chunk's `Session::Drop` auto-rollbacks its tx; previously-committed chunks remain committed.
-/// - [`GrafeoLoroError::Bridge`][crate::error::GrafeoLoroError::Bridge] if a vertex sub-map is not a `Container::Map` or if `VertexEntity::hydrate_map` fails (vertex shape mismatch).
+/// - [`GrafeoLoroError::Bridge`][crate::error::GrafeoLoroError::Bridge] if a vertex sub-map is not a `Container::Map` (vertex shape mismatch at the Loro container level).
+/// - [`GrafeoLoroError::Hydrate`][crate::error::GrafeoLoroError::Hydrate] if `VertexEntity::hydrate_map` fails (vertex field-shape mismatch — missing required property, type mismatch, overflow, JSON failure). Structured `lorosurgeon::error::HydrateError` is preserved (P3T2-L2R2 M2 — replaces the prior `Bridge(format!(...))` band-aid).
 ///
 /// # Idempotency assumption
 ///
@@ -77,8 +78,7 @@ pub fn parallel_hydrate_grafeo(db: &Arc<GrafeoDB>, doc: &LoroDoc, maps: &BridgeM
                 .ok_or_else(|| {
                     GrafeoLoroError::Bridge(format!("vertex {key} is not a Container::Map"))
                 })?;
-            let entity: VertexEntity = VertexEntity::hydrate_map(&vertex_map)
-                .map_err(|e| GrafeoLoroError::Bridge(format!("hydrate vertex {key}: {e}")))?;
+            let entity: VertexEntity = VertexEntity::hydrate_map(&vertex_map)?;
 
             // 5. Build `LoroOp::UpsertNode` and reuse the SSOT apply path
             //    (`src/bridge/grafeo_tx.rs:86`) — `apply_upsert_node` handles
