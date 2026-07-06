@@ -447,13 +447,23 @@ impl VertexBuilder {
         let mut prepared = session.prepare_commit()?;
         prepared.set_metadata("origin", ORIGIN_LORO_BRIDGE);
         if let Err(raw_err) = prepared.commit() {
-            // `prepared` was consumed by `commit()`; on Err it auto-rolled
-            // back via `Drop` (transaction/prepared.rs:141-148). The session
-            // tx is also auto-rolled back when `session` drops below.
-            // Wrap the raw grafeo::Error into GrafeoLoroError::Grafeo(_) via
-            // the `#[from]` impl at src/error.rs:9.
+            // `prepared.commit()` sets `finalized = true` BEFORE calling
+            // `session.commit()` (transaction/prepared.rs:124-129), so
+            // `PreparedCommit::Drop` is a NO-OP. The actual Grafeo rollback
+            // happens inside `session.commit()` → `commit_inner()`'s catch
+            // block (session/mod.rs:4014-4036), which calls
+            // `store.rollback_transaction_properties(transaction_id)` for
+            // each touched graph. The session tx is no longer active
+            // (`current_transaction` was `take()`'d), so `Session::Drop` is
+            // also a no-op. (L2-R2 MINOR 4: corrected misleading comment.)
             let grafeo_err: GrafeoLoroError = raw_err.into();
             compensate_loro_vertex(&self.sync_engine, &loro_key, &grafeo_err, &self.labels, &self.properties);
+            // Step 5's `apply_loro_op` inserted a `BridgeMaps` binding for
+            // `loro_key → grafeo_node_id`. The Grafeo node was just rolled
+            // back, so the binding now points to a phantom NodeId — remove
+            // it from BOTH maps atomically (`BridgeMaps::remove_node` at
+            // grafeo_tx.rs:52) to honor the atomicity contract (L2-R2 MAJOR 1).
+            self.sync_engine.maps().remove_node(&loro_key);
             return Err(grafeo_err);
         }
 
