@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -6,17 +7,21 @@ use lorosurgeon::reconcile::RootReconciler;
 use lorosurgeon::Reconcile;
 
 use crate::bridge::{apply_loro_op, BridgeMaps, SyncEngine};
+use crate::compression::wrapper::CompressedPayload;
 use crate::config::{CompressionType, SsotMode};
-use crate::constants::{ORIGIN_LORO_BRIDGE, ROOT_VERTICES};
+use crate::constants::{
+    ORIGIN_LORO_BRIDGE, ROOT_VERTICES, STORAGE_KEY_BASE_LORO, STORAGE_KEY_DELTA_PREFIX,
+};
 use crate::error::{GrafeoLoroError, Result};
 use crate::schema::VertexEntity;
 use crate::storage::StorageBackend;
 use crate::types::events::LoroOp;
 use crate::types::{GraphValue, LoroProperty, NodeId, PresencePayload};
+use crate::hydration::parallel_hydrate_grafeo;
 
 /// Top-level app facade.
 ///
-/// # Phase 2 Task 3 scope (P2T3-L2)
+/// # Phase 2 Task 3 scope (P2T3-L2); Phase 4 Task 4 wiring (P4-L2)
 ///
 /// Holds a single `Arc<SyncEngine>` handle plus a process-local
 /// `loro_key_counter`. [`SyncEngine`] is the SSOT for `LoroDoc`, `GrafeoDB`,
@@ -25,9 +30,14 @@ use crate::types::{GraphValue, LoroProperty, NodeId, PresencePayload};
 /// [`SyncEngine::maps`] accessor. No redundant `doc`/`db` Arc fields (DRY;
 /// anti-plenger rule #2).
 ///
-/// Production construction goes through [`GrafeoLoroAppBuilder::build`]
-/// (Phase 4 scope — still `unimplemented!()`). Tests + future embedding
-/// scenarios construct via [`Self::from_sync_engine`].
+/// Phase 4 adds three dispatch fields (P4-DEVIL M8): `ssot_mode`,
+/// `storage`, `compression`. `hydrate`/`checkpoint` match on `ssot_mode` and
+/// call `storage.load/save/list/delete` + `CompressedPayload::compress`/
+/// `decompress` with the configured `compression`. Production construction
+/// goes through [`GrafeoLoroAppBuilder::build`], which threads the builder
+/// slots into [`Self::from_sync_engine_with_config`]. Tests use the
+/// non-breaking [`Self::from_sync_engine`] shim (delegates with defaults —
+/// `SsotMode::Loro`, no storage, `CompressionType::default()`).
 ///
 /// All methods other than [`Self::create_vertex`] + [`Self::maps`] remain
 /// `unimplemented!()` (Phase 3-5 scope). See each method's doc-comment for
@@ -39,6 +49,18 @@ pub struct GrafeoLoroApp {
     /// Process-local counter for fresh `loro_key` generation. NOT durable
     /// across cold boot — see [`VertexBuilder::commit`] doc.
     pub(crate) loro_key_counter: Arc<AtomicU64>,
+    /// Builder-configured SSOT mode (P4-DEVIL M8). `hydrate`/`checkpoint`
+    /// dispatch on this field.
+    pub(crate) ssot_mode: SsotMode,
+    /// Storage backend for cold-snapshot persistence (P4-DEVIL M8). `None`
+    /// for tests that do not exercise `hydrate`/`checkpoint` (the
+    /// non-breaking [`Self::from_sync_engine`] constructor passes `None`).
+    /// Production `build()` rejects `None` with `Config("storage backend not set")`.
+    pub(crate) storage: Option<Arc<dyn StorageBackend>>,
+    /// Compression codec for cold snapshots (P4-DEVIL M8). Used by
+    /// `checkpoint` to wrap the snapshot bytes and by `hydrate` to decompress.
+    /// Defaults to `CompressionType::Zstd` per architecture §24.4.
+    pub(crate) compression: CompressionType,
 }
 
 /// Builder for [`GrafeoLoroApp`]. Fluent setters; call [`build`](Self::build)
@@ -50,12 +72,37 @@ pub struct GrafeoLoroAppBuilder {
     sync_compression: CompressionType,
     batch_interval_ms: u64,
     batch_max_size: usize,
+    /// Optional on-disk directory for `GrafeoDB` (P4-DEVIL Q5). `None` →
+    /// in-memory `GrafeoDB::new_in_memory()` (works for `SsotMode::Loro` +
+    /// tests). `Some(p)` → `GrafeoDB::with_config(Config::persistent(p))`
+    /// (NOT `GrafeoDB::open` — that is `#[cfg(feature = "wal")]`-gated per
+    /// P4-DEVIL B1). `build()` rejects `SsotMode::Grafeo + None` with
+    /// `Config("grafeo_dir required for SsotMode::Grafeo")`.
+    grafeo_dir: Option<PathBuf>,
+}
+
+impl Default for GrafeoLoroAppBuilder {
+    /// Defaults match architecture §24.4 (`SsotMode::Loro`,
+    /// `CompressionType::Zstd`, `CompressionType::Lz4` for sync, 100 ms /
+    /// 256 ops batcher). `storage` + `grafeo_dir` default to `None` —
+    /// `build()` rejects a missing `storage` for production use.
+    fn default() -> Self {
+        Self {
+            storage: None,
+            ssot_mode: SsotMode::default(),
+            compression: CompressionType::default(),
+            sync_compression: CompressionType::Lz4,
+            batch_interval_ms: crate::constants::DEFAULT_BATCH_MS,
+            batch_max_size: crate::constants::DEFAULT_BATCH_SIZE,
+            grafeo_dir: None,
+        }
+    }
 }
 
 impl GrafeoLoroApp {
     /// Entry point for the fluent builder.
     pub fn builder() -> GrafeoLoroAppBuilder {
-        unimplemented!("GrafeoLoroAppBuilder::build is Phase 4 scope")
+        GrafeoLoroAppBuilder::default()
     }
 
     /// Construct an app from a pre-built [`SyncEngine`]. Intended for tests
@@ -64,10 +111,43 @@ impl GrafeoLoroApp {
     /// [`Self::builder`] once Phase 4 lands. The `loro_key_counter` starts at
     /// 0 — cold-boot hydration (Phase 4) will re-seed it to
     /// `max(existing V/* keys) + 1`.
+    ///
+    /// Non-breaking shim (P4-DEVIL M8): delegates to
+    /// [`Self::from_sync_engine_with_config`] with `SsotMode::default()`
+    /// (= `Loro`), `storage = None`, `compression = CompressionType::default()`.
+    /// Callers that exercise `hydrate`/`checkpoint` MUST use the explicit
+    /// constructor (storage `None` will fail at first dispatch).
     pub fn from_sync_engine(sync_engine: Arc<SyncEngine>) -> Self {
+        Self::from_sync_engine_with_config(
+            sync_engine,
+            SsotMode::default(),
+            None,
+            CompressionType::default(),
+        )
+    }
+
+    /// Construct an app from a pre-built [`SyncEngine`] with explicit Phase 4
+    /// dispatch fields (P4-DEVIL M8). Production `build()` calls this with
+    /// the builder's `ssot_mode` + `storage` + `compression` slots. Tests
+    /// that exercise `hydrate`/`checkpoint` dispatch also use this directly.
+    ///
+    /// `storage` is `Option` so test scenarios that do not exercise the cold
+    /// snapshot path can pass `None` without constructing a mock backend
+    /// (matches the builder's `storage: Option<Arc<dyn StorageBackend>>` slot).
+    /// `hydrate`/`checkpoint` reject `None` at dispatch time with
+    /// `Config("storage backend not set")` (defensive — same as `build()`).
+    pub fn from_sync_engine_with_config(
+        sync_engine: Arc<SyncEngine>,
+        ssot_mode: SsotMode,
+        storage: Option<Arc<dyn StorageBackend>>,
+        compression: CompressionType,
+    ) -> Self {
         Self {
             sync_engine,
             loro_key_counter: Arc::new(AtomicU64::new(0)),
+            ssot_mode,
+            storage,
+            compression,
         }
     }
 
@@ -129,7 +209,9 @@ impl GrafeoLoroApp {
     ///
     /// # Phase 4 Task 3 scope (P4T3-L2)
     ///
-    /// Dispatches on the builder-configured `SsotMode`:
+    /// Dispatches on `self.ssot_mode` (P4-DEVIL M8 — the field is now on
+    /// `GrafeoLoroApp`, threaded through `from_sync_engine_with_config` by
+    /// `build()`).
     ///
     /// ## `SsotMode::Loro` (architecture §4 Step D — "History discarded to prevent storage bloat")
     ///
@@ -139,45 +221,66 @@ impl GrafeoLoroApp {
     ///    (verified at `loro-internal-1.13.6/src/encoding.rs:108`) — produces
     ///    a shallow snapshot: current state + partial history since frontiers
     ///    (history-trimmed, per architecture §4 Step D).
-    /// 3. `CompressedPayload::compress(&bytes, CompressionType::Zstd)`
-    ///    (verified at `src/compression/wrapper.rs:23`) — wrap under the same
-    ///    codec envelope that `hydrate` decompresses.
-    /// 4. `StorageBackend::save(
-    ///        format!("{graph_id}/{STORAGE_KEY_BASE_LORO}"),
-    ///        payload.raw_data)` — overwrite the base snapshot.
-    /// 5. `StorageBackend::list(
-    ///        format!("{graph_id}/{STORAGE_KEY_DELTA_PREFIX}"))` — enumerate
-    ///    existing delta keys.
+    /// 3. `CompressedPayload::compress(&bytes, self.compression)`
+    ///    (verified at `src/compression/wrapper.rs:23`) — wrap under the
+    ///    builder-configured codec. `// TODO(P4-L3): m2 wire format —
+    ///    `compress_to_wire(&[u8], CompressionType) -> Vec<u8>` helper for the
+    ///    1-byte codec tag + payload format (P4-DEVIL m2 — L3 scope).`
+    /// 4. `StorageBackend::save(format!("{graph_id}/{STORAGE_KEY_BASE_LORO}"),
+    ///    payload.raw_data)` — overwrite the base snapshot.
+    /// 5. `StorageBackend::list(format!("{graph_id}/{STORAGE_KEY_DELTA_PREFIX}"))`
+    ///    — enumerate existing delta keys.
     /// 6. For each delta key, `StorageBackend::delete(key)` — clear deltas
     ///    now folded into the base snapshot.
-    ///    `// TODO(P4-L2): atomic base-overwrite + delta-clear sequencing —
-    ///    partial-failure recovery contract flagged for P4-DEVIL Q3.`
     ///
-    /// ## `SsotMode::Grafeo` (architecture §4 Step D)
+    ///    # Atomicity (P4-DEVIL Q3)
+    ///
+    ///    Orphan-delta risk accepted (option (c)): if step 4 succeeds but
+    ///    step 6 fails partway, the next `hydrate` re-imports the orphan
+    ///    deltas harmlessly. Deduplication is automatic via Loro's
+    ///    `OpLog::trim_the_known_part_of_change`
+    ///    (`loro-internal-1.13.6/src/oplog.rs:350`) — NOT via
+    ///    `ImportStatus::pending` (P4-DEVIL M2: `pending` is missing-dep
+    ///    tracking, NOT dedup).
+    ///
+    /// ## `SsotMode::Grafeo` (architecture §4 Step D) — **deferred to Phase 5**
+    ///
+    /// P4-DEVIL Q2 decision (option (d)): the `SsotMode::Grafeo` arm is
+    /// `unimplemented!("P5: requires wal feature + ArcSwap grafeo_db field —
+    ///    see P4-DEVIL Q2/B1/B2/M3")` for Phase 4. The Phase 5 plan:
     ///
     /// 1. Flush the on-disk `GrafeoDB` to its directory — `GrafeoDB::close()`
-    ///    (verified at `grafeo-engine-0.5.42/src/database/mod.rs:2229`; `Drop`
-    ///    calls it but explicit invocation ensures the on-disk state is current
-    ///    before tarring).
-    ///    `// TODO(P4-L2/P4-DEVIL Q2): grafeo-engine's `checkpoint_to_file` is
-    ///    private (`grafeo-engine-0.5.42/src/database/mod.rs:2827`) and
-    ///    `GrafeoDB::backup_full` requires the `wal` feature which grafeo-0.5.42's
-    ///    default `embedded` feature set does NOT activate. The tar-of-directory
-    ///    path requires `close()` + reopen; flagged for Devil review.`
-    /// 2. Tar the `GrafeoDB` directory. `// TODO(P4-L3): the `tar` crate is
-    ///    NOT yet in Cargo.toml — L3 must add it.`
-    /// 3. `CompressedPayload::compress(&tar_bytes, CompressionType::Zstd)` —
-    ///    wrap the tarball under zstd.
-    /// 4. `StorageBackend::save(
-    ///        format!("{graph_id}/{STORAGE_KEY_GRAFEO_TAR_ZST}"),
-    ///        payload.raw_data)` — overwrite the tarball snapshot.
-    /// 5. Reopen the `GrafeoDB` via `GrafeoDB::open(same_dir)` (verified at
-    ///    `grafeo-engine-0.5.42/src/database/mod.rs:290`) if `close()` was
-    ///    used in step 1. The reopened handle is bound back into the
-    ///    `SyncEngine`'s `pub(crate) grafeo_db` field.
+    ///    takes `&self` (NOT `self` — verified at
+    ///    `grafeo-engine-0.5.42/src/database/mod.rs:2229`; P4-DEVIL M3).
+    ///    `close()` flushes the WAL + file_manager and sets `is_open = false`,
+    ///    but the `Arc<GrafeoDB>` handle remains in memory. Subsequent
+    ///    operations on the closed DB will fail. P5 should prefer
+    ///    `GrafeoDB::backup_full(&backup_dir)` (non-destructive — takes
+    ///    `&self`, does NOT close) when the `wal` feature is enabled.
+    /// 2. Tar the `GrafeoDB` directory (or `backup_full`'s output dir).
+    ///    `// TODO(P5): add `tar = "0.4"` to Cargo.toml.`
+    /// 3. `CompressedPayload::compress(&tar_bytes, CompressionType::Zstd)`.
+    /// 4. `StorageBackend::save(format!("{graph_id}/{STORAGE_KEY_GRAFEO_TAR_ZST}"),
+    ///    payload.raw_data)`.
+    /// 5. Reopen the `GrafeoDB` via `GrafeoDB::with_config(Config::persistent(
+    ///    same_dir))` (NOT `GrafeoDB::open` — that is `#[cfg(feature = "wal")]`-
+    ///    gated per P4-DEVIL B1; `with_config` at
+    ///    `grafeo-engine-0.5.42/src/database/mod.rs:346` is unconditionally
+    ///    compiled). Rebinding the new `Arc<GrafeoDB>` into
+    ///    `SyncEngine.grafeo_db` requires the B2 fix (`Arc<RwLock<Arc<GrafeoDB>>>`
+    ///    or `ArcSwap<GrafeoDB>` field type — P4-DEVIL B2).
+    ///
+    /// # Concurrency (P4-DEVIL Q4)
+    ///
+    /// Caller MUST serialize `checkpoint` with concurrent `hydrate` and any
+    /// in-flight vertex mutations. No internal lock; Phase 4 trusts the
+    /// orchestrator (validation test is sequential). A `RwLock<HashSet<graph_id>>`
+    /// may be added in Phase 5 if a multi-tenant use case requires it.
     ///
     /// # Errors
     ///
+    /// - `GrafeoLoroError::Config("storage backend not set")` if `self.storage`
+    ///   is `None` (defensive — `build()` also rejects this).
     /// - `GrafeoLoroError::Loro` for `LoroDoc::export` failures (Loro encode
     ///   errors routed via `#[from] loro::LoroError` at `src/error.rs:6`).
     /// - `GrafeoLoroError::Compression` for `CompressedPayload::compress`
@@ -185,21 +288,102 @@ impl GrafeoLoroApp {
     /// - `GrafeoLoroError::StorageIo` for `StorageBackend::save` / `list` /
     ///   `delete` failures (routed via `#[from] std::io::Error` at
     ///   `src/error.rs:12`).
-    /// - `GrafeoLoroError::Grafeo` for `GrafeoDB::close` / `GrafeoDB::open`
-    ///   failures (routed via `#[from] grafeo::Error` at `src/error.rs:9`).
     ///
     /// # Idempotency
     ///
     /// Calling `checkpoint(graph_id)` twice in succession is a no-op on the
-    /// second call IF the Loro doc / Grafeo DB has not been mutated between
-    /// calls — the storage key is overwritten unconditionally (last writer
-    /// wins). The caller is responsible for ensuring no concurrent `hydrate`
-    /// or vertex mutation is in flight during `checkpoint` (no cross-method
-    /// lock at L1; L2 may add a `RwLock` on the graph-id slot if the
-    /// orchestrator requires — flagged for P4-DEVIL Q4).
+    /// second call IF the Loro doc has not been mutated between calls — the
+    /// storage key is overwritten unconditionally (last writer wins).
     pub async fn checkpoint(&self, graph_id: &str) -> Result<()> {
-        let _ = graph_id;
-        unimplemented!("P4-L2 scope")
+        // Manual span (P4-DEVIL Q4 observability) — equivalent to
+        // `#[instrument(skip(self), fields(graph_id = %graph_id))]` but without
+        // enabling the `attributes` feature on `tracing` (anti-plenger #10 —
+        // fewest LOC, no Cargo.toml change).
+        let span = tracing::info_span!(
+            "checkpoint",
+            graph_id = %graph_id,
+            ssot_mode = ?self.ssot_mode
+        );
+        let _enter = span.enter();
+
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            GrafeoLoroError::Config("storage backend not set".into())
+        })?;
+
+        match self.ssot_mode {
+            SsotMode::Loro => {
+                // Step 1: oplog_frontiers for shallow snapshot.
+                let frontiers = {
+                    let doc = self.sync_engine.loro_doc.read();
+                    doc.oplog_frontiers()
+                };
+                tracing::debug!(?frontiers, "checkpoint: oplog_frontiers");
+
+                // Step 2: export shallow snapshot.
+                let snapshot_bytes = {
+                    let doc = self.sync_engine.loro_doc.read();
+                    doc.export(loro::ExportMode::shallow_snapshot(&frontiers))
+                        .map_err(|e| GrafeoLoroError::Loro(e.into()))?
+                };
+                tracing::debug!(
+                    bytes = snapshot_bytes.len(),
+                    "checkpoint: shallow snapshot exported"
+                );
+
+                // Step 3: compress under the configured codec.
+                // P4-DEVIL m2: wire format (1-byte codec tag + payload) is
+                // TODO(P4-L3) — for now write `payload.raw_data` directly.
+                let payload =
+                    CompressedPayload::compress(&snapshot_bytes, self.compression)?;
+
+                // Step 4: save base snapshot (overwrites any prior).
+                let base_key = format!("{graph_id}/{STORAGE_KEY_BASE_LORO}");
+                tracing::debug!(key = %base_key, "checkpoint: saving base snapshot");
+                storage.save(&base_key, payload.raw_data).await?;
+
+                // Step 5+6: list + delete delta keys.
+                //
+                // P4-DEVIL Q3: orphan-delta risk accepted — if step 6 fails
+                // partway, the next hydrate re-imports the orphan deltas
+                // harmlessly (dedup via `trim_the_known_part_of_change`, NOT
+                // `ImportStatus::pending` per P4-DEVIL M2).
+                //
+                // P4-DEVIL M1: Phase 4 has no delta-write path — the list is
+                // always empty. The loop runs zero times.
+                let delta_prefix = format!("{graph_id}/{STORAGE_KEY_DELTA_PREFIX}");
+                tracing::debug!(
+                    prefix = %delta_prefix,
+                    "checkpoint: listing delta keys for deletion"
+                );
+                let delta_keys = storage.list(&delta_prefix).await?;
+                // TODO(P4-L3): orphan-delta partial-failure recovery (Q3 — accept risk).
+                for k in &delta_keys {
+                    tracing::debug!(key = %k, "checkpoint: deleting delta");
+                    storage.delete(k).await?;
+                }
+
+                tracing::info!(
+                    delta_count = delta_keys.len(),
+                    "checkpoint: complete (Loro mode)"
+                );
+                Ok(())
+            }
+            SsotMode::Grafeo => {
+                // P4-DEVIL Q2/B1/B2/M3: deferred to Phase 5.
+                // B1: GrafeoDB::backup_full is `#[cfg(all(feature = "wal",
+                //     feature = "grafeo-file", feature = "lpg"))]`-gated.
+                // B2: SyncEngine.grafeo_db: Arc<GrafeoDB> cannot be rebound
+                //     after close+reopen.
+                // M3: GrafeoDB::close(&self) does NOT drop the Arc handle —
+                //     would leave SyncEngine with a closed handle.
+                // P5 needs: wal feature + tar crate + ArcSwap grafeo_db field
+                //           + non-destructive backup_full.
+                unimplemented!(
+                    "P5: SsotMode::Grafeo checkpoint — requires wal feature + \
+                     ArcSwap grafeo_db field — see P4-DEVIL Q2/B1/B2/M3"
+                )
+            }
+        }
     }
 
     /// Cold-boot hydration: download + restore graph state from the storage
@@ -207,70 +391,100 @@ impl GrafeoLoroApp {
     ///
     /// # Phase 4 Task 2 scope (P4T2-L2)
     ///
-    /// Dispatches on the builder-configured `SsotMode`:
+    /// Dispatches on `self.ssot_mode` (P4-DEVIL M8 — the field is now on
+    /// `GrafeoLoroApp`, threaded through `from_sync_engine_with_config` by
+    /// `build()`).
     ///
     /// ## `SsotMode::Loro` (architecture §4 Step A)
     ///
-    /// 1. `StorageBackend::load(
-    ///        format!("{graph_id}/{STORAGE_KEY_BASE_LORO}"))` — download the
-    ///    base snapshot (`LoroDoc::export(ExportMode::Snapshot)` bytes).
-    ///    `StorageIo(io::ErrorKind::NotFound)` is the "fresh graph" case —
-    ///    initialize an empty `LoroDoc` and skip ahead to step 5 (parallel
-    ///    hydrate over an empty doc is a no-op).
+    /// 1. `StorageBackend::load(format!("{graph_id}/{STORAGE_KEY_BASE_LORO}"))`
+    ///    — download the base snapshot (`LoroDoc::export(ExportMode::Snapshot)`
+    ///    bytes). `StorageIo(io::ErrorKind::NotFound)` is the "fresh graph"
+    ///    case — initialize an empty `LoroDoc` and skip ahead to step 5
+    ///    (parallel hydrate over an empty doc is a no-op).
     /// 2. `CompressedPayload::decompress` (verified at
-    ///    `src/compression/wrapper.rs:48`) — recover the raw Loro bytes from
-    ///    the P3T1 codec envelope (passthrough when `CompressionType::None`).
-    /// 3. `LoroDoc::import(&bytes)` (verified at `loro-1.13.6/src/lib.rs:710`)
-    ///    — surfaces `ImportStatus`; non-empty `pending` triggers a delta
-    ///    fetch loop (step 4). `// TODO(P4-L2): the Loro import doc at
-    ///    `loro-1.13.6/src/lib.rs:705-708` warns about partial imports —
-    ///    pending-dependency recovery is L2 scope.`
-    /// 4. `StorageBackend::list(
-    ///        format!("{graph_id}/{STORAGE_KEY_DELTA_PREFIX}"))` — enumerate
-    ///    delta keys; for each, `load` + `decompress` + `import`.
+    ///    `src/compression/wrapper.rs:48`) — recover the raw Loro bytes.
+    ///    `// TODO(P4-L3): m2 wire format — `decompress_from_wire(&[u8])`
+    ///    helper (P4-DEVIL m2 — L3 scope).`
+    /// 3. `LoroDoc::import_with(&bytes, ORIGIN_LORO_BRIDGE)` (verified at
+    ///    `loro-1.13.6/src/lib.rs:721` — P4-DEVIL M10 + n1: `import_with`
+    ///    tags the import for the B1 echo filter at
+    ///    `src/bridge/sync_engine.rs:234`, which skips events whose origin
+    ///    matches `ORIGIN_LORO_BRIDGE`. This is what makes the architecture
+    ///    §24.2 `build → hydrate` ordering safe — the subscriber is active
+    ///    when `hydrate` runs, but the import's events are filtered out and
+    ///    do not re-trigger `apply_loro_op` on the inbound batcher.) —
+    ///    surfaces `ImportStatus`. `status.pending.is_some()` (P4-DEVIL m3 —
+    ///    NOT "non-empty `pending`") means missing-dependency changes were
+    ///    deferred; for Phase 4 self-contained base snapshots this is always
+    ///    `None`. `pending` is NOT a dedup mechanism (P4-DEVIL M2 — dedup is
+    ///    automatic via `trim_the_known_part_of_change` at
+    ///    `loro-internal-1.13.6/src/oplog.rs:350`).
+    /// 4. `StorageBackend::list(format!("{graph_id}/{STORAGE_KEY_DELTA_PREFIX}"))`
+    ///    — enumerate delta keys; for each, `load` + `decompress` +
+    ///    `import_with(ORIGIN_LORO_BRIDGE)`.
+    ///
+    ///    # Phase 4 scope (P4-DEVIL M1)
+    ///
+    ///    No delta-WRITE path exists in Phase 4 — `checkpoint` writes only
+    ///    the base snapshot. The delta-listing returns `Ok(vec![])` and the
+    ///    import loop runs zero times. The delta constants
+    ///    (`STORAGE_KEY_DELTA_PREFIX` / `_SUFFIX`) are reserved for the
+    ///    Phase 5+ Loro sync wire-protocol path (architecture §4 Step C
+    ///    `doc.export(ExportMode::updates)`).
     /// 5. `parallel_hydrate_grafeo(&grafeo_db, &loro_doc, &bridge_maps)`
     ///    (verified at `src/hydration/parallel.rs:40`) — rebuilds Grafeo
-    ///    indexes from Loro state in rayon chunks; preconditions documented
-    ///    in its own doc-comment (cold `GrafeoDB` + cold `BridgeMaps` +
-    ///    subscriber NOT yet active — `src/hydration/parallel.rs:23-29`).
+    ///    indexes from Loro state in rayon chunks. Writes to Grafeo (NOT
+    ///    Loro) + uses `session_with_cdc(false)` — no echo through the Loro
+    ///    subscriber even when the subscriber is active (P4-DEVIL M10).
     /// 6. Re-seed `loro_key_counter` to `max(existing V/* keys) + 1` (per
-    ///    `from_sync_engine` doc-comment at `src/app.rs:65`).
+    ///    `from_sync_engine_with_config` doc-comment). `// TODO(P4-L3): scan
+    ///    LoroDoc V/* keys for max numeric suffix; `
+    ///    `self.loro_key_counter.fetch_max(max + 1, Ordering::Relaxed)`.`
     ///
-    /// ## `SsotMode::Grafeo` (architecture §4 Step A)
+    /// ## `SsotMode::Grafeo` (architecture §4 Step A) — **deferred to Phase 5**
     ///
-    /// 1. `StorageBackend::load(
-    ///        format!("{graph_id}/{STORAGE_KEY_GRAFEO_TAR_ZST}"))` — download
-    ///    the compressed tarball. `StorageIo(NotFound)` is the "fresh graph"
-    ///    case — initialize an empty `GrafeoDB` (in-memory or directory-backed
-    ///    at a caller-provided path; `// TODO(P4-L2): fresh-graph path` is
-    ///    flagged for P4-DEVIL Q5 — the builder does not yet expose a
-    ///    `grafeo_dir` setter).
+    /// P4-DEVIL Q2 decision (option (d)): the `SsotMode::Grafeo` arm is
+    /// `unimplemented!("P5: requires wal feature + ArcSwap grafeo_db field —
+    ///    see P4-DEVIL Q2/B1/B2")` for Phase 4. The Phase 5 plan:
+    ///
+    /// 1. `StorageBackend::load(format!("{graph_id}/{STORAGE_KEY_GRAFEO_TAR_ZST}"))`
+    ///    — download the compressed tarball. `NotFound` = fresh graph.
     /// 2. `zstd::stream::decode_all` (verified at
-    ///    `zstd-0.13.3/src/stream/functions.rs:8`) — decompress the tar.zst
-    ///    to a tar byte stream (same codec as `CompressedPayload::decompress`
-    ///    for `CompressionType::Zstd`).
-    /// 3. Extract the tar stream to a temporary directory. `// TODO(P4-L3):
-    ///    the `tar` crate is NOT yet in Cargo.toml — L3 adds the dep +
-    ///    extraction call.`
-    /// 4. `GrafeoDB::open(extracted_dir)` (verified at
-    ///    `grafeo-engine-0.5.42/src/database/mod.rs:290`) — attach to the
-    ///    restored on-disk DB.
-    /// 5. Rebuild the live `LoroDoc` from the restored Grafeo state by
-    ///    iterating the Grafeo vertex/edge tables and reconciling each into
-    ///    Loro via `<VertexEntity as Reconcile>::reconcile` /
-    ///    `<EdgeEntity as Reconcile>::reconcile` (Phase 2 derives).
-    ///    `// TODO(P4-L2): exact Grafeo→Loro reconciliation path — mirror of
-    ///    `parallel_hydrate_grafeo` in reverse. Flagged for P4-DEVIL Q6 — the
-    ///    spec is ambiguous on the Grafeo→Loro direction (architecture §4
-    ///    Step A only mentions Loro→Grafeo hydration).`
-    /// 6. Re-seed `loro_key_counter` as in Loro mode.
+    ///    `zstd-0.13.3/src/stream/functions.rs:8`) — decompress.
+    /// 3. Extract the tar stream to a temporary directory. `// TODO(P5): add
+    ///    `tar = "0.4"` to Cargo.toml.`
+    /// 4. `GrafeoDB::with_config(Config::persistent(extracted_dir))` (NOT
+    ///    `GrafeoDB::open` — that is `#[cfg(feature = "wal")]`-gated per
+    ///    P4-DEVIL B1) — attach to the restored on-disk DB. Rebinding the
+    ///    new `Arc<GrafeoDB>` into `SyncEngine.grafeo_db` requires the B2
+    ///    fix (`Arc<RwLock<Arc<GrafeoDB>>>` or `ArcSwap<GrafeoDB>`).
+    /// 5. Rebuild the live `LoroDoc` from the restored Grafeo state via
+    ///    `parallel_hydrate_loro` (P4-DEVIL Q6/M4 — L3 scope; mirror of
+    ///    `parallel_hydrate_grafeo` using `graph_store().node_ids()` +
+    ///    `entity.reconcile(RootReconciler::new(node_map))` per vertex).
+    ///
+    ///    # Echo-prevention precondition (P4-DEVIL M6)
+    ///
+    ///    The Grafeo→Loro reconciliation in step 5 triggers one Loro commit
+    ///    per vertex/edge (`entity.reconcile(...)` + `doc.commit()`). P5
+    ///    MUST wrap each commit with `doc.set_next_commit_origin(
+    ///    ORIGIN_LORO_BRIDGE)` BEFORE `doc.commit()` (same pattern as
+    ///    `VertexBuilder::commit` at `src/app.rs:734`). Otherwise the active
+    ///    subscriber translates each diff to `LoroOp::UpsertNode` and pushes
+    ///    to the batcher, which re-creates the vertex in Grafeo (duplicate).
+    ///    The B1 filter at `src/bridge/sync_engine.rs:234` skips events
+    ///    tagged with `ORIGIN_LORO_BRIDGE`, so the echo is suppressed.
+    ///
+    /// 6. Re-seed `loro_key_counter` to `max(node_ids) + 1`.
     ///
     /// # Preconditions
     ///
-    /// - Caller has NOT yet called `SyncEngine::init_loro_subscriber` /
-    ///   `spawn_all` (else `parallel_hydrate_grafeo` would re-fire on each
-    ///   hydrated vertex and produce duplicates — per its doc-comment at
-    ///   `src/hydration/parallel.rs:26`).
+    /// - For BOTH `SsotMode::Loro` AND `SsotMode::Grafeo` (P4-DEVIL M6):
+    ///   either the subscriber is inactive OR all hydrate-side Loro commits
+    ///   are tagged with `ORIGIN_LORO_BRIDGE` (M10) so the B1 filter skips
+    ///   them. `SsotMode::Loro` uses `import_with(ORIGIN_LORO_BRIDGE)`;
+    ///   `SsotMode::Grafeo` (P5) will use `set_next_commit_origin` per commit.
     /// - `GrafeoDB` is empty (cold) — `parallel_hydrate_grafeo` will create
     ///   duplicates otherwise (per its idempotency assumption at
     ///   `src/hydration/parallel.rs:39`).
@@ -278,20 +492,18 @@ impl GrafeoLoroApp {
     ///
     /// # Errors
     ///
+    /// - `GrafeoLoroError::Config("storage backend not set")` if `self.storage`
+    ///   is `None`.
     /// - `GrafeoLoroError::StorageIo` for backend I/O failures (except
     ///   `io::ErrorKind::NotFound` on the base/tarball key, which is the
     ///   "fresh graph" path).
     /// - `GrafeoLoroError::Compression` for `CompressedPayload::decompress` /
     ///   `zstd::stream::decode_all` failures.
-    /// - `GrafeoLoroError::Loro` for `LoroDoc::import` failures (Loro
-    ///   encode/decode errors routed via `#[from] loro::LoroError` at
-    ///   `src/error.rs:6`).
-    /// - `GrafeoLoroError::Grafeo` for `GrafeoDB::open` / per-chunk tx
-    ///   failures during `parallel_hydrate_grafeo` (routed via `#[from]
-    ///   grafeo::Error` at `src/error.rs:9`).
+    /// - `GrafeoLoroError::Loro` for `LoroDoc::import_with` failures.
+    /// - `GrafeoLoroError::Grafeo` for per-chunk tx failures during
+    ///   `parallel_hydrate_grafeo`.
     /// - `GrafeoLoroError::Hydrate` for `VertexEntity::hydrate_map` field-shape
-    ///   mismatches during `parallel_hydrate_grafeo` (routed via `#[from]
-    ///   lorosurgeon::error::HydrateError` at `src/error.rs:37`).
+    ///   mismatches during `parallel_hydrate_grafeo`.
     /// - `GrafeoLoroError::Bridge` for vertex missing from LoroMap / wrong
     ///   container type during `parallel_hydrate_grafeo`.
     ///
@@ -299,14 +511,146 @@ impl GrafeoLoroApp {
     ///
     /// Calling `hydrate(graph_id)` twice on a non-cold `GrafeoDB` /
     /// `BridgeMaps` produces duplicate vertices (per
-    /// `parallel_hydrate_grafeo`'s idempotency assumption at
-    /// `src/hydration/parallel.rs:39`). Caller responsibility: only call once
-    /// at cold boot. The orchestrator's `builder().build().await` +
-    /// `hydrate()` sequence (architecture §24.2 lines 1213-1223) is the
-    /// canonical pattern.
+    /// `parallel_hydrate_grafeo`'s idempotency assumption). Caller
+    /// responsibility: only call once at cold boot. The orchestrator's
+    /// `builder().build().await` + `hydrate()` sequence (architecture §24.2)
+    /// is the canonical pattern.
     pub async fn hydrate(&self, graph_id: &str) -> Result<()> {
-        let _ = graph_id;
-        unimplemented!("P4-L2 scope")
+        // Manual span (P4-DEVIL M6/M10 observability) — equivalent to
+        // `#[instrument(skip(self), fields(graph_id = %graph_id))]` but without
+        // enabling the `attributes` feature on `tracing` (anti-plenger #10 —
+        // fewest LOC, no Cargo.toml change).
+        let span = tracing::info_span!(
+            "hydrate",
+            graph_id = %graph_id,
+            ssot_mode = ?self.ssot_mode
+        );
+        let _enter = span.enter();
+
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            GrafeoLoroError::Config("storage backend not set".into())
+        })?;
+
+        match self.ssot_mode {
+            SsotMode::Loro => {
+                let base_key = format!("{graph_id}/{STORAGE_KEY_BASE_LORO}");
+
+                // Step 1: load base snapshot (NotFound = fresh graph).
+                tracing::debug!(key = %base_key, "hydrate: loading base snapshot");
+                let base_bytes = match storage.load(&base_key).await {
+                    Ok(b) => b,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        tracing::info!(
+                            key = %base_key,
+                            "hydrate: base snapshot not found — fresh graph"
+                        );
+                        Vec::new()
+                    }
+                    Err(e) => return Err(GrafeoLoroError::from(e)),
+                };
+
+                if !base_bytes.is_empty() {
+                    // Step 2: decompress the base snapshot.
+                    // P4-DEVIL m2: wire format (1-byte codec tag + payload) is
+                    // TODO(P4-L3) — for now construct `CompressedPayload`
+                    // in-memory assuming codec matches `self.compression`.
+                    let payload = CompressedPayload {
+                        compression: self.compression,
+                        raw_data: base_bytes,
+                    };
+                    let loro_bytes = payload.decompress()?;
+
+                    // Step 3: import into LoroDoc with ORIGIN_LORO_BRIDGE tag
+                    // so the B1 filter at sync_engine.rs:234 skips the echo
+                    // (P4-DEVIL M10).
+                    tracing::debug!(
+                        bytes = loro_bytes.len(),
+                        "hydrate: importing base into LoroDoc"
+                    );
+                    {
+                        let doc = self.sync_engine.loro_doc.write();
+                        let status = doc.import_with(&loro_bytes, ORIGIN_LORO_BRIDGE)?;
+                        // P4-DEVIL M2/m3: pending.is_some() = missing-dep
+                        // tracking, NOT dedup. Dedup is automatic via
+                        // trim_the_known_part_of_change (oplog.rs:350).
+                        if status.pending.is_some() {
+                            tracing::warn!(
+                                ?status.pending,
+                                "hydrate: ImportStatus.pending.is_some() — \
+                                 missing dependencies (Phase 4 self-contained \
+                                 snapshots should always be None)"
+                            );
+                            // TODO(P4-L3): fetch missing ranges via
+                            // doc.export(ExportMode::updates(&oplog_vv()))
+                            // and re-import — Phase 5+ Loro sync wire scope.
+                        }
+                    }
+
+                    // Step 4: enumerate + import delta keys.
+                    //
+                    // P4-DEVIL M1: Phase 4 has no delta-write path — the list
+                    // is always empty. The loop runs zero times.
+                    let delta_prefix = format!("{graph_id}/{STORAGE_KEY_DELTA_PREFIX}");
+                    tracing::debug!(
+                        prefix = %delta_prefix,
+                        "hydrate: listing delta keys"
+                    );
+                    let delta_keys = storage.list(&delta_prefix).await?;
+                    // TODO(P4-L3): delta-import loop body — load + decompress +
+                    // import_with(ORIGIN_LORO_BRIDGE). Phase 4 scope: no-op (M1).
+                    for k in &delta_keys {
+                        let _ = k;
+                        tracing::debug!(key = %k, "hydrate: TODO(P4-L3) import delta");
+                    }
+                    tracing::debug!(
+                        delta_count = delta_keys.len(),
+                        "hydrate: delta enumeration complete"
+                    );
+                }
+
+                // Step 5: parallel_hydrate_grafeo from Loro state.
+                //
+                // Precondition (src/hydration/parallel.rs:23-29): subscriber
+                // NOT yet active. P4-DEVIL M10: hydrate runs AFTER build() →
+                // spawn_all, so subscriber IS active. `parallel_hydrate_grafeo`
+                // writes to Grafeo (not Loro) + uses `session_with_cdc(false)`
+                // — no echo through the Loro subscriber. The `LoroDoc::import_with`
+                // above is the only Loro write and it is tagged with
+                // ORIGIN_LORO_BRIDGE so the B1 filter skips it.
+                tracing::info!("hydrate: parallel_hydrate_grafeo (Loro → Grafeo)");
+                {
+                    let doc = self.sync_engine.loro_doc.read();
+                    parallel_hydrate_grafeo(
+                        &self.sync_engine.grafeo_db,
+                        &doc,
+                        self.sync_engine.maps(),
+                    )?;
+                }
+
+                // Step 6: re-seed loro_key_counter to max(V/* keys) + 1.
+                // TODO(P4-L3): scan LoroDoc V/* keys for max numeric suffix
+                // (format `V/<n>` → parse `n` → max). Then call
+                // `self.loro_key_counter.fetch_max(max + 1, Ordering::Relaxed)`.
+                // L2 wires the call site; L3 fills the algorithm.
+                tracing::info!("hydrate: complete (Loro mode)");
+                Ok(())
+            }
+            SsotMode::Grafeo => {
+                // P4-DEVIL Q2/B1/B2: deferred to Phase 5.
+                // B1: GrafeoDB::open is #[cfg(feature = "wal")]-gated.
+                // B2: SyncEngine.grafeo_db: Arc<GrafeoDB> cannot be rebound
+                //     after restore.
+                // M6: P5 needs `set_next_commit_origin(ORIGIN_LORO_BRIDGE)`
+                //     before each `doc.commit()` in `parallel_hydrate_loro`.
+                // Q6/M4: P5 needs `parallel_hydrate_loro` (mirror of
+                //     `parallel_hydrate_grafeo` using `graph_store().node_ids()`
+                //     + `entity.reconcile(RootReconciler::new(node_map))`).
+                unimplemented!(
+                    "P5: SsotMode::Grafeo hydrate — requires wal feature + \
+                     ArcSwap grafeo_db field — see P4-DEVIL Q2/B1/B2"
+                )
+            }
+        }
     }
 
     /// Broadcast ephemeral presence over the WebSocket channel.
@@ -338,9 +682,9 @@ impl GrafeoLoroAppBuilder {
     ///   accumulation; anti-plenger #9).
     /// - No validation here — `build()` rejects a missing `storage` with
     ///   `GrafeoLoroError::Config("storage backend not set")`.
-    pub fn storage(self, storage: Arc<dyn StorageBackend>) -> Self {
-        let _ = storage;
-        unimplemented!("P4-L2 scope")
+    pub fn storage(mut self, storage: Arc<dyn StorageBackend>) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     /// Select Loro or Grafeo as the source of truth.
@@ -357,9 +701,9 @@ impl GrafeoLoroAppBuilder {
     ///
     /// - Consumes `self`, returns `Self` with `self.ssot_mode = mode`.
     /// - Idempotent over the slot.
-    pub fn ssot_mode(self, mode: SsotMode) -> Self {
-        let _ = mode;
-        unimplemented!("P4-L2 scope")
+    pub fn ssot_mode(mut self, mode: SsotMode) -> Self {
+        self.ssot_mode = mode;
+        self
     }
 
     /// Compression strategy for cold snapshots.
@@ -378,9 +722,9 @@ impl GrafeoLoroAppBuilder {
     ///
     /// - Consumes `self`, returns `Self` with `self.compression = comp`.
     /// - Idempotent over the slot.
-    pub fn compression(self, comp: CompressionType) -> Self {
-        let _ = comp;
-        unimplemented!("P4-L2 scope")
+    pub fn compression(mut self, comp: CompressionType) -> Self {
+        self.compression = comp;
+        self
     }
 
     /// Compression strategy for hot sync packets.
@@ -398,9 +742,9 @@ impl GrafeoLoroAppBuilder {
     ///
     /// - Consumes `self`, returns `Self` with `self.sync_compression = comp`.
     /// - Idempotent over the slot.
-    pub fn sync_compression(self, comp: CompressionType) -> Self {
-        let _ = comp;
-        unimplemented!("P4-L2 scope")
+    pub fn sync_compression(mut self, comp: CompressionType) -> Self {
+        self.sync_compression = comp;
+        self
     }
 
     /// Batcher flush interval in milliseconds.
@@ -420,9 +764,9 @@ impl GrafeoLoroAppBuilder {
     ///
     /// - Consumes `self`, returns `Self` with `self.batch_interval_ms = ms`.
     /// - Idempotent over the slot.
-    pub fn batch_interval_ms(self, ms: u64) -> Self {
-        let _ = ms;
-        unimplemented!("P4-L2 scope")
+    pub fn batch_interval_ms(mut self, ms: u64) -> Self {
+        self.batch_interval_ms = ms;
+        self
     }
 
     /// Batcher max ops per flush.
@@ -438,52 +782,80 @@ impl GrafeoLoroAppBuilder {
     ///
     /// - Consumes `self`, returns `Self` with `self.batch_max_size = size`.
     /// - Idempotent over the slot.
-    pub fn batch_max_size(self, size: usize) -> Self {
-        let _ = size;
-        unimplemented!("P4-L2 scope")
+    pub fn batch_max_size(mut self, size: usize) -> Self {
+        self.batch_max_size = size;
+        self
+    }
+
+    /// Set the on-disk directory for `GrafeoDB` (P4-DEVIL Q5).
+    ///
+    /// `None` (default) → `GrafeoDB::new_in_memory()` (works for
+    /// `SsotMode::Loro` + tests). `Some(p)` →
+    /// `GrafeoDB::with_config(Config::persistent(p))` (NOT `GrafeoDB::open`
+    /// — that is `#[cfg(feature = "wal")]`-gated per P4-DEVIL B1).
+    /// `build()` rejects `SsotMode::Grafeo + None` with
+    /// `Config("grafeo_dir required for SsotMode::Grafeo")`.
+    ///
+    /// Uses `impl Into<PathBuf>` so callers can pass `&str` / `&Path` /
+    /// `PathBuf` ergonomically (P4-DEVIL Q5 L3 hint).
+    pub fn grafeo_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.grafeo_dir = Some(path.into());
+        self
     }
 
     /// Validate config and spawn the runtime.
     ///
     /// # Phase 4 Task 4 scope (P4T4-L2)
     ///
-    /// 1. **Validate config** — reject `storage == None` with
-    ///    `GrafeoLoroError::Config("storage backend not set")`. The other
-    ///    slots have `Default` impls, so no further validation is required.
-    ///    `// TODO(P4-L2): validate `batch_interval_ms > 0` and `batch_max_size
-    ///    > 0`? Currently `Default` (100 / 256) is always sane — YAGNI until
-    ///    a real zero-input failure mode surfaces. Flagged for P4-DEVIL Q8.`
-    /// 2. **Init `LoroDoc`** — `LoroDoc::new()` (verified at
-    ///    `loro-1.13.6/src/lib.rs:137`) wrapped in `Arc<RwLock<LoroDoc>>`
-    ///    per `SyncEngine::new`'s signature (`src/bridge/sync_engine.rs:148`).
-    /// 3. **Init `GrafeoDB`** — `GrafeoDB::new_in_memory()` (verified at
-    ///    `grafeo-engine-0.5.42/src/database/mod.rs:267`) for tests;
-    ///    `GrafeoDB::open(path)` (verified at
-    ///    `grafeo-engine-0.5.42/src/database/mod.rs:290`) for production.
-    ///    `// TODO(P4-L2/P4-DEVIL Q5): the builder does NOT yet expose a
-    ///    `grafeo_dir` setter — `GrafeoSSOT` mode + production `GrafeoDB::open`
-    ///    both require it. Flagged for Devil.`
-    /// 4. **Init `SyncEngine`** — `SyncEngine::new(grafeo_db, loro_doc)`
-    ///    (verified at `src/bridge/sync_engine.rs:148`) returns the engine +
-    ///    the two channel receivers.
-    /// 5. **Init `MutationBatcher`** — owned by `SyncEngine::new` (no separate
-    ///    init step; `src/bridge/sync_engine.rs:161-168`).
-    /// 6. **Spawn tokio tasks** — `Arc::new(engine).clone().spawn_all(
+    /// 1. **Validate config** (P4-DEVIL Q5/Q8) — reject:
+    ///    - `storage == None` → `Config("storage backend not set")`.
+    ///    - `batch_interval_ms == 0` → `Config("batch_interval_ms must be > 0")`
+    ///      (`Duration::from_millis(0)` would degenerate the batcher ticker
+    ///      — P4-DEVIL Q8 anti-plenger #14 "never simplify the basics").
+    ///    - `batch_max_size == 0` → `Config("batch_max_size must be > 0")`
+    ///      (`if b.len() < 0` is always false → degenerate no-batching).
+    ///    - `SsotMode::Grafeo` + `grafeo_dir == None` →
+    ///      `Config("grafeo_dir required for SsotMode::Grafeo")` (P4-DEVIL Q5).
+    /// 2. **Init `GrafeoDB`** (P4-DEVIL Q5) — dispatch on `grafeo_dir`:
+    ///    - `Some(p)` → `GrafeoDB::with_config(Config::persistent(p))`
+    ///      (NOT `GrafeoDB::open` — that is `#[cfg(feature = "wal")]`-gated
+    ///      per P4-DEVIL B1; `with_config` is unconditionally compiled at
+    ///      `grafeo-engine-0.5.42/src/database/mod.rs:346`).
+    ///    - `None` → `GrafeoDB::new_in_memory()`
+    ///      (`grafeo-engine-0.5.42/src/database/mod.rs:267`).
+    /// 3. **Init `LoroDoc`** — `LoroDoc::new()` (`loro-1.13.6/src/lib.rs:137`)
+    ///    wrapped in `Arc<RwLock<LoroDoc>>` per `SyncEngine::new`'s signature.
+    /// 4. **Init `SyncEngine`** (P4-DEVIL Q7) —
+    ///    `SyncEngine::with_batch_config(grafeo_db, loro_doc, batch_max_size,
+    ///    batch_interval_ms)` (verified at
+    ///    `src/bridge/sync_engine.rs:170`) returns the engine + the two
+    ///    channel receivers. The `MutationBatcher` is owned by
+    ///    `SyncEngine::new_inner` (no separate init step).
+    /// 5. **Spawn tokio tasks** — `Arc::new(engine).clone().spawn_all(
     ///    inbound_rx, outbound_rx).await` (verified at
-    ///    `src/bridge/sync_engine.rs:403`) — spawns the Loro subscriber +
-    ///    inbound worker + outbound worker + CDC poller. Returns the three
+    ///    `src/bridge/sync_engine.rs:403`) — spawns the Loro subscriber
+    ///    (`init_loro_subscriber` is called inside `spawn_all`) + inbound
+    ///    worker + outbound worker + CDC poller. Returns the three
     ///    `JoinHandle`s; the caller (orchestrator) is responsible for
     ///    awaiting them on shutdown.
-    /// 7. **Wrap into `GrafeoLoroApp`** — `GrafeoLoroApp::from_sync_engine(
-    ///    Arc::new(engine))` (verified at `src/app.rs:67`).
+    /// 6. **Wrap into `GrafeoLoroApp`** —
+    ///    `GrafeoLoroApp::from_sync_engine_with_config(Arc::new(engine),
+    ///    ssot_mode, Some(storage), compression)` (P4-DEVIL M8).
+    ///
+    /// # Concurrency (P4-DEVIL M10)
+    ///
+    /// `build()` activates the Loro subscriber inside `spawn_all` (step 5).
+    /// `hydrate()` called AFTER `build()` therefore runs with the subscriber
+    /// active. This is safe because `hydrate`'s `LoroDoc::import_with` uses
+    /// `ORIGIN_LORO_BRIDGE` (P4-DEVIL M10) which the B1 filter at
+    /// `src/bridge/sync_engine.rs:234` skips — no echo. `parallel_hydrate_grafeo`
+    /// writes to Grafeo (not Loro) and uses `session_with_cdc(false)` — no
+    /// outbound echo. The subscriber active window is therefore safe.
     ///
     /// # Errors
     ///
-    /// - `GrafeoLoroError::Config("storage backend not set")` if `storage`
-    ///   is `None`.
-    /// - `GrafeoLoroError::Grafeo` if `GrafeoDB::open(path)` fails.
-    /// - `GrafeoLoroError::Loro` if `LoroDoc::new()` fails (theoretical —
-    ///   `LoroDoc::new` is infallible per `loro-1.13.6/src/lib.rs:137`).
+    /// - `GrafeoLoroError::Config` for the four validation failures above.
+    /// - `GrafeoLoroError::Grafeo` if `GrafeoDB::with_config(...)` fails.
     ///
     /// # Idempotency
     ///
@@ -492,7 +864,66 @@ impl GrafeoLoroAppBuilder {
     /// `Arc<SyncEngine>` exclusively; orchestrator may `Arc::clone` for child
     /// tasks but cannot `build()` twice.
     pub async fn build(self) -> Result<GrafeoLoroApp> {
-        unimplemented!("P4-L2 scope")
+        // 1. Validate config (P4-DEVIL Q5/Q8).
+        if self.batch_interval_ms == 0 {
+            return Err(GrafeoLoroError::Config(
+                "batch_interval_ms must be > 0".into(),
+            ));
+        }
+        if self.batch_max_size == 0 {
+            return Err(GrafeoLoroError::Config(
+                "batch_max_size must be > 0".into(),
+            ));
+        }
+        let storage = self.storage.ok_or_else(|| {
+            GrafeoLoroError::Config("storage backend not set".into())
+        })?;
+        if matches!(self.ssot_mode, SsotMode::Grafeo) && self.grafeo_dir.is_none() {
+            return Err(GrafeoLoroError::Config(
+                "grafeo_dir required for SsotMode::Grafeo".into(),
+            ));
+        }
+
+        // 2. Init GrafeoDB (P4-DEVIL Q5 — NOT `GrafeoDB::open` (wal-gated)).
+        let grafeo_db: Arc<grafeo::GrafeoDB> = match self.grafeo_dir {
+            Some(p) => Arc::new(grafeo::GrafeoDB::with_config(
+                grafeo::Config::persistent(p),
+            )?),
+            None => Arc::new(grafeo::GrafeoDB::new_in_memory()),
+        };
+
+        // 3. Init LoroDoc.
+        let loro_doc = Arc::new(parking_lot::RwLock::new(loro::LoroDoc::new()));
+
+        // 4. Init SyncEngine (P4-DEVIL Q7 — with_batch_config threads builder
+        //    batch params into the MutationBatcher).
+        let (engine, inbound_rx, outbound_rx) = SyncEngine::with_batch_config(
+            grafeo_db,
+            loro_doc,
+            self.batch_max_size,
+            self.batch_interval_ms,
+        );
+        let engine = Arc::new(engine);
+
+        // 5. Spawn tokio tasks (init_loro_subscriber is called inside
+        //    spawn_all — subscriber is active when build() returns; hydrate()
+        //    handles this via ORIGIN_LORO_BRIDGE per P4-DEVIL M10).
+        let _join_handles = engine.clone().spawn_all(inbound_rx, outbound_rx).await;
+
+        tracing::info!(
+            ssot_mode = ?self.ssot_mode,
+            compression = ?self.compression,
+            "GrafeoLoroAppBuilder::build: runtime spawned"
+        );
+
+        // 6. Wrap into GrafeoLoroApp (P4-DEVIL M8 — from_sync_engine_with_config
+        //    threads ssot_mode + storage + compression into the app struct).
+        Ok(GrafeoLoroApp::from_sync_engine_with_config(
+            engine,
+            self.ssot_mode,
+            Some(storage),
+            self.compression,
+        ))
     }
 }
 

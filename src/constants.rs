@@ -84,8 +84,18 @@ pub const EPOCH_RETENTION: u64 = 10_000;
 /// Contents: bytes from `LoroDoc::export(ExportMode::Snapshot)` (full state +
 /// history) on `checkpoint`, optionally wrapped via
 /// `CompressedPayload::compress(&bytes, CompressionType::Zstd)` (P3T1-L3 codec
-/// envelope). On `hydrate`, decompressed + `LoroDoc::import(&bytes)` (verified
-/// at `loro-1.13.6/src/lib.rs:710`).
+/// envelope). On `hydrate`, decompressed + `LoroDoc::import_with(&bytes,
+/// ORIGIN_LORO_BRIDGE)` (verified at `loro-1.13.6/src/lib.rs:721` — P4-DEVIL
+/// n1 + M10: `import_with` tags the import for the B1 echo filter at
+/// `src/bridge/sync_engine.rs:234`, which skips events whose origin matches
+/// `ORIGIN_LORO_BRIDGE`. The untagged `LoroDoc::import` at `:710` is NOT
+/// used — it would re-fire the subscriber on cold-boot import).
+///
+/// `// TODO(P4-L3)`: P4-DEVIL m2 wire format — 1-byte codec tag (0=None, 1=Lz4,
+/// 2=Zstd — matches `CompressionType` discriminant order) + N bytes payload.
+/// L3 adds `compress_to_wire` / `decompress_from_wire` helpers in
+/// `src/compression/wrapper.rs`; Phase 4 L2 writes `payload.raw_data` directly
+/// assuming codec matches `self.compression` (single-codec deployment).
 ///
 /// `StorageBackend::load` returning `io::ErrorKind::NotFound` on this key is
 /// the "fresh graph" cold-boot path — `hydrate` initializes an empty `LoroDoc`
@@ -103,12 +113,12 @@ pub const STORAGE_KEY_BASE_LORO: &str = "base.loro";
 /// `loro-internal-1.13.6/src/encoding.rs:80`), optionally compressed via
 /// `CompressedPayload::compress`.
 ///
-/// The `{epoch}` slot in the key is the grafeo-side `EpochId` at the time the
-/// delta was produced (architecture §9 — epoch side-channel is the SSOT for
-/// commit ordering across the Loro↔Grafeo bridge). `P4-DEVIL Q1`: the exact
-/// epoch-source for the key (`bridge_origin_epochs` set vs. grafeo's
-/// `transaction_manager.current_epoch()`) is ambiguous in the spec — flagged
-/// for resolution before P4-L2 wiring.
+/// The `{epoch}` slot is reserved for the grafeo-side `EpochId`
+/// (`GrafeoDB::current_epoch().as_u64()` — verified PUBLIC at
+/// `grafeo-engine-0.5.42/src/database/crud.rs:258`). `P4-DEVIL Q1` RESOLVED:
+/// deferred — Phase 4 has NO delta-write path (P4-DEVIL M1); the slot is
+/// unused in Phase 4 (`hydrate`'s delta-listing returns `Ok(vec![])` and the
+/// import loop runs zero times). Phase 5+ Loro sync wire will populate it.
 pub const STORAGE_KEY_DELTA_PREFIX: &str = "delta-";
 
 /// Suffix of the Loro-SSOT mode delta storage keys — see
@@ -123,19 +133,20 @@ pub const STORAGE_KEY_DELTA_SUFFIX: &str = ".loro";
 /// zstd-compressed via `CompressedPayload::compress(&tar_bytes,
 /// CompressionType::Zstd)`. On `hydrate`, `zstd::stream::decode_all`
 /// (verified at `zstd-0.13.3/src/stream/functions.rs:8`) + tar extraction +
-/// `GrafeoDB::open(extracted_dir)` (verified at
-/// `grafeo-engine-0.5.42/src/database/mod.rs:290`).
+/// `GrafeoDB::with_config(Config::persistent(extracted_dir))` (verified at
+/// `grafeo-engine-0.5.42/src/database/mod.rs:346` — NOT `GrafeoDB::open`
+/// which is `#[cfg(feature = "wal")]`-gated at `:289`; P4-DEVIL B1).
 ///
 /// `StorageBackend::load` returning `io::ErrorKind::NotFound` on this key is
 /// the "fresh graph" cold-boot path — `hydrate` initializes an empty
 /// `GrafeoDB` (P4T2-L2 contract).
 ///
-/// `P4-DEVIL Q2`: the `tar` crate is NOT yet in `Cargo.toml` — L3 must add
-/// it. `GrafeoDB::backup_full` / `restore_to_epoch` (at
+/// `P4-DEVIL Q2/B1/B2` RESOLVED (option (d)): `SsotMode::Grafeo` is deferred
+/// to Phase 5. The `tar` crate is NOT in `Cargo.toml` (P4-DEVIL M5 — Phase 5
+/// adds `tar = "0.4"`). `GrafeoDB::backup_full` / `restore_to_epoch` (at
 /// `grafeo-engine-0.5.42/src/database/mod.rs:2743` / `:2813`) are gated
 /// behind the `wal` feature which is NOT in grafeo-0.5.42's default
-/// `embedded` feature set (grafeo declares
-/// `grafeo-engine = { default-features = false }`); the tar-of-directory
-/// strategy is therefore the only Grafeo-SSOT path available without a
-/// feature-flag bump. Flagged for P4-DEVIL.
+/// `embedded` feature set. P5 plan: enable `wal` + add `tar` + refactor
+/// `SyncEngine.grafeo_db` to `ArcSwap<GrafeoDB>` (B2) + use non-destructive
+/// `backup_full(&backup_dir)` (P4-DEVIL M3).
 pub const STORAGE_KEY_GRAFEO_TAR_ZST: &str = "snapshot.tar.zst";

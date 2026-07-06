@@ -145,9 +145,45 @@ impl SyncEngine {
     /// in the engine). The receivers are passed back into
     /// [`Self::spawn_inbound_worker`] / [`Self::spawn_outbound_worker`] (or
     /// [`Self::spawn_all`]) so each worker owns its receiver exclusively.
+    ///
+    /// Uses [`DEFAULT_BATCH_SIZE`] + [`DEFAULT_BATCH_MS`] for the internal
+    /// `MutationBatcher`. Callers needing explicit batcher tuning (Phase 4
+    /// Task 4 — `GrafeoLoroAppBuilder::build`) use
+    /// [`Self::with_batch_config`] instead (P4-DEVIL Q7).
     pub fn new(
         grafeo_db: Arc<GrafeoDB>,
         loro_doc: Arc<RwLock<LoroDoc>>,
+    ) -> (Self, mpsc::Receiver<InboundMsg>, mpsc::Receiver<OutboundMsg>) {
+        Self::new_inner(
+            grafeo_db,
+            loro_doc,
+            crate::constants::DEFAULT_BATCH_SIZE,
+            crate::constants::DEFAULT_BATCH_MS,
+        )
+    }
+
+    /// Construct an engine with explicit batcher tuning. Like [`Self::new`]
+    /// but threads the builder's `batch_interval_ms` / `batch_max_size` into
+    /// [`MutationBatcher::new`] instead of hardcoding [`DEFAULT_BATCH_SIZE`] /
+    /// [`DEFAULT_BATCH_MS`]. Used by `GrafeoLoroAppBuilder::build` (Phase 4
+    /// Task 4 — P4-DEVIL Q7). Tests use [`Self::new`] for defaults.
+    pub fn with_batch_config(
+        grafeo_db: Arc<GrafeoDB>,
+        loro_doc: Arc<RwLock<LoroDoc>>,
+        batch_size: usize,
+        batch_ms: u64,
+    ) -> (Self, mpsc::Receiver<InboundMsg>, mpsc::Receiver<OutboundMsg>) {
+        Self::new_inner(grafeo_db, loro_doc, batch_size, batch_ms)
+    }
+
+    /// Shared constructor body (DRY — anti-plenger #2). Parameterized on the
+    /// batcher's `batch_size` + `batch_ms` so both [`Self::new`] (defaults)
+    /// and [`Self::with_batch_config`] (explicit) delegate here.
+    fn new_inner(
+        grafeo_db: Arc<GrafeoDB>,
+        loro_doc: Arc<RwLock<LoroDoc>>,
+        batch_size: usize,
+        batch_ms: u64,
     ) -> (Self, mpsc::Receiver<InboundMsg>, mpsc::Receiver<OutboundMsg>) {
         let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
@@ -160,8 +196,8 @@ impl SyncEngine {
 
         let batcher = Arc::new(MutationBatcher::new(
             grafeo_db.clone(),
-            crate::constants::DEFAULT_BATCH_SIZE,
-            crate::constants::DEFAULT_BATCH_MS,
+            batch_size,
+            batch_ms,
             bridge_origin_epochs.clone(),
             maps.clone(),
             shutdown_tx.clone(),

@@ -1302,6 +1302,82 @@ Implement this trait for S3, GCS, Azure Blob, IPFS, or any custom backend. The a
 | `max_staleness_ms` | `5000` | Health check threshold for sync freshness |
 | `enable_presence` | `true` | Enable ephemeral WebSocket presence |
 | `presence_heartbeat_ms` | `30000` | Presence heartbeat interval |
+| `grafeo_dir` | `None` (in-memory) | Path to on-disk GrafeoDB directory (required for `SsotMode::Grafeo` and production persistence). `None` → in-memory `GrafeoDB::new_in_memory()`. Added in Phase 4 (P4-DEVIL Q5/M9). |
+
+---
+
+## 25. Phase 4 Deviations
+
+This section records deviations from the original Phase 4 plan documented in
+`docs/implementation-plan.md`. Phase 4 ships a working `SsotMode::Loro` cold
+boot → mutate → checkpoint → cold boot cycle. `SsotMode::Grafeo` is deferred
+to Phase 5.
+
+### 25.1 `SsotMode::Grafeo` cold-start path deferred to Phase 5 (P4-DEVIL M7)
+
+Architecture §4 Step A only specifies the Loro direction (Loro → Grafeo via
+`parallel_hydrate_grafeo`). The Grafeo direction (download tar.zst → extract
+→ restore DB → rebuild LoroDoc from Grafeo state via `parallel_hydrate_loro`)
+is unspecified in §4. P4-DEVIL M7 flagged this as a doc gap; P4-DEVIL Q2
+decision (option (d)) recommends deferring `SsotMode::Grafeo` to Phase 5
+based on three combined costs:
+
+1. **B1**: `GrafeoDB::open(path)` is `#[cfg(feature = "wal")]`-gated
+   (`grafeo-engine-0.5.42/src/database/mod.rs:289`). Phase 4's
+   `Cargo.toml` uses `grafeo = "0.5"` with default features only
+   (`embedded` does NOT activate `wal`). The literal `GrafeoDB::open(path)`
+   call would not compile.
+2. **B2**: `SyncEngine.grafeo_db: Arc<GrafeoDB>` is immutable
+   (`src/bridge/sync_engine.rs:97`). After `SsotMode::Grafeo` hydrate
+   restores an on-disk DB, there is no way to rebind the new `Arc<GrafeoDB>`
+   into the existing `SyncEngine`. Phase 5 must refactor the field type to
+   `Arc<RwLock<Arc<GrafeoDB>>>` or `arc_swap::ArcSwap<GrafeoDB>` (~30 call
+   sites).
+3. **M3**: `GrafeoDB::close(&self)` takes `&self` (NOT `self`) — it flushes
+   the WAL + file_manager and sets `is_open = false`, but the `Arc<GrafeoDB>`
+   handle remains in memory. The tar-of-directory + `close()` + reopen path
+   is therefore broken without B2.
+
+Phase 4 implementation: `hydrate`/`checkpoint` `SsotMode::Grafeo` arms
+return `unimplemented!("P5: requires wal feature + ArcSwap grafeo_db field
+— see P4-DEVIL Q2/B1/B2")`. The validation test runs in `SsotMode::Loro`
+only.
+
+Phase 5 plan (when S3 backend from Task 1 lands):
+
+1. `Cargo.toml`: `grafeo = { version = "0.5", features = ["wal"] }` + add
+   `tar = "0.4"`.
+2. `SyncEngine.grafeo_db` field type → `ArcSwap<GrafeoDB>` (or
+   `Arc<RwLock<Arc<GrafeoDB>>>`). Update ~30 call sites.
+3. `checkpoint` (Grafeo arm): use non-destructive `GrafeoDB::backup_full(
+   &backup_dir)` (takes `&self`, does NOT close — verified at
+   `grafeo-engine-0.5.42/src/database/mod.rs:2743`, gated
+   `#[cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]`
+   — all three features are unlocked by adding `wal` since `embedded`
+   already activates `grafeo-file` + `lpg`).
+4. `hydrate` (Grafeo arm): download → `zstd::decode_all` → `tar::unpack` →
+   `GrafeoDB::restore_to_epoch(&extracted_dir, EpochId::MAX, &output_path)`
+   (verified at `:2813`, gated `#[cfg(all(feature = "wal", feature =
+   "grafeo-file"))]`) → `GrafeoDB::with_config(Config::persistent(
+   output_path))` → `ArcSwap::store` the new `Arc<GrafeoDB>` into
+   `SyncEngine.grafeo_db`.
+5. Implement `parallel_hydrate_loro` in `src/hydration/parallel.rs` — mirror
+   of `parallel_hydrate_grafeo` using `graph_store().node_ids()` +
+   `entity.reconcile(RootReconciler::new(node_map))` per vertex. Wrap each
+   `doc.commit()` with `doc.set_next_commit_origin(ORIGIN_LORO_BRIDGE)` to
+   route through the B1 filter (echo prevention — P4-DEVIL M6).
+6. Architecture §4 Step A: add a `SsotMode::Grafeo` subsection documenting
+   the cold-start path (out of P4-L2 scope — file doc update for Phase 5).
+
+### 25.2 `grafeo_dir` config row added to §24.4 (P4-DEVIL M9)
+
+Architecture §24.4 originally listed 9 config parameters. P4-DEVIL Q5/M9
+flagged the absence of `grafeo_dir` — production `GrafeoDB::with_config(
+Config::persistent(path))` requires a directory path, and the builder needs
+a setter for it. Phase 4 adds the row above. The `grafeo_dir` setter is
+`pub fn grafeo_dir(self, path: impl Into<PathBuf>) -> Self` on
+`GrafeoLoroAppBuilder`. `build()` rejects `SsotMode::Grafeo + grafeo_dir ==
+None` with `Config("grafeo_dir required for SsotMode::Grafeo")`.
 
 ---
 
