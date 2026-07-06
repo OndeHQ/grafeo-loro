@@ -144,3 +144,26 @@
 - Neither has an associated TODO (neither needs one — both are intentional reservations, not deferred fixes).
 - 0 `#[allow]` without `reason=` in fuzz crate.
 
+## L3 Risk R3: T3 README hallucination
+
+**Resolution**: REFUTED — clean.
+
+- 15+ API references in README.md verified against `src/`:
+  - `GrafeoLoroApp` (README:11,15,18,20,114) — `src/app.rs:64`.
+  - `GrafeoLoroAppBuilder` (README:15,91,93,114) — `src/app.rs:112`.
+  - `GrafeoLoroApp::builder()` (README:11,20) — `src/app.rs:169`.
+  - `GrafeoLoroApp::hydrate` (README:21,114) — `src/app.rs:727` (`pub async fn hydrate`).
+  - `GrafeoLoroApp::checkpoint` (README:23,114) — `src/app.rs:479` (`pub async fn checkpoint`).
+  - `GrafeoLoroApp::create_vertex` (README:15,114) — `src/app.rs:348`.
+  - `GrafeoLoroApp::query` (README:15) — `src/app.rs:360` (README honestly notes "currently `unimplemented!()` per user scope exclusion").
+  - `VertexBuilder` (README:15,114) — `src/app.rs:1552`.
+  - `AppConfig` (README:15,91) — `src/config.rs:17`.
+  - `SsotMode` (README:18,20,91,97) — `src/config.rs:2`.
+  - `CompressionType` (README:18,20,98,99) — `src/config.rs:9`.
+  - `StorageBackend` (README:11,18,19,57,107) — `src/storage/traits.rs:2`.
+  - `GrafeoLoroError::Config` (README:91,107) — `src/error.rs:21`.
+  - `DEFAULT_CHUNK_SIZE` (README:102) — `src/constants.rs:24` (= 256, matches README default).
+  - `parallel_hydrate_grafeo` (README:21,29,102) — used in fuzz crate, exists.
+  - `MutationBatcher`, `SyncEngine`, `apply_loro_op`, `BridgeMaps`, `CompressedPayload`, `CompressedPayload::compress_to_wire`, `VectorOffloadManager`, `LoroOp`, `GraphValue`, `PresencePayload`, `PeerId` — all verified in #6 hunt.
+- 0 hallucinated APIs. README prose is accurate to the codebase.
+
