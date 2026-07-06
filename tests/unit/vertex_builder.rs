@@ -98,6 +98,7 @@ use loro::{Container, LoroDoc, ValueOrContainer};
 use parking_lot::RwLock;
 
 use grafeo_loro::bridge::SyncEngine;
+use grafeo_loro::constants::ROOT_VERTICES;
 use grafeo_loro::error::GrafeoLoroError;
 use grafeo_loro::schema::VertexEntity;
 use grafeo_loro::types::values::gval_to_grafeo_value;
@@ -192,7 +193,7 @@ fn assert_loro_has_vertex(
     expected_props: &[(&str, GraphValue)],
 ) {
     let doc_guard = doc.read();
-    let v_map = doc_guard.get_map("V");
+    let v_map = doc_guard.get_map(ROOT_VERTICES);
     let vertex = v_map.get(loro_key).unwrap_or_else(|| {
         panic!("Loro V[{loro_key:?}] should exist after commit()")
     });
@@ -242,7 +243,7 @@ fn assert_loro_has_vertex(
 /// on Grafeo failure). Used by the atomicity + strict-reject tests.
 fn assert_no_side_effects(app: &GrafeoLoroApp, doc: &Arc<RwLock<LoroDoc>>, loro_key: &str) {
     let doc_guard = doc.read();
-    let v_map = doc_guard.get_map("V");
+    let v_map = doc_guard.get_map(ROOT_VERTICES);
     assert!(
         v_map.get(loro_key).is_none(),
         "Loro V[{loro_key:?}] must NOT exist after commit() failure (compensation or pre-write reject)"
@@ -530,7 +531,7 @@ fn vertex_builder_rejects_vector_property() {
     // `loro_key` was generated. Assert the V map is empty (no key to check
     // against — just verify the root map is empty).
     let doc_guard = doc.read();
-    let v_map = doc_guard.get_map("V");
+    let v_map = doc_guard.get_map(ROOT_VERTICES);
     assert!(
         v_map.is_empty(),
         "Loro V map must be empty after strict-reject (no write occurred)"
@@ -564,7 +565,7 @@ fn vertex_builder_rejects_map_property() {
         "expected Err(UnsupportedLoroType) for Map property, got {result:?}"
     );
     let doc_guard = doc.read();
-    let v_map = doc_guard.get_map("V");
+    let v_map = doc_guard.get_map(ROOT_VERTICES);
     assert!(
         v_map.is_empty(),
         "Loro V map must be empty after strict-reject (no write occurred)"
@@ -597,7 +598,7 @@ fn vertex_builder_rejects_list_property() {
         "expected Err(UnsupportedLoroType) for List property, got {result:?}"
     );
     let doc_guard = doc.read();
-    let v_map = doc_guard.get_map("V");
+    let v_map = doc_guard.get_map(ROOT_VERTICES);
     assert!(
         v_map.is_empty(),
         "Loro V map must be empty after strict-reject (no write occurred)"
