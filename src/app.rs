@@ -355,7 +355,6 @@ impl GrafeoLoroApp {
     }
 
     /// One-shot GQL query against the materialized Grafeo view.
-    // NOTE: body unimplemented!() — T1 excluded per user; span fires then panics
     #[instrument(skip(self, gql), level = "info")]
     pub fn query(&self, gql: &str) -> Result<grafeo::QueryResult> {
         let _ = gql;
@@ -365,7 +364,6 @@ impl GrafeoLoroApp {
     }
 
     /// Update a collaborative text field on a vertex.
-    // NOTE: body unimplemented!() — T1 excluded per user; span fires then panics
     #[instrument(skip(self, text), level = "info")]
     pub async fn update_text(&self, node_id: NodeId, field: &str, text: &str) -> Result<()> {
         let _ = (node_id, field, text);
@@ -381,7 +379,6 @@ impl GrafeoLoroApp {
     /// the leaf `generate_local_embedding` stub); NOT Task 4 scope (Task 4 owns
     /// `VectorOffloadManager::handle_text_update` + `new`). This is a separate
     /// app-facade concern that composes both — Phase 4+ scope (P3T3-DEVIL M2).
-    // NOTE: body unimplemented!() — T1 excluded per user; span fires then panics
     #[instrument(skip(self), level = "info")]
     pub async fn generate_embedding(&self, node_id: NodeId, field: &str) -> Result<()> {
         let _ = (node_id, field);
@@ -993,7 +990,6 @@ impl GrafeoLoroApp {
     }
 
     /// Broadcast ephemeral presence over the WebSocket channel.
-    // NOTE: body unimplemented!() — T1 excluded per user; span fires then panics
     #[instrument(skip(self, payload), level = "info")]
     pub async fn broadcast_presence(&self, payload: PresencePayload) -> Result<()> {
         let _ = payload;

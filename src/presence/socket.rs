@@ -29,7 +29,6 @@ impl PresenceManager {
     }
 
     /// Broadcast a presence payload to all peers in the room.
-    // NOTE: body unimplemented!() — T1 excluded per user; span fires then panics
     #[instrument(skip(self, payload), name = "presence_broadcast", level = "info")]
     pub async fn broadcast(&self, payload: PresencePayload) -> Result<()> {
         let _ = payload;
@@ -43,7 +42,6 @@ impl PresenceManager {
     ///
     /// Wire format (architecture §12; `VarString = u16 LE length + UTF-8 bytes`):
     /// `[magic:4][room_id_len:u16 LE][room_id:UTF-8][msg_type:u8][serde_json payload]`.
-    // NOTE: body unimplemented!() — T1 excluded per user; span fires then panics
     #[instrument(skip(bytes), name = "parse_eph_envelope", level = "debug")]
     pub fn parse_eph_envelope(bytes: &[u8]) -> Result<EphEnvelope> {
         if bytes.len() < EPH_MAGIC.len() {
@@ -96,7 +94,6 @@ impl PresenceManager {
     ///
     /// Wire format (architecture §12; `VarString = u16 LE length + UTF-8 bytes`):
     /// `[magic:4][room_id_len:u16 LE][room_id:UTF-8][msg_type:u8][serde_json payload]`.
-    // NOTE: body unimplemented!() — T1 excluded per user; span fires then panics
     #[instrument(skip(payload), fields(room_id = %room_id), name = "build_eph_envelope", level = "debug")]
     pub fn build_eph_envelope(room_id: &str, payload: &PresencePayload) -> Result<Vec<u8>> {
         let room_id_bytes = room_id.as_bytes();
