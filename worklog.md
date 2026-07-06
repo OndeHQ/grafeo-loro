@@ -5378,3 +5378,40 @@ Stage Summary:
 - cargo test --lib: pass — 6 passed / 0 failed / 0 ignored.
 - cargo test --all: pass — 70 passed / 0 failed / 2 ignored (across 4 test targets: lib 6/6, integration 5/5, unit 59/59 [2 ignored], doc-tests 0/0).
 - Commit hashes: `49331d7` + `61c9bad` (both pushed to `phase-4`).
+
+---
+
+Task ID: P4-HUNT
+Agent: Plenger-Traits Hunter
+Task: Hunt for plenger-traits anti-patterns in P4-L1/L2/L3 work. Recommend L2 re-entry or push.
+
+Work Log:
+- Step 1: Read worklog Phase 4 entries (lines 4995-5380: P4-L1 + P4-DEVIL + P4-L2 + P4-L3) for branch/scope/context. Confirmed on `phase-4` branch via `git branch --show-current`. Latest commit `3352164` (P4-L3 worklog entry). Range `3272017..HEAD` covers P4-L1 (`818d5c5`) + P4-DEVIL (`a49b892`) + P4-L2 (`d528e47`) + P4-L3 (`49331d7` + `61c9bad` + `3352164`).
+- Step 2: Read `docs/critiques/p4-l1-devil.md` end-to-end (846 lines) — Devil decisions authoritative. Read `docs/critiques/p2t3-hunt.md` (582 lines) for voice/format reference. Read `src/app.rs` (1479 lines), `src/compression/wrapper.rs` (205 lines), `src/constants.rs` (150 lines), `src/bridge/sync_engine.rs` (823 lines, focus on `with_batch_config`/`new_inner`/`spawn_all`/`init_loro_subscriber`), `src/hydration/parallel.rs` (109 lines), `tests/unit/hydrate_checkpoint.rs` (325 lines), `tests/unit/compression_payload.rs` (196 lines), `tests/unit/builder_validation.rs` (179 lines), `src/storage/traits.rs` (7 lines).
+- Step 3: Hallucination sweep — `git diff 3272017..HEAD -- src/ | grep "^+" | grep -E "\.[a-z_]+\(" | grep -oE "\.[a-z_]+\(" | sort -u` produced 39 unique method-call tokens. Each verified against `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/` source via `rg -n "fn <name>"` against `loro-1.13.6/`, `loro-internal-1.13.6/`, `loro-common-1.13.1/`, `grafeo-0.5.42/`, `grafeo-engine-0.5.42/`, `lorosurgeon-0.2.1/`, `lz4_flex-0.11.6/`, `zstd-0.13.3/`. All 26 cited API symbols verified at exact file:line — zero hallucinations (see §6 of hunt doc for full citation table).
+- Step 4: Band-aid sweep — `rg -n "\.ok\(\)|unwrap_or_default|unwrap_or\(|if let Err.*continue|let _ = " src/ | grep -v test` returned 26 hits. 1 P4-introduced finding (BA-1: hydrate delta-load `continue` swallows all `storage.load` errors, not just `NotFound` — `src/app.rs:664-677`); 1 P4-introduced justified (checkpoint delta-delete `if let Err(e) = ... { warn! }` — Devil Q3 accepted); 24 pre-existing (out of scope).
+- Step 5: Happy-path bias sweep — `rg -n "\.unwrap\(\)|\.expect\(|panic!\(" src/ | grep -v test | grep -v "unimplemented!"` returned 0 hits in production code. All 9 `unwrap()`/`expect()`/`panic!()` occurrences in `src/` are inside `#[cfg(test)]` modules.
+- Step 6: DRY sweep — `rg -n "fn compress|fn decompress" src/ tests/` confirmed `CompressedPayload` is the SSOT (no duplication). `rg -n "format!\(\"\{graph_id\}" src/app.rs` found 4 inline storage-key compositions (DRY-2 NIT). `InMemoryStorage` impl duplicated verbatim across `tests/unit/hydrate_checkpoint.rs:47-121` and `tests/unit/builder_validation.rs:40-96` (~70 lines each — DRY-1 MINOR).
+- Step 7: Tautology sweep — read `tests/unit/hydrate_checkpoint.rs` end-to-end. `cold_boot_roundtrip_loro_mode` (lines 142-268) verified as REAL test: creates vertex with properties → checkpoints REAL Zstd bytes through REAL `LoroDoc::export(shallow_snapshot)` → builds FRESH app over same storage → hydrates via REAL `LoroDoc::import_with(ORIGIN_LORO_BRIDGE)` → asserts (a) `loro_key_counter == 1`, (b) vertex re-appears with `Person` label + `name: "Alix"` property, (c) `BridgeMaps::node_id_map` non-empty, (d) `inbound_event_count` UNCHANGED + `inbound_filtered_count` INCREMENTED. No tautology.
+- Step 8: Context blindness sweep — `rg -n "\.await" src/app.rs src/bridge/sync_engine.rs src/bridge/batcher.rs` returned 16 sites in `src/app.rs` (all on `storage.load/save/list/delete`). Verified each `doc.read()`/`doc.write()` site is scoped in `{}` blocks that close before any `.await`. `loro_key_counter.fetch_max(max + 1, Ordering::Relaxed)` — `Relaxed` is correct (bare u64, no accompanying memory payload; each thread reads its own increment result).
+- Step 9: Backward-compat slave sweep — `rg -n "from_sync_engine\b" src/ tests/` returned 2 call sites, both in `tests/unit/vertex_builder.rs` (lines 116, 133). The shim delegates to `from_sync_engine_with_config` with defaults — NOT a backward-compat slave.
+- Step 10: Compile + test verification — `cargo check --all-targets` exit 0 (2 pre-existing warnings, 0 new); `cargo test --all` → 70 PASS / 0 FAIL / 2 IGNORED (matches P4-L3 worklog claim).
+- Step 11: Identified CB-1 (reclassified from Happy-Path Bias) — `build()` at `src/app.rs:1044` discards `Vec<JoinHandle<()>>` from `spawn_all`. Doc-comment at `:967-973` claims "the caller (orchestrator) is responsible for awaiting them on shutdown" but code drops them. MINOR — doc/code mismatch + P5 forward-compat.
+- Step 12: Wrote `docs/critiques/p4-hunt.md` (340 lines) with full findings + verifications + L2 re-entry recommendation. Verified no PAT leakage (`rg -n "ghp_" docs/critiques/p4-hunt.md` returns exit 1).
+- Step 13: Committing `docs/critiques/p4-hunt.md` + this worklog entry. Push to `phase-4`.
+
+Stage Summary:
+- Hunt file: `docs/critiques/p4-hunt.md` (340 lines)
+- Total findings: 4 (3 MINOR + 1 NIT)
+- BLOCKERs: 0
+- MAJORs: 0
+- MINORs: 3 —
+  - BA-1: `hydrate` delta-load `continue` swallows ALL `storage.load` errors, not just `NotFound` (`src/app.rs:664-677`). Harmless in Phase 4 (no delta-write path); forward-compat risk for Phase 5+ Loro sync wire.
+  - DRY-1: `InMemoryStorage` impl duplicated across `tests/unit/hydrate_checkpoint.rs:47-121` + `tests/unit/builder_validation.rs:40-96` (~70 lines each). Test-code duplication.
+  - CB-1: `build()` discards `Vec<JoinHandle<()>>` from `spawn_all` (`src/app.rs:1044`); doc-comment at `:967-973` claims caller awaits them. Doc/code mismatch + P5 forward-compat for `shutdown().await`.
+- NITs: 1 —
+  - DRY-2: `format!("{graph_id}/{STORAGE_KEY_*}")` composed inline at 4 sites in `src/app.rs` (lines 375, 388, 584, 646). SSOT for suffix is the named constant; 1-line `format!` composition acceptable.
+- Categories with 0 findings: Backward-compat slaves, Tautology, Context Blindness, Hallucination, Goodhart's Law in Action (5 of 8 categories clean).
+- L2 re-entry recommendation: PROCEED TO PUSH
+- Rationale: 0 BLOCKERs + 0 MAJORs; 3 MINORs are all forward-compat issues for Phase 5 (not Phase 4 defects); cold-boot round-trip test is the anti-tautology gold standard; every API call verified against crate source; all 70 tests pass.
+- Commit hash: (to be filled in after commit)
