@@ -641,3 +641,30 @@ Stage Summary:
 - Top findings: (1) MINOR-1 consolidated happy-path bias (deferred YAGNI); (2) NIT-1 redundant vv assertion (acceptable); (3) NIT-2 all_updates vs incremental (acceptable); (4) ACCEPTABLE-1 documented API deviation; (5) POSITIVE — L3's anti-Goodhart defenses exemplary.
 - Critique artifact: docs/critiques/p2-hunt.md
 - Commit hash: <pending — commit will follow this worklog entry>
+
+---
+Task ID: ORCH-P2-CLOSE
+Agent: Orchestrator (Super Z)
+Task: Close Plonga-Plongo-Loop iteration 1 for Phase 2 Task 1; push $stn; prepare handoff
+
+Work Log:
+- Reviewed full chain: ORCH-P2-SETUP → P2-L1 → P2-DEVIL → P2-L2 → P2-L3 → P2-HUNT.
+- P2-HUNT verdict: PUSH-READY (0 BLOCKER, 0 MAJOR, 1 MINOR deferred as YAGNI, 2 NIT acceptable, 1 ACCEPTABLE).
+- Plonga-Plongo-Loop Rule 6 ("Back to 3") NOT triggered — no MAJORs or BLOCKERs to fix.
+- Executed Rule 7: `git push -u origin p2-derives` — SUCCESS.
+- Branch p2-derives now tracks origin/p2-derives with 11 commits ahead of phase-1 base.
+- Independent orchestrator re-verification: `cargo test --all` → 17/17 PASS (matches L3 + HUNT claims).
+- Independent orchestrator re-verification: `grep -nE "TODO|todo!|unimplemented!" tests/unit/schema_roundtrip.rs` → ZERO matches.
+
+Stage Summary:
+- $stn = `p2-derives` PUSHED to https://github.com/OndeHQ/grafeo-loro/tree/p2-derives
+- Phase 2 Task 1 (Wire lorosurgeon derives) COMPLETE.
+- 11 commits: 1 orch-setup + 2 L1 + 2 DEVIL + 3 L2 + 2 L3 + 1 HUNT.
+- Test count: 6 lib + 4 integration + 7 unit = 17/17 PASS.
+- Phase 2 Task 2 (`sync_tree_move_to_grafeo`) and Task 3 (`VertexBuilder`) remain.
+- Next loop iteration ($stn candidate: `p2-tree-move`) requires new orchestrator session per Plonga-Plongo-Loop Rule 5: "User will decide to proceed next task for new session loop".
+
+Open handoff notes for next loop:
+1. Phase 2 Task 2 (`sync_tree_move_to_grafeo`) L1 should resolve the `T_CHILD` (`LoroTree`) vs `OrderedCollection` (`LoroMovableList`) distinction documented in architecture §7 Known Ambiguity (added by P2-L2). The existing `sync_tree_move_to_grafeo` signature uses `NodeId` not `TreeID`; verify against Loro's actual tree API.
+2. Phase 2 Task 2 will likely require extending `LoroOp` enum with a `TreeMove { tree_id, node_id, new_parent }` variant — Phase 1 left `apply_tree_move` as a documented stub (see worklog P2-HUNT-FIX-L2-R2 stage summary, Fix 8).
+3. Phase 2 Task 3 (`VertexBuilder`) is independent — can run in parallel with Task 2 if orchestrator wishes to spawn two loops. Rule 1 says "pick ONE" — recommend sequential.
