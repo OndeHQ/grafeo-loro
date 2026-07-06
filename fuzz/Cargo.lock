@@ -792,9 +792,14 @@ name = "grafeo-loro-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "grafeo",
+ "grafeo-common",
  "grafeo-loro",
  "libfuzzer-sys",
  "loro",
+ "parking_lot",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

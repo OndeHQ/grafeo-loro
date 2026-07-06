@@ -36,6 +36,8 @@ Checklist of consistency invariants the `consistency` fuzz target must verify af
 
 - [ ] **I12 — MVCC snapshot isolation**: A `GrafeoLoroApp::query` started at epoch `E` must observe a consistent snapshot even if concurrent inbound writes advance the epoch mid-query (architecture §19). No torn reads.
 
+  > **DEFERRED (Phase 6 T1)**: `GrafeoLoroApp::query` is `unimplemented!()` per user exclusion. A proper check requires: (1) start a read-only session at epoch E, (2) advance the epoch via a concurrent write, (3) read via the read-only session — MUST observe the E snapshot, not the new one. Without `query`, the "observe a consistent snapshot" half of the invariant cannot be verified. The fuzz harness documents this deferral via the empty `check_i12_mvcc_snapshot_isolation` stub + this note. Re-enable once T1 fills the query body.
+
 - [ ] **I13 — Batcher count invariant**: After `MutationBatcher::run` flushes a batch of size `N`, `inbound_event_count` must increment by exactly `N`, and the batcher's internal queue must be empty.
 
 - [ ] **I14 — Tree move serializability**: `sync_tree_move_to_grafeo` under `IsolationLevel::Serializable` must never produce a cycle in the parent-child tree, regardless of concurrent move op ordering (architecture §7, §22).
@@ -68,10 +70,14 @@ Checklist of consistency invariants the `consistency` fuzz target must verify af
   - If `FuzzInput::arbitrary` returns `Err` (malformed bytes), the fuzz target should `return` early (not panic) — libfuzzer treats early-return as a successful iteration, which is correct for malformed inputs.
 
 - **L3 — Seed corpus** (per Devil M6):
-  - `fuzz/corpus/consistency/` contains 5 seed files (created L2 as empty placeholders; L3 populates with serialized `FuzzInput`):
+  - `fuzz/corpus/consistency/` contains 5 seed files (populated by the `gen_corpus` binary at `fuzz/fuzz_targets/gen_corpus.rs`):
     1. `empty.bin` — empty op batch (tests I3a on no-op path)
     2. `single_upsert.bin` — one UpsertNode
     3. `all_variants.bin` — one of each LoroOp variant
     4. `cycle_attempt.bin` — TreeMove that would create a cycle (tests I14)
     5. `large_batch.bin` — 256 ops (tests I13 batch-count invariant)
-  - L3 must populate each seed file with a serialized `FuzzInput` once the serialization format is finalized.
+  - **Regeneration** (idempotent per anti-plenger #9 — identical SHA256 on re-run):
+    ```text,ignore
+    cargo run --bin gen_corpus --manifest-path fuzz/Cargo.toml
+    ```
+  - **Encoding** (per orchestrator Q5 ruling — RAW ARBITRARY): bytes are written in the order `arbitrary::Arbitrary` reads them via `Unstructured` (u64/u32/u16 LE, u8 raw, `Vec<T>` with trailing length byte for `arbitrary_len`, `String` as u32-LE length + UTF-8). The decoded `FuzzInput` may differ slightly from the intended scenario if `arbitrary`'s internal encoding differs — the bytes are still valid fuzzer input (cargo-fuzz mutates from them regardless). See `gen_corpus.rs` module doc-comment for the full encoding rationale.
