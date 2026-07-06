@@ -73,3 +73,16 @@ Architecture §12 wire format (magic + u16 room_id_len + room_id + u8 msg_type +
 **Verdict**: CLEAN. grafeo MVCC model respected; production error surface comprehensive.
 **Counts**: blockers 0, majors 0, minors 0, nits 0.
 
+## #4 Band-Aids — CLEAN
+
+**Hunt 1**: `rg -n 'unwrap\(\)|expect\(' src/presence/socket.rs` → 0 hits. Pure `?` operator + `map_err` for error propagation. No symptom-patching unwraps hiding real failure modes.
+
+**Hunt 2**: All `#[allow]` blocks (re-verified from #1):
+- 3× `clippy::async_yields_async` in `src/bridge/sync_engine.rs` — permanent design choice (worker spawners returning JoinHandle). Each `reason=` explicitly says "Permanent design choice, not a TODO."
+- 1× `dead_code` on `FuzzState.db` field — reserved for future invariant checks (structural reservation, not rot-masking).
+
+No `#[allow]` masks deferred rot. None use TODO/deferred language. No band-aids detected.
+
+**Verdict**: CLEAN.
+**Counts**: blockers 0, majors 0, minors 0, nits 0.
+
