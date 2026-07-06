@@ -46,3 +46,22 @@ jobs:
         with:
           shared-key: test
       - run: cargo test --all
+
+  # P6-L3-T4 (Q4): fuzz harness build verification. libfuzzer-sys requires the
+  # nightly toolchain (cargo-fuzz sets `--cfg fuzzing` + `-Zsanitizer=address`).
+  # This job only verifies the fuzz crate COMPILES — it does not run the fuzzer
+  # (that's a developer-local task per docs/phase-6/fuzz-invariants.md).
+  # `continue-on-error: false` — a broken fuzz harness MUST fail CI.
+  fuzz-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz
+      - run: cargo +nightly check -p grafeo-loro-fuzz
