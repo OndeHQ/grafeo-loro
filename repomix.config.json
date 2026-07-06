@@ -1,55 +1,5 @@
 {
-  "$schema": "https://repomix.com/schemas/latest/schema.json",
-  "input": {
-    "maxFileSize": 1048576
-  },
-  "output": {
-    "filePath": "repomix.md",
-    "style": "markdown",
-    "parsableStyle": true,
-    "fileSummary": false,
-    "directoryStructure": true,
-    "files": true,
-    "removeComments": true,
-    "removeEmptyLines": false,
-    "compress": true,
-    "topFilesLength": 0,
-    "showLineNumbers": false,
-    "truncateBase64": true,
-    "copyToClipboard": false,
-    "includeFullDirectoryStructure": false,
-    "tokenCountTree": false,
-    "git": {
-      "sortByChanges": true,
-      "sortByChangesMaxCommits": 100,
-      "includeDiffs": false,
-      "includeLogs": false,
-      "includeLogsCount": 1
-    }
-  },
-  "include": [
-    "**/*.rs"
-  ],
-  "ignore": {
-    "useGitignore": true,
-    "useDotIgnore": true,
-    "useDefaultPatterns": true,
-    "customPatterns": [
-      "target/**",
-      ".git/**",
-      "Cargo.lock",
-      "**/*.lock",
-      "**/*.md",
-      "**/*.toml",
-      "**/*.json",
-      "worklog.md",
-      "docs/**"
-    ]
-  },
-  "security": {
-    "enableSecurityCheck": true
-  },
-  "tokenCount": {
-    "encoding": "o200k_base"
-  }
+  "compress": true,
+  "removeComments": true,
+  "include": ["**/*.rs"]
 }
