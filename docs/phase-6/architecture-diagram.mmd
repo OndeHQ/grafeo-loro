@@ -1,0 +1,71 @@
+%% grafeo-loro module dependency graph (L2 — verified against `rg -n '^use crate::' src/`)
+%% Boxes map to src/ modules. Arrows = "depends on" direction (consumer → provider).
+%% 12 modules per `src/lib.rs` + `docs/grafeo-loro.project-structure.md`.
+%% Edges verified via `rg -n '^use crate::' src/` (L2 run, post-baseline-cleanup).
+%%
+%% Per Devil C3.1: phantom edges `bridge --> compression` + `bridge --> schema` REMOVED
+%%   (rg -n 'use crate::compression|CompressedPayload' src/bridge/ → no matches;
+%%    rg -n 'use crate::schema|crate::schema::' src/bridge/ → no matches).
+%% Per Devil C3.2: 13 missing edges ADDED; 3 missing leaf nodes (config, constants, error) ADDED.
+%% Per Devil C3.3: `app --> presence` REMOVED (broadcast_presence unimplemented!() — T1 excluded by user).
+%%   Current-state accuracy (anti-plenger #14); deferred edge noted as comment below.
+
+graph TD
+    app
+    bridge
+    schema
+    compression
+    hydration
+    storage
+    presence
+    telemetry
+    types
+    config
+    constants
+    error
+
+    %% app → (10 edges; presence deferred per C3.3)
+    app --> bridge [label="SyncEngine, BridgeMaps, apply_loro_op"]
+    app --> compression [label="CompressedPayload"]
+    app --> config [label="CompressionType, SsotMode"]
+    app --> constants [label="ORIGIN_LORO_BRIDGE, ROOT_VERTICES, STORAGE_KEY_*"]
+    app --> error [label="GrafeoLoroError, Result"]
+    app --> hydration [label="parallel_hydrate_grafeo"]
+    app --> schema [label="VertexEntity"]
+    app --> storage [label="StorageBackend"]
+    app --> telemetry [label="HealthProbe, MetricsRegistry, SharedTracer, HydrationMode"]
+    app --> types [label="GraphValue, LoroProperty, NodeId, PresencePayload, LoroOp"]
+    %% app --> presence: deferred until Phase 6 T1 (broadcast_presence unimplemented!())
+
+    %% bridge → (4 edges; compression + schema are phantom per C3.1)
+    bridge --> constants [label="EPOCH_RETENTION, ORIGIN_*, DEFAULT_BATCH_*, TREE_EDGE_LABEL, ROOT_*"]
+    bridge --> error [label="GrafeoLoroError, Result"]
+    bridge --> telemetry [label="HealthProbe, MetricsRegistry, SharedTracer"]
+    bridge --> types [label="LoroOp, CdcEventWrapper, GraphValue, gval_to_grafeo_value, lval_to_gval, grafeo_value_to_lval"]
+
+    %% hydration → (6 edges)
+    hydration --> bridge [label="apply_loro_op, BridgeMaps"]
+    hydration --> constants [label="DEFAULT_CHUNK_SIZE, ORIGIN_LORO_BRIDGE, ROOT_VERTICES, DEFAULT_EMBEDDING_DIM, EMBEDDING_PROPERTY"]
+    hydration --> error [label="GrafeoLoroError, Result"]
+    hydration --> schema [label="VertexEntity"]
+    hydration --> telemetry [label="MetricsRegistry, SharedTracer"]
+    hydration --> types [label="LoroOp, GraphValue, NodeId"]
+
+    %% schema → (3 edges)
+    schema --> constants [label="ORIGIN_LORO_BRIDGE, TREE_EDGE_LABEL"]
+    schema --> error [label="GrafeoLoroError"]
+    schema --> types [label="LoroProperty, NodeId"]
+
+    %% compression → (2 edges)
+    compression --> config [label="CompressionType"]
+    compression --> error [label="GrafeoLoroError, Result"]
+
+    %% presence → (2 edges)
+    presence --> error [label="Result"]
+    presence --> types [label="PresencePayload"]
+
+    %% types → (1 edge)
+    types --> error [label="GrafeoLoroError, Result"]
+
+    %% Leaves: telemetry, config, constants, error, storage have no crate:: imports
+    %% (rg -n '^use crate::' src/{telemetry,config,constants,error,storage}/ → no matches)

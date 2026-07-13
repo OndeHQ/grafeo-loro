@@ -42,8 +42,8 @@ Declarative CRDT ↔ Graph translation.
 2.  **Implement `schema::tree::sync_tree_move_to_grafeo`**
     -   Delete old parent edge.
     -   Insert new parent edge.
-    -   Wrap in single Grafeo tx.
-    -   Return error if cycle detected (Grafeo enforces acyclic).
+    -   Wrap in single Grafeo tx (Serializable isolation; P2T2-DEVIL R3).
+    -   Return error if cycle detected (Grafeo does NOT enforce acyclic — bridge pre-checks via `would_create_cycle_precheck`; verified P2T2-L1).
 3.  **Implement `app::VertexBuilder` fluent API**
     -   Accumulate labels/properties.
     -   `commit()`: Generate NodeId, write Loro + Grafeo atomically.

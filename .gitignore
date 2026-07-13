@@ -1,5 +1,6 @@
 # Rust
 /target
+fuzz/target
 **/*.rs.bk
 *.swp
 *.swo
@@ -14,3 +15,6 @@
 .DS_Store
 Thumbs.db
 repomix.md
+
+# repomix
+repomix-output*

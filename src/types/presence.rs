@@ -1,7 +1,7 @@
-use serde::{Serialize, Deserialize};
 use super::PeerId;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PresencePayload {
     pub peer_id: PeerId,
     pub active_node: Option<String>,

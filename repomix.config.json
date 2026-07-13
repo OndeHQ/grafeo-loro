@@ -10,14 +10,14 @@
     "fileSummary": false,
     "directoryStructure": true,
     "files": true,
-    "removeComments": false,
+    "removeComments": true,
     "removeEmptyLines": false,
     "compress": false,
     "topFilesLength": 5,
     "showLineNumbers": false,
     "truncateBase64": false,
     "copyToClipboard": true,
-    "includeFullDirectoryStructure": true,
+    "includeFullDirectoryStructure": false,
     "tokenCountTree": true,
     "git": {
       "sortByChanges": true,
@@ -27,12 +27,17 @@
       "includeLogsCount": 50
     }
   },
-  "include": [],
+  "include": [
+    "**/**.rs",
+        "Cargo.toml"
+],
   "ignore": {
     "useGitignore": true,
     "useDotIgnore": true,
     "useDefaultPatterns": true,
-    "customPatterns": []
+    "customPatterns": [
+        "tests/"
+    ]
   },
   "security": {
     "enableSecurityCheck": true

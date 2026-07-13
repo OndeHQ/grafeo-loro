@@ -2,17 +2,43 @@
 name = "grafeo-loro"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Local-first, in-process, dual-store graph database with CRDT consensus (Loro) + execution (Grafeo)."
+repository = "https://github.com/OndeHQ/grafeo-loro"
 
 [dependencies]
 grafeo = "0.5"
+# Direct dep for `grafeo_common::types::EpochId` (used by the epoch side-channel
+# echo-prevention set). Already loaded transitively by grafeo, so this adds no
+# new code to the build graph.
+grafeo-common = "0.5"
+# Direct dep for `grafeo_engine::transaction::IsolationLevel` (used by
+# `sync_tree_move_to_grafeo` for Serializable isolation — see P2T2-DEVIL Q3/R3).
+# The `grafeo` umbrella crate does NOT re-export the `transaction` module
+# (`grafeo-0.5.42/src/lib.rs:68-88`), so a direct dep is required to reach
+# `IsolationLevel::Serializable`. Already loaded transitively via grafeo, so
+# this adds no new code to the build graph.
+grafeo-engine = "0.5"
 loro = "1.0"
-lorosurgeon = "0.3"
+lorosurgeon = "0.2"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "fs"] }
 parking_lot = "0.12"
 rayon = "1.8"
 lz4_flex = "0.11"
+# zstd: binds to C zstd (no pure-Rust encoder exists in the ecosystem — `ruzstd` is decoder-only).
+# `zstd-sys` always compiles the C library via `cc`; defer pure-Rust evaluation to Phase 6 hardening if needed.
 zstd = "0.13"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 async-trait = "0.1"
 thiserror = "1"
-opentelemetry = "0.23"
+opentelemetry = { version = "0.23", features = ["metrics", "trace"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+# P3T3-L2 m4 (DEVIL Q3 — Option A): tracing-subscriber provides the `Layer` trait
+# for `tests/unit/vector_embedding.rs::test_capture::WarnCounter`. Standard
+# companion to `tracing`; 1-line dev-dep, ~15 LOC for the WARN-counter layer
+# (vs ~50 LOC for hand-rolled `Subscriber` — anti-plenger #5 Bloat).
+tracing-subscriber = "0.3"

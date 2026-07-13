@@ -1,0 +1,67 @@
+name: CI
+
+# Per P6-DEVIL C4.1: fmt + clippy jobs require the Phase 5 baseline to be clean.
+# L2 baseline cleanup (commit 568ea7e) ran `cargo fmt --all` + fixed 30 clippy warnings;
+# both gates now pass. See docs/phase-6/p6-l1-devil.md C4.1 for the original blocker analysis.
+
+on:
+  push:
+    branches:
+      - main
+      - 'phase-*'
+  pull_request:
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+      # --all-targets added beyond user spec to catch test-code issues; see P6-DEVIL C4.2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - run: cargo test --all
+
+  # P6-L3-T4 (Q4): fuzz harness build verification. libfuzzer-sys requires the
+  # nightly toolchain (cargo-fuzz sets `--cfg fuzzing` + `-Zsanitizer=address`).
+  # This job only verifies the fuzz crate COMPILES — it does not run the fuzzer
+  # (that's a developer-local task per docs/phase-6/fuzz-invariants.md).
+  # `continue-on-error: false` — a broken fuzz harness MUST fail CI.
+  fuzz-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz
+      - run: cargo +nightly check -p grafeo-loro-fuzz

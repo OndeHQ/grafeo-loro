@@ -68,7 +68,7 @@ grafeo-loro/
 ### `constants`
 Single source of truth for magic strings. Prevents typo bugs. 
 *   Origins: `ORIGIN_GRAFEO_BRIDGE` (`"grafeo-bridge"`), `ORIGIN_LORO_BRIDGE` (`"loro-bridge"`).
-*   Container keys: `ROOT_VERTICES` (`"V"`), `ROOT_EDGES` (`"E"`), `ROOT_TREE` (`"T_CHILD"`).
+*   Container keys: `ROOT_VERTICES` (`"V"`), `ROOT_EDGES` (`"E"`). (`ROOT_TREE` (`"T_CHILD"`) was deleted as YAGNI in Phase 1 Hunter Fix 4; re-add in Phase 2 Task 2 when the `T_CHILD` `LoroTree` is wired.)
 *   Magic bytes: `EPH_MAGIC` (`b"%EPH"`).
 *   Defaults: `DEFAULT_BATCH_MS`, `DEFAULT_CHUNK_SIZE`.
 
