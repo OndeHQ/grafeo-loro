@@ -46,12 +46,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use grafeo::GrafeoDB;
-use grafeo_loro::bridge::BridgeMaps;
 use grafeo_loro::constants::ROOT_VERTICES;
 use grafeo_loro::hydration::parallel_hydrate_grafeo;
 use grafeo_loro::schema::VertexEntity;
 use grafeo_loro::types::values::GraphValue;
 use grafeo_loro::types::LoroProperty;
+use grafeo_loro::BridgeMaps;
 use loro::LoroDoc;
 use lorosurgeon::{Reconcile, RootReconciler};
 

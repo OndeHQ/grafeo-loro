@@ -15,10 +15,9 @@ use grafeo::GrafeoDB;
 use loro::{LoroDoc, LoroValue, ToJson};
 use parking_lot::RwLock;
 
-use grafeo_loro::bridge::sync_engine::InboundMsg;
-use grafeo_loro::bridge::SyncEngine;
 use grafeo_loro::constants::{DEFAULT_BATCH_MS, OUTBOUND_POLL_MS};
 use grafeo_loro::types::LoroOp;
+use grafeo_loro::{InboundMsg, SyncEngine};
 
 /// Build a fresh `LoroValue::Map` from string-keyed scalars.
 fn lmap(pairs: impl IntoIterator<Item = (&'static str, LoroValue)>) -> LoroValue {

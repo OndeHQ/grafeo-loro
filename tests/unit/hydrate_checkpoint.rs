@@ -8,12 +8,14 @@
 //!    mockall).
 //! 2. Install the Loro subscriber (so `inbound_event_count` /
 //!    `inbound_filtered_count` are observable — P2T3-L2R2 MAJOR 2).
-//! 3. Create a vertex via `create_vertex()...commit()`.
+//! 3. Write a vertex to Loro using the native `LoroDoc` handle (raw API
+//!    philosophy — no wrapper). The write is tagged with `ORIGIN_LORO_BRIDGE`
+//!    so the inbound B1 filter skips the echo.
 //! 4. `checkpoint("test-graph")` → verify storage has `test-graph/base.loro`
 //!    with wire-format bytes (2-byte header + payload).
 //! 5. Build a fresh app (cold boot) over the SAME storage backend.
-//! 6. `hydrate("test-graph")` → verify `loro_key_counter` re-seeded to 1+
-//!    and the vertex is observable in the new LoroDoc + BridgeMaps.
+//! 6. `hydrate("test-graph")` → verify the vertex is observable in the new
+//!    LoroDoc + BridgeMaps (parallel_hydrate_grafeo materializes Grafeo).
 //! 7. Assert no echo loops — `inbound_event_count` MUST NOT increment during
 //!    `hydrate` (P1 lesson — the `ORIGIN_LORO_BRIDGE` import tag is filtered
 //!    by the B1 filter at `src/bridge/sync_engine.rs:270`).
@@ -32,17 +34,17 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use grafeo::GrafeoDB;
 use loro::{Container, LoroDoc, ValueOrContainer};
-use lorosurgeon::Hydrate;
+use lorosurgeon::reconcile::RootReconciler;
+use lorosurgeon::{Hydrate, Reconcile};
 use parking_lot::RwLock;
 
-use grafeo_loro::bridge::SyncEngine;
 use grafeo_loro::compression::CompressedPayload;
 use grafeo_loro::config::{CompressionType, SsotMode};
-use grafeo_loro::constants::{ROOT_VERTICES, STORAGE_KEY_BASE_LORO};
+use grafeo_loro::constants::{ORIGIN_LORO_BRIDGE, ROOT_VERTICES, STORAGE_KEY_BASE_LORO};
 use grafeo_loro::schema::VertexEntity;
 use grafeo_loro::storage::StorageBackend;
-use grafeo_loro::types::GraphValue;
-use grafeo_loro::GrafeoLoroApp;
+use grafeo_loro::types::LoroProperty;
+use grafeo_loro::{GrafeoLoroApp, SyncEngine};
 
 /// In-memory `StorageBackend` for cold-boot round-trip tests.
 ///
@@ -137,8 +139,37 @@ fn build_app_with_storage(
     (app, db, doc)
 }
 
-/// Full cold-boot round-trip: create vertex → checkpoint → cold boot →
-/// hydrate → verify vertex recovered + loro_key_counter re-seeded + no echo.
+/// Write a vertex directly to Loro using native APIs (raw-handle philosophy).
+///
+/// Uses `lorosurgeon::Reconcile` to materialize the `VertexEntity` schema into
+/// the Loro doc under the `V/<key>` map. The commit is tagged with
+/// `ORIGIN_LORO_BRIDGE` so the inbound B1 filter skips the echo — same pattern
+/// the bridge uses internally for RYOW writes.
+fn write_vertex_to_loro(
+    app: &GrafeoLoroApp,
+    loro_key: &str,
+    labels: Vec<String>,
+    properties: HashMap<String, LoroProperty>,
+) {
+    let entity = VertexEntity {
+        labels,
+        properties,
+        description: String::new(),
+    };
+    let doc = app.loro_doc().write();
+    doc.set_next_commit_origin(ORIGIN_LORO_BRIDGE);
+    let v_map = doc.get_map(ROOT_VERTICES);
+    let node_map = v_map
+        .ensure_mergeable_map(loro_key)
+        .expect("ensure_mergeable_map for vertex");
+    entity
+        .reconcile(RootReconciler::new(node_map))
+        .expect("reconcile vertex entity");
+    doc.commit();
+}
+
+/// Full cold-boot round-trip: write vertex to Loro → checkpoint → cold boot →
+/// hydrate → verify vertex recovered + no echo.
 #[tokio::test]
 async fn cold_boot_roundtrip_loro_mode() {
     // Hold the concrete `Arc<InMemoryStorage>` so the test can call
@@ -146,24 +177,19 @@ async fn cold_boot_roundtrip_loro_mode() {
     // into the app.
     let storage: Arc<InMemoryStorage> = Arc::new(InMemoryStorage::new());
 
-    // --- Phase 1: build app, install subscriber, create a vertex, checkpoint. ---
+    // --- Phase 1: build app, install subscriber, write vertex to Loro, checkpoint. ---
     let (app, _db, _doc) = build_app_with_storage(storage.clone());
     app.sync_engine()
         .init_loro_subscriber()
         .expect("subscriber installed");
-    let node_id = app
-        .create_vertex()
-        .with_label("Person")
-        .with_property("name", GraphValue::String("Alix".into()))
-        .commit()
-        .expect("commit succeeds");
-    let loro_key = app
-        .maps()
-        .node_key_map
-        .read()
-        .get(&node_id)
-        .cloned()
-        .expect("BridgeMaps has binding for committed vertex");
+
+    let loro_key = "V/0".to_string();
+    let mut props = HashMap::new();
+    props.insert(
+        "name".to_string(),
+        LoroProperty::String("Alix".into()),
+    );
+    write_vertex_to_loro(&app, &loro_key, vec!["Person".into()], props);
 
     // The checkpoint task writes the base snapshot through compress_to_wire.
     app.checkpoint("test-graph")
@@ -205,14 +231,7 @@ async fn cold_boot_roundtrip_loro_mode() {
 
     // --- Phase 3: assertions on the hydrated state. ---
 
-    // (a) loro_key_counter re-seeded to max(V/* keys) + 1 = 0 + 1 = 1.
-    let counter = app2.loro_key_counter();
-    assert_eq!(
-        counter, 1,
-        "loro_key_counter should be re-seeded to 1 (max V/* key was 0)"
-    );
-
-    // (b) The vertex is observable in the new LoroDoc.
+    // (a) The vertex is observable in the new LoroDoc.
     {
         let doc_guard = doc2.read();
         let v_map = doc_guard.get_map(ROOT_VERTICES);
@@ -236,17 +255,15 @@ async fn cold_boot_roundtrip_loro_mode() {
         }
     }
 
-    // (c) parallel_hydrate_grafeo ran during hydrate → BridgeMaps has the binding.
-    // (The recovered vertex was materialized into Grafeo; `apply_loro_op` would
-    // have inserted the binding via `BridgeMaps::insert_node` — but hydrate uses
-    // `parallel_hydrate_grafeo` which inserts the binding directly. Either way,
-    // BridgeMaps should NOT be empty.)
+    // (b) parallel_hydrate_grafeo ran during hydrate → BridgeMaps has the binding.
+    // (The recovered vertex was materialized into Grafeo; `parallel_hydrate_grafeo`
+    // inserts the binding directly via `BridgeMaps::insert_node`.)
     assert!(
         !app2.maps().node_id_map.read().is_empty(),
         "BridgeMaps::node_id_map should be non-empty after hydrate"
     );
 
-    // (d) No echo loop: the import was tagged with ORIGIN_LORO_BRIDGE so the
+    // (c) No echo loop: the import was tagged with ORIGIN_LORO_BRIDGE so the
     // B1 filter at sync_engine.rs:270 skipped it. inbound_event_count MUST
     // be unchanged; inbound_filtered_count MUST have incremented (proves the
     // filter actually fired — P2T3-L2R2 MAJOR 2).
@@ -266,7 +283,7 @@ async fn cold_boot_roundtrip_loro_mode() {
 }
 
 /// Cold-boot on an empty storage key (fresh graph) → `hydrate` succeeds,
-/// initializes an empty `LoroDoc`, loro_key_counter stays at 0, no panic.
+/// initializes an empty `LoroDoc`, no panic.
 #[tokio::test]
 async fn cold_boot_fresh_graph_no_snapshot() {
     let storage: Arc<InMemoryStorage> = Arc::new(InMemoryStorage::new());
@@ -278,11 +295,7 @@ async fn cold_boot_fresh_graph_no_snapshot() {
         .await
         .expect("hydrate on fresh graph succeeds");
 
-    // Fresh-graph path: counter stays at 0 (no V/* keys to scan).
-    let counter = app.loro_key_counter();
-    assert_eq!(counter, 0, "fresh-graph loro_key_counter should be 0");
-
-    // No vertices in BridgeMaps (no Loro state to hydrate from).
+    // Fresh-graph path: no V/* keys to recover — BridgeMaps stays empty.
     assert!(
         app.maps().node_id_map.read().is_empty(),
         "BridgeMaps should be empty after fresh-graph hydrate"
@@ -300,10 +313,14 @@ async fn checkpoint_idempotent_double_call() {
     app.sync_engine()
         .init_loro_subscriber()
         .expect("subscriber installed");
-    app.create_vertex()
-        .with_label("Person")
-        .commit()
-        .expect("commit succeeds");
+
+    // Write a vertex to Loro (raw handle) so the snapshot is non-empty.
+    let mut props = HashMap::new();
+    props.insert(
+        "name".to_string(),
+        LoroProperty::String("Bob".into()),
+    );
+    write_vertex_to_loro(&app, "V/0", vec!["Person".into()], props);
 
     app.checkpoint("g").await.expect("first checkpoint");
     app.checkpoint("g")

@@ -16,6 +16,11 @@
 use crate::constants::{ORIGIN_GRAFEO_BRIDGE, ORIGIN_LORO_BRIDGE};
 
 /// True iff `origin` was produced by the Grafeo→Loro outbound bridge.
+///
+/// Currently unused — the Loro subscriber handler inlines the equality check
+/// against `ORIGIN_GRAFEO_BRIDGE` directly. Kept as a named predicate for
+/// future ergonomic / diagnostic use.
+#[allow(dead_code)]
 pub fn is_grafeo_bridge_origin(origin: &str) -> bool {
     origin == ORIGIN_GRAFEO_BRIDGE
 }
@@ -25,6 +30,7 @@ pub fn is_grafeo_bridge_origin(origin: &str) -> bool {
 /// Currently unused on the outbound path (the epoch side-channel replaces
 /// it per Devil BLOCKER B2). Kept for symmetry; the Plenger hunter may flag
 /// it as dead code — if so, delete it.
+#[allow(dead_code)]
 pub fn is_loro_bridge_origin(origin: Option<&str>) -> bool {
     origin == Some(ORIGIN_LORO_BRIDGE)
 }

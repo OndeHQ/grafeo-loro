@@ -3,7 +3,9 @@ pub mod config;
 pub mod constants;
 pub mod error;
 
-pub mod bridge;
+// Internal bridge logic is private to prevent API leak.
+// Public types from the bridge are re-exported below for ergonomics.
+mod bridge;
 pub mod compression;
 pub mod hydration;
 pub mod presence;
@@ -13,9 +15,22 @@ pub mod telemetry;
 pub mod types;
 
 pub use app::GrafeoLoroApp;
-pub use config::{AppConfig, CompressionType, SsotMode};
+pub use config::{CompressionType, SsotMode};
 pub use error::GrafeoLoroError;
 pub use storage::StorageBackend;
+
+// Re-export native crates so raw handles are usable immediately.
+// Users call native Grafeo / Loro APIs directly via `app.grafeo_db()` /
+// `app.loro_doc()`; the bridge syncs transparently in the background.
+pub use grafeo;
+pub use loro;
+
+// Bridge types re-exported for advanced introspection + embedded scenarios.
+// The `bridge` module itself is private — users interact via raw handles and
+// the bridge runs invisibly.
+pub use bridge::{BridgeMaps, SyncEngine};
+pub use bridge::sync_engine::InboundMsg;
+
 // DEVIL m3: crate-root re-export of compression public API for Phase 4 storage ergonomics
 // (`use grafeo_loro::{CompressedPayload, LoroDocCompressionExt}` vs the longer `compression::` path).
 pub use compression::{CompressedPayload, LoroDocCompressionExt};

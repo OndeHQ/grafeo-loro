@@ -130,6 +130,10 @@ impl MutationBatcher {
     ///
     /// Convenience wrapper around [`Self::new`] with default batch sizing.
     /// Callers that do not configure telemetry pass `None` for metrics/tracer/health.
+    ///
+    /// Currently unused — `SyncEngine::new_inner` calls `Self::new` directly
+    /// with a `BatcherConfig` bundle. Kept for future ergonomic callers.
+    #[allow(dead_code)]
     pub fn with_defaults(
         grafeo_db: Arc<GrafeoDB>,
         bridge_origin_epochs: Arc<RwLock<HashSet<EpochId>>>,
@@ -156,12 +160,14 @@ impl MutationBatcher {
 
     /// Access the optional metrics registry (P5-L1). Used by tests + future
     /// telemetry-aware callers to inspect the registered instruments.
+    #[allow(dead_code)]
     pub fn metrics(&self) -> Option<&Arc<MetricsRegistry>> {
         self.metrics.as_ref()
     }
 
     /// Access the optional shared tracer (P5-L1). Used by tests + future
     /// telemetry-aware callers to inspect the configured tracer.
+    #[allow(dead_code)]
     pub fn tracer(&self) -> Option<&SharedTracer> {
         self.tracer.as_ref()
     }
@@ -171,6 +177,7 @@ impl MutationBatcher {
     /// `flush_inner` calls `health.update_sync_ts()` after each successful
     /// commit so the inbound flush path stamps `last_sync_ts` (architecture
     /// §23.3 — "last sync" = both inbound flush AND outbound commit).
+    #[allow(dead_code)]
     pub fn health(&self) -> Option<&Arc<HealthProbe>> {
         self.health.as_ref()
     }
