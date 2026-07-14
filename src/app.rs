@@ -296,6 +296,85 @@ impl GrafeoLoroApp {
         &self.sync_engine.loro_doc
     }
 
+    /// Borrow the underlying `LoroDoc` directly (issue #1 item 4).
+    ///
+    /// This is the Loro-SSOT ownership accessor: Onde receives a shared
+    /// borrow of the doc managed by `grafeo-loro` and calls native Loro
+    /// APIs (`doc.get_map(...)`, `doc.commit()`, etc.) directly. Onde must
+    /// NOT construct its own `LoroDoc` — that breaks the SSOT contract.
+    ///
+    /// # Returns
+    ///
+    /// `&LoroDoc` — a shared borrow. The `parking_lot::RwLock` is held
+    /// internally for the duration of the borrow so that the outbound
+    /// worker cannot interleave a `set_next_commit_origin + commit` pair
+    /// while you're mid-call. (Loro 1.x is `Send + Sync` and most APIs
+    /// take `&self`, but the bridge needs the lock to logically serialize
+    /// the origin-tagged commit pair — see `bridge::sync_engine` module
+    /// doc.)
+    ///
+    /// # Lifecycle contract (issue #1 item 4)
+    ///
+    /// - **Ownership**: `grafeo-loro` owns the `LoroDoc`. Onde receives a
+    ///   shared borrow only. The doc is dropped when `GrafeoLoroApp::drop`
+    ///   runs (after `shutdown()` if called).
+    /// - **Drop order**: workers are joined first via `shutdown()`, then
+    ///   the `LoroDoc` is dropped. Onde must NOT hold a `&LoroDoc` across
+    ///   an `await` point or a `shutdown()` call — use `doc()` per-call.
+    /// - **Explicit close**: call `app.shutdown().await` to flush + tear
+    ///   down workers before drop. Skipping `shutdown()` leaks workers
+    ///   (they'll be killed when the runtime drops, but in-flight flushes
+    ///   are lost).
+    /// - **Snapshot trigger**: call `app.checkpoint(graph_id).await` to
+    ///   write a compressed snapshot to the configured storage backend.
+    ///   This does NOT close the doc — the doc remains live and workers
+    ///   continue syncing.
+    pub fn doc(&self) -> parking_lot::RwLockReadGuard<'_, loro::LoroDoc> {
+        self.sync_engine.loro_doc.read()
+    }
+
+    /// Subscribe to inbound + outbound bridge events (issue #1 item 4).
+    ///
+    /// Multiple `subscribe()` calls coexist — Onde's orchestrator and
+    /// grafeo-loro's internal subscriber both attach without excluding
+    /// each other. The handler is invoked from the Loro subscriber thread
+    /// (synchronously inside `LoroDoc::commit`), so it MUST be fast and
+    /// non-blocking. For expensive work, forward to a channel.
+    ///
+    /// # Event ordering
+    ///
+    /// When both Onde's handler and grafeo-loro's bridge subscribe to the
+    /// same Loro doc, Loro invokes subscribers in registration order.
+    /// grafeo-loro's bridge subscribes first (during `GrafeoLoroApp::build`),
+    /// so the bridge's translation runs before Onde's handler. This means
+    /// Onde's handler sees the post-bridge state — useful for orchestrator
+    /// bookkeeping but NOT for intercepting ops (use the inbound MPSC
+    /// channel for that).
+    ///
+    /// # Handler signature
+    ///
+    /// `Fn(&loro::diff::DiffBatch) + Send + Sync + 'static`. The handler
+    /// receives the raw Loro diff batch; grafeo-loro does NOT re-shape it.
+    /// Onde filters by origin if it needs to (the diff's `origin` field
+    /// tells you whether the commit came from the user, the bridge, or a
+    /// remote peer).
+    ///
+    /// # Returns
+    ///
+    /// A `loro::Subscription` — drop it to unsubscribe. Keep it alive for
+    /// as long as you want events; if it drops, your handler stops being
+    /// called.
+    pub fn subscribe<F>(&self, handler: F) -> loro::Subscription
+    where
+        F: Fn(&loro::diff::DiffBatch) + Send + Sync + 'static,
+    {
+        // Loro's `subscribe` is on the root container. We expose the same
+        // API so Onde's orchestrator can attach without knowing the
+        // internal container layout.
+        let doc = self.sync_engine.loro_doc.read();
+        doc.subscribe_root(handler)
+    }
+
     /// Bridge maps for advanced introspection (loro_key ↔ grafeo::NodeId
     /// and EdgeKey ↔ grafeo::EdgeId bindings).
     ///
