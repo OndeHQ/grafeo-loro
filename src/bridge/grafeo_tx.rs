@@ -6,6 +6,12 @@
 //! inbound path maintains the forward (`loro_key → grafeo id`) and inverse
 //! (`grafeo id → loro_key`) maps itself. The outbound CDC poller reads the
 //! inverse maps to translate `ChangeEvent.entity_id` back into Loro keys.
+//!
+//! Issue #1 compliance: `BridgeMaps` uses `crate::types::ids::{NodeId, EdgeId}`
+//! which are `grafeo::{NodeId, EdgeId}` re-exports when `grafeo` is on, and
+//! local `u64` newtypes when `grafeo` is off. This means `BridgeMaps` is
+//! available in WASM builds without the grafeo execution layer — Onde can
+//! construct one and wire its own runtime against it.
 
 use std::collections::HashMap;
 
@@ -15,6 +21,8 @@ use tracing::instrument;
 use crate::constants::TREE_EDGE_LABEL;
 use crate::error::{GrafeoLoroError, Result};
 use crate::types::events::LoroOp;
+use crate::types::ids::{EdgeId, NodeId};
+#[cfg(feature = "grafeo")]
 use crate::types::values::gval_to_grafeo_value;
 
 /// Composite key identifying a Loro-side edge: `(src_loro_key, dst_loro_key, label)`.
@@ -26,13 +34,13 @@ pub type EdgeKey = (String, String, String);
 #[derive(Default)]
 pub struct BridgeMaps {
     /// `loro_key → grafeo::NodeId` (inbound lookup-or-create).
-    pub node_id_map: RwLock<HashMap<String, grafeo::NodeId>>,
+    pub node_id_map: RwLock<HashMap<String, NodeId>>,
     /// `grafeo::NodeId → loro_key` (outbound reverse lookup).
-    pub node_key_map: RwLock<HashMap<grafeo::NodeId, String>>,
+    pub node_key_map: RwLock<HashMap<NodeId, String>>,
     /// `(src_key, dst_key, label) → grafeo::EdgeId` (inbound edge idempotency).
-    pub edge_id_map: RwLock<HashMap<EdgeKey, grafeo::EdgeId>>,
+    pub edge_id_map: RwLock<HashMap<EdgeKey, EdgeId>>,
     /// `grafeo::EdgeId → (src_key, dst_key, label)` (outbound reverse lookup).
-    pub edge_key_map: RwLock<HashMap<grafeo::EdgeId, EdgeKey>>,
+    pub edge_key_map: RwLock<HashMap<EdgeId, EdgeKey>>,
 }
 
 impl BridgeMaps {
@@ -44,7 +52,7 @@ impl BridgeMaps {
     /// Record a `loro_key ↔ grafeo::NodeId` binding in both forward and
     /// inverse maps. Overwrites any prior binding for either side.
     #[instrument(skip(self), name = "bridge_insert_node", level = "trace")]
-    pub fn insert_node(&self, loro_key: String, id: grafeo::NodeId) {
+    pub fn insert_node(&self, loro_key: String, id: NodeId) {
         self.node_id_map.write().insert(loro_key.clone(), id);
         self.node_key_map.write().insert(id, loro_key);
     }
@@ -52,7 +60,7 @@ impl BridgeMaps {
     /// Remove a `loro_key ↔ grafeo::NodeId` binding from both maps. Returns
     /// the grafeo id if the key was present (no-op otherwise).
     #[instrument(skip(self), name = "bridge_remove_node", level = "trace")]
-    pub fn remove_node(&self, loro_key: &str) -> Option<grafeo::NodeId> {
+    pub fn remove_node(&self, loro_key: &str) -> Option<NodeId> {
         let id = self.node_id_map.write().remove(loro_key)?;
         self.node_key_map.write().remove(&id);
         Some(id)
@@ -60,14 +68,14 @@ impl BridgeMaps {
 
     /// Record an `EdgeKey ↔ grafeo::EdgeId` binding in both maps.
     #[instrument(skip(self), name = "bridge_insert_edge", level = "trace")]
-    pub fn insert_edge(&self, key: EdgeKey, id: grafeo::EdgeId) {
+    pub fn insert_edge(&self, key: EdgeKey, id: EdgeId) {
         self.edge_id_map.write().insert(key.clone(), id);
         self.edge_key_map.write().insert(id, key);
     }
 
     /// Remove an edge binding by `EdgeKey`. Returns the grafeo id if present.
     #[instrument(skip(self), name = "bridge_remove_edge", level = "trace")]
-    pub fn remove_edge(&self, key: &EdgeKey) -> Option<grafeo::EdgeId> {
+    pub fn remove_edge(&self, key: &EdgeKey) -> Option<EdgeId> {
         let id = self.edge_id_map.write().remove(key)?;
         self.edge_key_map.write().remove(&id);
         Some(id)
@@ -76,7 +84,7 @@ impl BridgeMaps {
     /// Remove an edge binding by grafeo `EdgeId`. Returns the Loro-side key
     /// tuple if present (used when translating a CDC `EdgeDelete` event).
     #[instrument(skip(self), name = "bridge_remove_edge_by_id", level = "trace")]
-    pub fn remove_edge_by_id(&self, id: grafeo::EdgeId) -> Option<EdgeKey> {
+    pub fn remove_edge_by_id(&self, id: EdgeId) -> Option<EdgeKey> {
         let key = self.edge_key_map.write().remove(&id)?;
         self.edge_id_map.write().remove(&key);
         Some(key)
@@ -89,6 +97,9 @@ impl BridgeMaps {
 /// new entity and inserts both forward and inverse bindings. Delete ops are
 /// idempotent (missing key = no-op). `TreeMove` is implemented as
 /// delete-old-CHILD-edge + insert-new-CHILD-edge per L3 mandate.
+///
+/// Issue #1: requires `grafeo` feature (calls `Session::create_node_with_props`).
+#[cfg(feature = "grafeo")]
 #[instrument(skip(session, op, maps), name = "apply_loro_op", level = "info")]
 pub fn apply_loro_op(session: &grafeo::Session, op: &LoroOp, maps: &BridgeMaps) -> Result<()> {
     match op {
@@ -128,6 +139,7 @@ pub fn apply_loro_op(session: &grafeo::Session, op: &LoroOp, maps: &BridgeMaps) 
     }
 }
 
+#[cfg(feature = "grafeo")]
 fn apply_upsert_node(
     session: &grafeo::Session,
     loro_key: &str,
@@ -150,6 +162,7 @@ fn apply_upsert_node(
     Ok(())
 }
 
+#[cfg(feature = "grafeo")]
 fn apply_upsert_edge(
     session: &grafeo::Session,
     src_key: &str,
@@ -190,13 +203,7 @@ fn apply_upsert_edge(
 /// Edge direction is parent→child (src=parent, dst=child) per architecture
 /// §7 line 265 (`(p)-[:CHILD]->(c)`) — P2T2-DEVIL R1; the pre-existing
 /// child→parent direction was a Phase 1 bug, fixed in P2T2-L2.
-///
-/// Phase 2: tree container support — handler exists because `LoroOp::TreeMove`
-/// is part of the L1 contract, but no production caller exists in Phase 1
-/// (the inbound subscriber only translates `ROOT_VERTICES`/`ROOT_EDGES`
-/// diffs; `ROOT_TREE` was deleted as YAGNI per Hunter NIT 11). The variant
-/// and this handler are retained so Phase 2 can wire tree-container diffs
-/// without re-shaping the enum. Hunter MINOR 8 flagged this as a dead path.
+#[cfg(feature = "grafeo")]
 fn apply_tree_move(
     session: &grafeo::Session,
     node_key: &str,

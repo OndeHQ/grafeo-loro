@@ -1,16 +1,26 @@
 use thiserror::Error;
 
+/// Errors emitted by grafeo-loro.
+///
+/// Issue #1 compliance: variants that wrap a downstream crate's error type
+/// are gated by that crate's feature so the variant disappears from the
+/// enum when the feature is off. This keeps the enum minimal in WASM
+/// builds (no `grafeo`/`lorosurgeon`/`opentelemetry` variants when those
+/// features are disabled).
 #[derive(Error, Debug)]
 pub enum GrafeoLoroError {
+    #[cfg(feature = "grafeo")]
     #[error("Loro CRDT error: {0}")]
     Loro(#[from] loro::LoroError),
 
+    #[cfg(feature = "grafeo")]
     #[error("Grafeo DB error: {0}")]
     Grafeo(#[from] grafeo::Error),
 
     #[error("Storage backend I/O error: {0}")]
     StorageIo(#[from] std::io::Error),
 
+    #[cfg(feature = "compression")]
     #[error("Compression codec failure: {0}")]
     Compression(String),
 
@@ -33,6 +43,7 @@ pub enum GrafeoLoroError {
     /// Cold-boot hydration failure surfaced by `VertexEntity::hydrate_map`
     /// (lorosurgeon). Structured `HydrateError` is preserved (P3T2-L2R2 M2 —
     /// replaces the prior `Bridge(format!(...))` band-aid at the call site).
+    #[cfg(feature = "bridge")]
     #[error("Hydrate error: {0}")]
     Hydrate(#[from] lorosurgeon::error::HydrateError),
 

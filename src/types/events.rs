@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+#[cfg(feature = "grafeo")]
 use grafeo_common::types::EpochId;
 
 use super::GraphValue;
@@ -52,6 +53,7 @@ pub enum LoroOp {
 /// approval): inbound Loro→Grafeo writes record their commit epoch in
 /// `SyncEngine::bridge_origin_epochs`; the outbound CDC poller filters any
 /// `ChangeEvent` whose `epoch` is in that set.
+#[cfg(feature = "grafeo")]
 #[derive(Debug, Clone)]
 pub struct CdcEventWrapper {
     /// MVCC epoch of the Grafeo transaction that produced this event.
@@ -60,6 +62,7 @@ pub struct CdcEventWrapper {
     pub payload: grafeo::cdc::ChangeEvent,
 }
 
+#[cfg(feature = "grafeo")]
 impl CdcEventWrapper {
     /// Construct a wrapper from its epoch and payload (L2 new issue #2 —
     /// ergonomic constructor for the type-alias `OutboundMsg = CdcEventWrapper`).

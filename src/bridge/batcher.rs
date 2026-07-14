@@ -1,6 +1,10 @@
 //! Inbound mutation batcher: collects `LoroOp`s and flushes them as a single
 //! vectorized Grafeo transaction tagged with `ORIGIN_LORO_BRIDGE`.
 //!
+//! Issue #1 compliance: gated by `batcher` feature (pulls `tokio`). The
+//! `apply_loro_op` calls inside `flush_inner` require `grafeo` (the
+//! `Session` API). Both features must be on for the batcher to be useful.
+//!
 //! ## Wiring summary (Devil MAJOR M13)
 //!
 //! - `push(&mut self, ...)` removed — the batcher is driven entirely by its

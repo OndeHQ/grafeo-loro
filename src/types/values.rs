@@ -1,5 +1,7 @@
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 
 use lorosurgeon::{
     error::{HydrateError, ReconcileError},
@@ -18,8 +20,9 @@ use crate::error::{GrafeoLoroError, Result};
 /// `#[derive(Hydrate, Reconcile)]` would emit a tagged-union LoroMap
 /// (`{ "Bool": true }`) which doubles the wire size and breaks property
 /// lookups. The manual impls are ~30 LOC.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(untagged))]
 #[derive(Default)]
 pub enum LoroProperty {
     #[default]
@@ -183,6 +186,7 @@ pub fn lval_to_gval(val: loro::LoroValue) -> Result<GraphValue> {
 }
 
 /// Pure `GraphValue → grafeo::Value` for the inbound apply path.
+#[cfg(feature = "grafeo")]
 #[instrument(skip(val), name = "gval_to_grafeo_value", level = "trace")]
 pub fn gval_to_grafeo_value(val: GraphValue) -> grafeo::Value {
     use grafeo::Value as GV;
@@ -208,6 +212,7 @@ pub fn gval_to_grafeo_value(val: GraphValue) -> grafeo::Value {
 /// Pure `grafeo::Value → LoroValue` for the outbound worker. Exotic grafeo
 /// variants (Timestamp/Date/Time/Duration/Path/Counter/Bytes) collapse to
 /// `Null` — Phase 1 only round-trips the JSON-shaped subset shared with LoroValue.
+#[cfg(feature = "grafeo")]
 #[instrument(skip(val), name = "grafeo_value_to_lval", level = "trace")]
 pub fn grafeo_value_to_lval(val: &grafeo::Value) -> loro::LoroValue {
     use loro::LoroValue as LV;
@@ -247,7 +252,7 @@ pub fn grafeo_value_to_lval(val: &grafeo::Value) -> loro::LoroValue {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "grafeo"))]
 mod tests {
     use super::*;
 
