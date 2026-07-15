@@ -159,6 +159,8 @@ pub use compression::{CompressedPayload, LoroDocCompressionExt};
 #[cfg(all(feature = "grafeo", feature = "parallel", not(target_family = "wasm")))]
 pub use hydration::parallel_hydrate_grafeo;
 #[cfg(all(feature = "grafeo", not(target_family = "wasm")))]
+pub use hydration::hydrate_grafeo;
+#[cfg(all(feature = "grafeo", not(target_family = "wasm")))]
 pub use hydration::vector::generate_local_embedding;
 #[cfg(all(feature = "grafeo", not(target_family = "wasm")))]
 pub use hydration::VectorOffloadManager;

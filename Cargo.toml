@@ -51,7 +51,7 @@ default = []
 # so `LoroOp`/`GraphValue` get their `Serialize`/`Deserialize` derives.
 bridge = ["dep:bincode"]
 batcher = ["bridge", "tokio/sync", "tokio/time"]
-compression = ["dep:lz4_flex", "dep:zstd"]
+compression = ["dep:lz4_flex", "dep:zstd", "grafeo"]
 tree = ["bridge"]
 storage = []
 grafeo = ["bridge", "dep:grafeo", "dep:grafeo-common", "dep:grafeo-engine"]

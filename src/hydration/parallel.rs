@@ -1,7 +1,13 @@
 //! Phase 3 Task 2: parallel cold-boot hydration of Grafeo indexes from a Loro snapshot.
 //!
+//! Issue #1 item 3: gated by `parallel` feature. The serial fallback is in
+//! `hydrate_grafeo` (this same file, lower down). WASM builds use the serial
+//! path (parallel feature is off in WASM by default since rayon needs threads).
+//!
 //! Read-path SSOT: `VertexEntity::hydrate_map(&LoroMap)` (`lorosurgeon-0.2.1/src/hydrate.rs:127`)
 //! — DO NOT manually iterate the vertex sub-map's keys (DEVIL M2 DRY).
+
+#![cfg(feature = "parallel")]
 
 use std::sync::Arc;
 
