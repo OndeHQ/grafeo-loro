@@ -353,11 +353,11 @@ impl GrafeoLoroApp {
     ///
     /// # Handler signature
     ///
-    /// `Fn(&loro::diff::DiffBatch) + Send + Sync + 'static`. The handler
-    /// receives the raw Loro diff batch; grafeo-loro does NOT re-shape it.
-    /// Onde filters by origin if it needs to (the diff's `origin` field
-    /// tells you whether the commit came from the user, the bridge, or a
-    /// remote peer).
+    /// `Fn(loro::DiffEvent) + Send + Sync + 'static`. The handler receives
+    /// the raw Loro diff event; grafeo-loro does NOT re-shape it. Onde
+    /// filters by origin if it needs to (the event's `origin` field tells
+    /// you whether the commit came from the user, the bridge, or a remote
+    /// peer).
     ///
     /// # Returns
     ///
@@ -366,13 +366,14 @@ impl GrafeoLoroApp {
     /// called.
     pub fn subscribe<F>(&self, handler: F) -> loro::Subscription
     where
-        F: Fn(&loro::diff::DiffBatch) + Send + Sync + 'static,
+        F: Fn(loro::event::DiffEvent) + Send + Sync + 'static,
     {
         // Loro's `subscribe` is on the root container. We expose the same
         // API so Onde's orchestrator can attach without knowing the
         // internal container layout.
         let doc = self.sync_engine.loro_doc.read();
-        doc.subscribe_root(handler)
+        let callback: std::sync::Arc<F> = std::sync::Arc::new(handler);
+        doc.subscribe_root(callback)
     }
 
     /// Bridge maps for advanced introspection (loro_key ↔ grafeo::NodeId

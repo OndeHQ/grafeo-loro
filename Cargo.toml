@@ -61,7 +61,7 @@ telemetry = ["dep:opentelemetry"]
 wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys", "dep:console_error_panic_hook"]
 parallel = ["dep:rayon"]
 serde = ["dep:serde", "dep:serde_json"]
-full = ["grafeo", "webrtc", "tree", "telemetry", "parallel", "compression", "storage", "serde"]
+full = ["grafeo", "batcher", "webrtc", "tree", "telemetry", "parallel", "compression", "storage", "serde"]
 
 # ============================================================================
 # Dependencies — every dep is `optional = true` unless it is required by

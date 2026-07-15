@@ -52,7 +52,7 @@ impl InMemoryStorage {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl StorageBackend for InMemoryStorage {
     async fn load(&self, key: &str) -> std::io::Result<Vec<u8>> {
         self.inner
