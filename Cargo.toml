@@ -139,6 +139,33 @@ bincode = { version = "1", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "sync", "time"] }
 tracing-subscriber = "0.3"
 tempfile = "3"
+# Criterion for `cargo bench` (issue #1 item 11). `default-features = false`
+# drops `rayon` (which does not compile on `wasm32-unknown-unknown`) so the
+# same dev-dep line works for both native and WASM bench targets.
+criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support"] }
+# For WASM benchmarks, enable the `wasm-bindgen` engine (criterion uses
+# `web-sys::Performance::now()` for timing in browser WASM builds). Swap the
+# line above for:
+# criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support", "wasm-bindgen"] }
+# See `benches/README.md` for the full WASM bench runbook + known limitations.
+
+# ============================================================================
+# Benchmarks (issue #1 item 11)
+# ============================================================================
+#
+# `cargo bench --features full` runs the four benchmark groups on native.
+# `cargo bench --target wasm32-unknown-unknown --features full,wasm` is the
+# WASM equivalent (requires the `wasm-bindgen` feature on `criterion` — see
+# the commented-out dev-dep line above + `benches/README.md`).
+#
+# The benches exercise `GrafeoLoroApp`, `apply_node_batch`, `hydrate_grafeo`,
+# and `LoroOp::TreeMove` — all of which require the `full` feature set
+# (`grafeo` is native-only today; see `benches/README.md` for the WASM story).
+
+[[bench]]
+name = "core"
+harness = false
+required-features = ["full"]
 
 # ============================================================================
 # WASM target configuration
