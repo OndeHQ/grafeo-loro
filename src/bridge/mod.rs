@@ -13,9 +13,17 @@
 pub mod grafeo_tx;
 pub mod origin;
 
-#[cfg(feature = "batcher")]
+// `batcher` + `sync_engine` modules pull `grafeo` (GrafeoDB, Session API),
+// `telemetry` (HealthProbe, MetricsRegistry, SharedTracer), and the full
+// tokio runtime (`spawn`, `spawn_blocking`, `select!`). They are therefore
+// gated by `batcher + grafeo + telemetry` — enabling `batcher` alone gives
+// you the trait-abstracted `Mailbox<T>` + `TokioMailbox<T>` (in
+// `crate::runtime`) without dragging in the grafeo execution layer.
+// Issue #1 item 2 compliance: the Mailbox trait itself is available with
+// `bridge` alone.
+#[cfg(all(feature = "batcher", feature = "grafeo", feature = "telemetry"))]
 pub mod batcher;
-#[cfg(feature = "batcher")]
+#[cfg(all(feature = "batcher", feature = "grafeo", feature = "telemetry"))]
 pub mod sync_engine;
 
 // Re-exports for in-crate ergonomic access (`use crate::bridge::SyncEngine`
@@ -25,5 +33,5 @@ pub mod sync_engine;
 #[cfg(feature = "grafeo")]
 pub use grafeo_tx::apply_loro_op;
 pub use grafeo_tx::BridgeMaps;
-#[cfg(feature = "batcher")]
+#[cfg(all(feature = "batcher", feature = "grafeo", feature = "telemetry"))]
 pub use sync_engine::SyncEngine;

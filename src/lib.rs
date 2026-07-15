@@ -141,11 +141,11 @@ pub mod app;
 
 #[cfg(all(feature = "bridge", feature = "storage", feature = "grafeo", feature = "batcher"))]
 pub use app::GrafeoLoroApp;
-#[cfg(all(feature = "batcher", feature = "grafeo"))]
+#[cfg(all(feature = "batcher", feature = "grafeo", feature = "telemetry"))]
 pub use bridge::sync_engine::InboundMsg;
 #[cfg(feature = "bridge")]
 pub use bridge::BridgeMaps;
-#[cfg(all(feature = "batcher", feature = "grafeo"))]
+#[cfg(all(feature = "batcher", feature = "grafeo", feature = "telemetry"))]
 pub use bridge::SyncEngine;
 pub use config::{CompressionType, SsotMode};
 pub use error::GrafeoLoroError;
@@ -159,6 +159,13 @@ pub use hydration::vector::generate_local_embedding;
 pub use hydration::VectorOffloadManager;
 #[cfg(feature = "storage")]
 pub use storage::StorageBackend;
+// Trait-abstracted async runtime (issue #1 item 2). The `Mailbox` trait +
+// `MailboxClosed` error are available with `bridge` alone; the tokio-backed
+// `TokioMailbox` impl requires `batcher` (which pulls `tokio::sync::mpsc`).
+#[cfg(feature = "bridge")]
+pub use runtime::{Mailbox, MailboxClosed};
+#[cfg(feature = "batcher")]
+pub use runtime::TokioMailbox;
 // Re-exports for tree_adapter, ffi, wasm modules will be added by parallel
 // agents (tasks 5, 6, 8) when they fill in their stub modules.
 
