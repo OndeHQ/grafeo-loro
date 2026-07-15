@@ -1,8 +1,11 @@
-//! In-memory storage backend — reference impl for unit tests.
+//! In-memory storage backend — reference impl for unit tests, examples, and
+//! ephemeral graphs.
 //!
-//! NOT for production. Use a real backend (filesystem, S3, IDB, OPFS) in
-//! your app. This backend is ` Rc<RefCell<>>`-friendly: all methods take
-//! `&self` and mutate via interior mutability.
+//! NOT for production durability. Use a real backend (filesystem, S3, IDB,
+//! OPFS) in your app when snapshots need to survive a process restart. This
+//! backend is `Rc<RefCell<>>`-friendly: all methods take `&self` and mutate
+//! via interior mutability (`Mutex<HashMap<...>>` so the same impl works
+//! under `Arc<dyn StorageBackend>` on native multi-threaded runtimes).
 
 use std::collections::HashMap;
 use std::sync::Mutex;

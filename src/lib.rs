@@ -166,6 +166,9 @@ pub use hydration::vector::generate_local_embedding;
 pub use hydration::VectorOffloadManager;
 #[cfg(feature = "storage")]
 pub use storage::StorageBackend;
+#[cfg(feature = "storage")]
+pub use storage::InMemoryStorage;
+pub use error::Result;
 // Trait-abstracted async runtime (issue #1 item 2). The `Mailbox` trait +
 // `MailboxClosed` error are available with `bridge` alone; the tokio-backed
 // `TokioMailbox` impl requires `batcher` (which pulls `tokio::sync::mpsc`).

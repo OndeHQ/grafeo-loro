@@ -7,9 +7,7 @@
 //! - In-memory backend for unit tests
 
 pub mod traits;
-#[cfg(test)]
 pub mod memory;
 
 pub use traits::StorageBackend;
-#[cfg(test)]
 pub use memory::InMemoryStorage;
