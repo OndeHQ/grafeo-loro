@@ -166,8 +166,14 @@ pub use storage::StorageBackend;
 pub use runtime::{Mailbox, MailboxClosed};
 #[cfg(feature = "batcher")]
 pub use runtime::TokioMailbox;
-// Re-exports for tree_adapter, ffi, wasm modules will be added by parallel
-// agents (tasks 5, 6, 8) when they fill in their stub modules.
+// Re-exports for tree_adapter (issue #1 item 8). The `tree` feature gates
+// the module itself; the re-exports follow the same gate. `CycleError`
+// derives `thiserror::Error` (a non-optional dep), so it is always available
+// when `tree` is on.
+#[cfg(feature = "tree")]
+pub use tree_adapter::{CycleError, TreeAdapter, TreeNode};
+// Re-exports for ffi, wasm modules will be added by parallel agents (tasks
+// 6, 8) when they fill in their stub modules.
 
 // Re-export native crates so raw handles are usable immediately (issue #1
 // item 4: Onde receives the `LoroDoc` from `GrafeoLoroApp::doc()` and calls
