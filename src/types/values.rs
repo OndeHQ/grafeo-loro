@@ -71,7 +71,13 @@ impl Reconcile for LoroProperty {
 }
 
 /// Grafeo-side value: superset of `LoroProperty` plus recursive `Map`/`List` and offloaded `Vector`.
+///
+/// `Serialize`/`Deserialize` derives are gated by `serde` so the bincode-only
+/// FFI entry point `apply_loro_op_bytes` (issue #1 item 6) can round-trip
+/// `LoroOp::UpsertNode::properties` (which is `HashMap<String, GraphValue>`)
+/// through bincode without pulling `serde_json` (ADR-010).
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum GraphValue {
     Null,
     Bool(bool),

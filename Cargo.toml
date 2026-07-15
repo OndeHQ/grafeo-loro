@@ -43,7 +43,13 @@ rust-version = "1.80"
 
 [features]
 default = []
-bridge = []
+# `bridge` pulls `bincode` so the bincode-only FFI entry point
+# `apply_loro_op_bytes` is available with the minimal hot-path contract.
+# Note: bincode 1.x transitively requires `serde` core (the trait machinery)
+# but does NOT pull `serde_json` (the JSON codec) — JSON is admin-only per
+# ADR-010. Callers wanting `apply_loro_op_bytes` must also enable `serde`
+# so `LoroOp`/`GraphValue` get their `Serialize`/`Deserialize` derives.
+bridge = ["dep:bincode"]
 batcher = ["bridge", "tokio/sync", "tokio/time"]
 compression = ["dep:lz4_flex", "dep:zstd"]
 tree = ["bridge"]

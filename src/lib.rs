@@ -175,6 +175,18 @@ pub use tree_adapter::{CycleError, TreeAdapter, TreeNode};
 // Re-exports for ffi, wasm modules will be added by parallel agents (tasks
 // 6, 8) when they fill in their stub modules.
 
+// Re-exports for the FFI hot-path API (issue #1 item 6). `NodeOp` and
+// `NodeValue` are available with `bridge` alone (they have no grafeo deps);
+// `apply_node_batch` additionally needs `grafeo` (calls `apply_loro_op`);
+// `apply_loro_op_bytes` additionally needs `serde` (bincode 1.x requires
+// `LoroOp: Deserialize`, which is derived under `serde`).
+#[cfg(feature = "bridge")]
+pub use ffi::{NodeOp, NodeValue};
+#[cfg(all(feature = "bridge", feature = "grafeo"))]
+pub use ffi::apply_node_batch;
+#[cfg(all(feature = "bridge", feature = "grafeo", feature = "serde"))]
+pub use ffi::apply_loro_op_bytes;
+
 // Re-export native crates so raw handles are usable immediately (issue #1
 // item 4: Onde receives the `LoroDoc` from `GrafeoLoroApp::doc()` and calls
 // native Loro APIs directly via this re-export).
