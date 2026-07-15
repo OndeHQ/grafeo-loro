@@ -33,7 +33,7 @@ rust-version = "1.80"
 #   onnx         → grafeo + ort (C lib, native only)
 #   webrtc       → webrtc-rs (native only)
 #   telemetry    → opentelemetry, tracing
-#   wasm         → wasm-bindgen, js-sys, web-sys (target-family = wasm only)
+#   wasm         → wasm-bindgen, js-sys, web-sys, console_error_panic_hook (target-family = wasm only)
 #   parallel     → rayon (off by default; WASM is single-threaded by default)
 #   serde        → serde, serde_json
 #   full         → grafeo + onnx + webrtc + tree + telemetry + parallel
@@ -58,7 +58,7 @@ grafeo = ["bridge", "dep:grafeo", "dep:grafeo-common", "dep:grafeo-engine"]
 onnx = ["grafeo", "dep:ort"]
 webrtc = ["dep:webrtc-rs"]
 telemetry = ["dep:opentelemetry"]
-wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys", "dep:console_error_panic_hook"]
 parallel = ["dep:rayon"]
 serde = ["dep:serde", "dep:serde_json"]
 full = ["grafeo", "webrtc", "tree", "telemetry", "parallel", "compression", "storage", "serde"]
@@ -126,6 +126,11 @@ opentelemetry = { version = "0.23", features = ["metrics", "trace"], optional = 
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 web-sys = { version = "0.3", optional = true, features = ["MessageChannel", "MessagePort", "Window"] }
+# `console_error_panic_hook` routes Rust panics to `console.error` in browser
+# WASM builds. Pulled by the `wasm` feature; the `#[wasm_bindgen]` init hook
+# `init_panic_hook` is gated by `target_family = "wasm"` so the dep is only
+# referenced on actual WASM targets.
+console_error_panic_hook = { version = "0.1", optional = true }
 
 # --- Optional: bincode for hot-path FFI (issue #1 item 6) ------------------
 bincode = { version = "1", optional = true }

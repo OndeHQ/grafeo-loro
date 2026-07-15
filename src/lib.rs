@@ -111,10 +111,15 @@ pub mod tree_adapter;
 #[cfg(feature = "bridge")]
 pub mod ffi;
 
-/// WASM bindings: `JsValue` error bridge + `wasm-bindgen` prelude.
+/// WASM bindings: `JsValue` error bridge + `wasm-bindgen` prelude (issue #1
+/// item 12).
 ///
-/// Only available on `target_family = "wasm"`.
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
+/// The module itself is gated by `feature = "wasm"` only — the target-
+/// agnostic `error_code` function is available on native (for testing) too.
+/// The JsValue-using pieces (`js_error`, `From<GrafeoLoroError> for JsValue`,
+/// `init_panic_hook`) are internally gated by `target_family = "wasm"` so
+/// they only compile on actual WASM targets.
+#[cfg(feature = "wasm")]
 pub mod wasm;
 
 /// Trait-abstracted async runtime (issue #1 item 2).
@@ -186,6 +191,19 @@ pub use ffi::{NodeOp, NodeValue};
 pub use ffi::apply_node_batch;
 #[cfg(all(feature = "bridge", feature = "grafeo", feature = "serde"))]
 pub use ffi::apply_loro_op_bytes;
+
+// Re-exports for the WASM JsValue error bridge (issue #1 item 12).
+// `error_code` is target-agnostic (testable on native); `js_error` +
+// `init_panic_hook` only exist on `target_family = "wasm"`. The
+// `From<GrafeoLoroError> for JsValue` impl is brought into scope by
+// `use crate::wasm::*` on WASM targets — it cannot be re-exported via
+// `pub use` because trait impls are not nameable items; callers that
+// want `?` to auto-convert in `#[wasm_bindgen]` fns must add
+// `use grafeo_loro::wasm;` (the impl is in scope via the module).
+#[cfg(feature = "wasm")]
+pub use wasm::error_code;
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub use wasm::{init_panic_hook, js_error};
 
 // Re-export native crates so raw handles are usable immediately (issue #1
 // item 4: Onde receives the `LoroDoc` from `GrafeoLoroApp::doc()` and calls
