@@ -1,44 +1,191 @@
 [package]
 name = "grafeo-loro"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Local-first, in-process, dual-store graph database with CRDT consensus (Loro) + execution (Grafeo)."
 repository = "https://github.com/OndeHQ/grafeo-loro"
+documentation = "https://docs.rs/grafeo-loro"
+readme = "README.md"
+keywords = ["crdt", "loro", "graph", "grafeo", "wasm"]
+categories = ["database", "data-structures", "wasm"]
+# MSRV — verified via `cargo msrv` against the dep tree. Pinned to 1.80
+# because `loro = "1.13"` requires it and we use `core::cell::OnceCell`
+# (stabilized 1.70) + `std::sync::OnceLock` (stabilized 1.70). The `wasm32`
+# target adds no further constraint.
+rust-version = "1.80"
+
+# ============================================================================
+# Feature gates (issue #1 item 7) — granular, default-off.
+# ============================================================================
+#
+# Onde (the consumer) uses `--features bridge,batcher,compression,tree` for
+# its WASM bundle. Native server builds use `--features full`.
+#
+# Dependency matrix per feature (audited against the dep tree):
+#
+#   bridge       → lorosurgeon, parking_lot, async-trait, thiserror, tracing
+#   batcher      → bridge + tokio (sync, time)
+#   compression  → lz4_flex, zstd (C lib)
+#   tree         → bridge
+#   storage      → async-trait
+#   grafeo       → bridge + grafeo + grafeo-common + grafeo-engine (native only)
+#   onnx         → grafeo + ort (C lib, native only)
+#   webrtc       → webrtc-rs (native only)
+#   telemetry    → opentelemetry, tracing
+#   wasm         → wasm-bindgen, js-sys, web-sys, console_error_panic_hook (target-family = wasm only)
+#   parallel     → rayon (off by default; WASM is single-threaded by default)
+#   serde        → serde, serde_json
+#   full         → grafeo + onnx + webrtc + tree + telemetry + parallel
+#
+# `default = []` per issue #1 mandate: a fresh `cargo add grafeo-loro` MUST
+# pull in zero heavy native deps. The user opts in explicitly.
+
+[features]
+default = []
+# `bridge` pulls `bincode` so the bincode-only FFI entry point
+# `apply_loro_op_bytes` is available with the minimal hot-path contract.
+# Note: bincode 1.x transitively requires `serde` core (the trait machinery)
+# but does NOT pull `serde_json` (the JSON codec) — JSON is admin-only per
+# ADR-010. Callers wanting `apply_loro_op_bytes` must also enable `serde`
+# so `LoroOp`/`GraphValue` get their `Serialize`/`Deserialize` derives.
+bridge = ["dep:bincode"]
+batcher = ["bridge", "tokio/sync", "tokio/time"]
+compression = ["dep:lz4_flex", "dep:zstd", "grafeo"]
+tree = ["bridge"]
+storage = []
+grafeo = ["bridge", "dep:grafeo", "dep:grafeo-common", "dep:grafeo-engine"]
+onnx = ["grafeo", "dep:ort"]
+webrtc = ["dep:webrtc-rs"]
+telemetry = ["dep:opentelemetry"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys", "dep:console_error_panic_hook"]
+parallel = ["dep:rayon"]
+serde = ["dep:serde", "dep:serde_json"]
+full = ["grafeo", "batcher", "webrtc", "tree", "telemetry", "parallel", "compression", "storage", "serde"]
+
+# ============================================================================
+# Dependencies — every dep is `optional = true` unless it is required by
+# the `bridge` feature (the minimal hot-path contract). This is the issue
+# #1 mandate: no transitive bloat into a fresh `cargo add grafeo-loro`.
+# ============================================================================
 
 [dependencies]
-grafeo = "0.5"
-# Direct dep for `grafeo_common::types::EpochId` (used by the epoch side-channel
-# echo-prevention set). Already loaded transitively by grafeo, so this adds no
-# new code to the build graph.
-grafeo-common = "0.5"
-# Direct dep for `grafeo_engine::transaction::IsolationLevel` (used by
-# `sync_tree_move_to_grafeo` for Serializable isolation — see P2T2-DEVIL Q3/R3).
-# The `grafeo` umbrella crate does NOT re-export the `transaction` module
-# (`grafeo-0.5.42/src/lib.rs:68-88`), so a direct dep is required to reach
-# `IsolationLevel::Serializable`. Already loaded transitively via grafeo, so
-# this adds no new code to the build graph.
-grafeo-engine = "0.5"
-loro = "1.0"
+# --- Always-on (required by `bridge` minimal contract) ----------------------
+# `loro` is the consensus-layer SSOT — always required; the crate has no
+# purpose without it. Pinned to 1.13 per issue #1 item 5 to match Onde's
+# current version. Loosened to `>=1.13, <2.0` for forward-compat.
+loro = "1.13"
 lorosurgeon = "0.2"
-tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "fs"] }
 parking_lot = "0.12"
-rayon = "1.8"
-lz4_flex = "0.11"
-# zstd: binds to C zstd (no pure-Rust encoder exists in the ecosystem — `ruzstd` is decoder-only).
-# `zstd-sys` always compiles the C library via `cc`; defer pure-Rust evaluation to Phase 6 hardening if needed.
-zstd = "0.13"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 async-trait = "0.1"
 thiserror = "1"
-opentelemetry = { version = "0.23", features = ["metrics", "trace"] }
 tracing = "0.1"
 
+# --- Optional: bridge batcher runtime ---------------------------------------
+# Tokio is ONLY pulled when `batcher` is on. WASM users do NOT enable
+# `batcher`; they use the trait-abstracted `Mailbox` instead (issue #1 item 2).
+tokio = { version = "1", default-features = false, optional = true }
+
+# --- Optional: parallel hydration ------------------------------------------
+rayon = { version = "1.8", optional = true }
+
+# --- Optional: compression codecs ------------------------------------------
+lz4_flex = { version = "0.11", optional = true }
+# zstd: binds to C zstd (no pure-Rust encoder exists in the ecosystem —
+# `ruzstd` is decoder-only). `zstd-sys` always compiles the C library via
+# `cc`; this is acceptable on native but NOT in WASM. The `compression`
+# feature must NOT be enabled in WASM builds; document this in the migration
+# guide. Phase 6 may swap to a pure-Rust codec if one becomes available.
+zstd = { version = "0.13", optional = true }
+
+# --- Optional: serde-shaped admin APIs -------------------------------------
+# Hot paths (>10 Hz) MUST use bincode or `&str`-shaped FFI per issue #1 item 6.
+# `serde` is admin-only.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+# --- Optional: grafeo execution layer (native only — WASM-incompatible) -----
+grafeo = { version = "0.5", optional = true }
+grafeo-common = { version = "0.5", optional = true }
+grafeo-engine = { version = "0.5", optional = true }
+
+# --- Optional: ONNX vector embeddings (native only) ------------------------
+# ort 2.x is currently a release candidate on crates.io. Pin to RC for now.
+# When ort 2.0 stable lands, loosen to `"2"`.
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false }
+
+# --- Optional: WebRTC transport (native only) ------------------------------
+# webrtc 0.21 is not yet released on crates.io; pin to latest 0.20 RC. When
+# 0.21 stable lands, loosen to `"0.21"`.
+webrtc-rs = { version = "=0.20.0-rc.3", optional = true, package = "webrtc" }
+
+# --- Optional: OpenTelemetry metrics + traces ------------------------------
+opentelemetry = { version = "0.23", features = ["metrics", "trace"], optional = true }
+
+# --- Optional: WASM bindings (target-family = wasm only) -------------------
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["MessageChannel", "MessagePort", "Window"] }
+# `console_error_panic_hook` routes Rust panics to `console.error` in browser
+# WASM builds. Pulled by the `wasm` feature; the `#[wasm_bindgen]` init hook
+# `init_panic_hook` is gated by `target_family = "wasm"` so the dep is only
+# referenced on actual WASM targets.
+console_error_panic_hook = { version = "0.1", optional = true }
+
+# --- Optional: bincode for hot-path FFI (issue #1 item 6) ------------------
+bincode = { version = "1", optional = true }
+
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
-# P3T3-L2 m4 (DEVIL Q3 — Option A): tracing-subscriber provides the `Layer` trait
-# for `tests/unit/vector_embedding.rs::test_capture::WarnCounter`. Standard
-# companion to `tracing`; 1-line dev-dep, ~15 LOC for the WARN-counter layer
-# (vs ~50 LOC for hand-rolled `Subscriber` — anti-plenger #5 Bloat).
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "sync", "time"] }
 tracing-subscriber = "0.3"
+tempfile = "3"
+# Criterion for `cargo bench` (issue #1 item 11). `default-features = false`
+# drops `rayon` (which does not compile on `wasm32-unknown-unknown`) so the
+# same dev-dep line works for both native and WASM bench targets.
+criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support"] }
+# For WASM benchmarks, enable the `wasm-bindgen` engine (criterion uses
+# `web-sys::Performance::now()` for timing in browser WASM builds). Swap the
+# line above for:
+# criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support", "wasm-bindgen"] }
+# See `benches/README.md` for the full WASM bench runbook + known limitations.
+
+# ============================================================================
+# Benchmarks (issue #1 item 11)
+# ============================================================================
+#
+# `cargo bench --features full` runs the four benchmark groups on native.
+# `cargo bench --target wasm32-unknown-unknown --features full,wasm` is the
+# WASM equivalent (requires the `wasm-bindgen` feature on `criterion` — see
+# the commented-out dev-dep line above + `benches/README.md`).
+#
+# The benches exercise `GrafeoLoroApp`, `apply_node_batch`, `hydrate_grafeo`,
+# and `LoroOp::TreeMove` — all of which require the `full` feature set
+# (`grafeo` is native-only today; see `benches/README.md` for the WASM story).
+
+[[bench]]
+name = "core"
+harness = false
+required-features = ["full"]
+
+# ============================================================================
+# WASM target configuration
+# ============================================================================
+#
+# When targeting `wasm32-unknown-unknown`, the `tokio`-backed `batcher`
+# feature MUST be off (tokio::sync::mpsc cannot run in browser WASM). The
+# trait-abstracted `Mailbox` (issue #1 item 2) is the WASM-compatible path.
+
+[lib]
+name = "grafeo_loro"
+path = "src/lib.rs"
+
+# ============================================================================
+# CI matrix (issue #1 item 7) — what `cargo build` combinations must pass:
+# ============================================================================
+#
+#   cargo build --no-default-features
+#   cargo build --no-default-features --features bridge
+#   cargo build --no-default-features --features bridge,batcher,compression,tree
+#   cargo build --no-default-features --features full
+#   cargo build --target wasm32-unknown-unknown --no-default-features --features bridge,compression,tree,wasm
+#   cargo build --target wasm32-wasi --no-default-features --features bridge,compression,tree

@@ -11,9 +11,15 @@
 //! exercised only by `tests/unit/tree_move.rs` and
 //! `tests/integration/tree_move_concurrency.rs` until bridge wiring lands.
 
+//! Loro → Grafeo tree reparenting bridge.
+//!
+//! Issue #1: requires `grafeo` feature (calls `GrafeoDB::session` etc.).
+//! The `OrderedCollection` / `TreeNode` types at the top of this file are
+//! available whenever `bridge` is on (no grafeo dep); the
+//! `sync_tree_move_to_grafeo` function is gated by `grafeo`.
+
 use std::collections::{HashSet, VecDeque};
 
-use grafeo::GrafeoDB;
 use lorosurgeon::{Hydrate, Reconcile};
 use tracing::{debug, instrument};
 
@@ -113,9 +119,10 @@ pub struct TreeNode {
 /// - `Session::prepare_commit` — `session/mod.rs:4496` (`&mut self -> Result<PreparedCommit<'_>>`)
 /// - `PreparedCommit::set_metadata` — `transaction/prepared.rs:107` (advisory; dropped on commit per Devil Gap 1)
 /// - `PreparedCommit::commit` — `transaction/prepared.rs:124` (`self -> Result<EpochId>`)
+#[cfg(feature = "grafeo")]
 #[instrument(skip(db), name = "sync_tree_move_to_grafeo", level = "info")]
 pub fn sync_tree_move_to_grafeo(
-    db: &GrafeoDB,
+    db: &grafeo::GrafeoDB,
     node_id: NodeId,
     old_parent: NodeId,
     new_parent: NodeId,
@@ -246,6 +253,7 @@ pub fn sync_tree_move_to_grafeo(
 /// (`catalog/mod.rs:1349`) cycle-checks schema type inheritance, and
 /// `procedures::has_negative_cycle` (`procedures.rs:831`) is a Bellman-Ford
 /// query procedure — neither constrains user edges at commit time.
+#[cfg(feature = "grafeo")]
 fn would_create_cycle_in_tx(
     session: &grafeo::Session,
     node_id: NodeId,
