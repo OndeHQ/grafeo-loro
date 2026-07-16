@@ -29,7 +29,31 @@ pub const DEFAULT_STALENESS_MS: u64 = 5000;
 /// (`zstd-0.13.3/src/lib.rs:36` re-exports `zstd_safe::CLEVEL_DEFAULT = 3`); named
 /// here as SSOT so Phase 4 storage can reference the same constant without
 /// reaching into the compression module (anti-plenger #2 DRY/SSOT).
+///
+/// **Issue #3 sub-issue 1 note:** `CompressionType::Zstd` now routes to Brotli
+/// internally (see `src/compression/wrapper.rs`). This constant is kept for
+/// backward-compat with callers that still reference it by name; new code
+/// should use [`DEFAULT_BROTLI_QUALITY`] directly. The orchestrator will
+/// rename `CompressionType::Zstd` → `CompressionType::Brotli` in a follow-up.
+// TODO(orchestrator): rename DEFAULT_ZSTD_LEVEL → DEFAULT_BROTLI_QUALITY_ALIAS
+//                   (or just delete it) once CompressionType::Zstd is renamed.
 pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
+
+/// Brotli quality used by `compression::wrapper::brotli_compress` and by the
+/// `CompressionType::Zstd` arm of `CompressedPayload::compress` (issue #3
+/// sub-issue 1 — pure-Rust codec swap, replaces `zstd-sys`). Range 0–11;
+/// higher = better ratio + slower. Value `5` is the Brotli spec default for
+/// streaming compression (`brotli-7.0.0/src/enc/backward_references/hq.rs:43`
+/// pins `DEFAULT_LGWIN = 22`; quality 5 is the lib default for non-archive
+/// workloads — balances ratio and speed for typical Loro snapshot sizes).
+pub const DEFAULT_BROTLI_QUALITY: u32 = 5;
+
+/// DEFLATE compression level used by `compression::wrapper::deflate_compress`
+/// (issue #3 sub-issue 1 — pure-Rust codec via `flate2`'s `rust_backend`).
+/// Range 0–9; `6` is `flate2::Compression::default()` (verified at
+/// `flate2-1.1.9/src/mem.rs:67`). Suitable for hot-path FFI payloads where
+/// decode speed matters more than ratio.
+pub const DEFAULT_DEFLATE_LEVEL: u32 = 6;
 
 /// Embedding dimension used by `hydration::vector::generate_local_embedding`
 /// (Phase 3 Task 3) and required by Grafeo's HNSW vector index at index-creation

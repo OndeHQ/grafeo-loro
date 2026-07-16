@@ -1,7 +1,36 @@
 //! Phase 3 Task 1: compression envelope + `LoroDoc` extension trait.
 //!
 //! L3 deep implementation — codec calls filled; verified API citations inline.
-//! `zstd` binds to C zstd (no pure-Rust encoder exists in the ecosystem); `lz4_flex` is pure-Rust.
+//!
+//! ## Issue #3 sub-issue 1 — pure-Rust codec swap
+//!
+//! Previously this module bound to `zstd-sys` (a C library) which:
+//! 1. Broke `wasm32-unknown-unknown` builds (requires clang cross-compiler).
+//! 2. Pulled a non-Rust dep into a crate that advertises WASM compatibility.
+//!
+//! The fix: `zstd` is replaced with `brotli` (pure-Rust) and `flate2` (with
+//! `rust_backend` — also pure-Rust). Both compile cleanly on
+//! `wasm32-unknown-unknown` without any C toolchain.
+//!
+//! **Variant-name caveat:** `CompressionType::Zstd` (in `src/config.rs`) is
+//! kept for now because `config.rs` is orchestrator-owned. Internally it routes
+//! to Brotli. The wire-format tag `0x02` is preserved for forward-compat with
+//! existing on-disk snapshots.
+//!
+//! ```text
+//! // TODO(orchestrator): rename Zstd variant → Brotli in src/config.rs.
+//! //                   Once renamed, update the match arms + tag mapping here.
+//! ```
+//!
+//! ## Codec helper API
+//!
+//! In addition to the [`CompressedPayload`] envelope (which dispatches via
+//! [`CompressionType`]), this module exposes standalone pure-Rust codec helpers
+//! — [`brotli_compress`], [`brotli_decompress`], [`deflate_compress`],
+//! [`deflate_decompress`] — so callers (and tests) can exercise each codec
+//! directly without going through the enum.
+
+use std::io::{Read, Write};
 
 use loro::{ExportMode, LoroDoc};
 use tracing::instrument;
@@ -30,7 +59,14 @@ pub struct CompressedPayload {
 }
 
 impl CompressedPayload {
-    /// Compress `raw_bytes` using `strategy`; fails on Zstd I/O errors.
+    /// Compress `raw_bytes` using `strategy`; fails on codec I/O errors.
+    ///
+    /// Codec dispatch:
+    ///
+    /// - `None`   → passthrough (`Vec::from`)
+    /// - `Lz4`    → `lz4_flex::compress_prepend_size` (infallible, pure-Rust)
+    /// - `Zstd`   → routes to **Brotli** (issue #3 sub-issue 1; variant-name
+    ///              kept pending orchestrator rename — see module-level TODO).
     #[instrument(skip(raw_bytes), name = "payload_compress", level = "info")]
     pub fn compress(raw_bytes: &[u8], strategy: CompressionType) -> Result<Self> {
         // Dispatch on `strategy`; each arm produces a `raw_data: Vec<u8>`.
@@ -46,11 +82,11 @@ impl CompressedPayload {
                 lz4_flex::compress_prepend_size(raw_bytes)
             }
             CompressionType::Zstd => {
-                // Zstd: `zstd::stream::encode_all` — level `DEFAULT_ZSTD_LEVEL` (= 3).
-                // verified at zstd-0.13.3/src/stream/functions.rs:32.
-                // `io::Error` routed via `Compression(e.to_string())` (DEVIL M3 — symmetric with LZ4, NOT `StorageIo`).
-                zstd::stream::encode_all(raw_bytes, crate::constants::DEFAULT_ZSTD_LEVEL)
-                    .map_err(|e| GrafeoLoroError::Compression(e.to_string()))?
+                // Issue #3 sub-issue 1: previously `zstd::stream::encode_all` (C dep,
+                // broke WASM). Now routes to pure-Rust Brotli. Variant name kept
+                // pending orchestrator rename (see module-level TODO).
+                // TODO(orchestrator): rename Zstd variant → Brotli in src/config.rs.
+                brotli_compress(raw_bytes, crate::constants::DEFAULT_BROTLI_QUALITY)?
             }
         };
         Ok(Self {
@@ -76,11 +112,10 @@ impl CompressedPayload {
                     .map_err(|e| GrafeoLoroError::Compression(e.to_string()))
             }
             CompressionType::Zstd => {
-                // Zstd: `zstd::stream::decode_all` — returns `Result<Vec<u8>, io::Error>`.
-                // verified at zstd-0.13.3/src/stream/functions.rs:8.
-                // `io::Error` routed via `Compression(e.to_string())` (DEVIL M3 — symmetric with LZ4, NOT `StorageIo`).
-                zstd::stream::decode_all(&self.raw_data[..])
-                    .map_err(|e| GrafeoLoroError::Compression(e.to_string()))
+                // Issue #3 sub-issue 1: previously `zstd::stream::decode_all` (C dep).
+                // Now routes to pure-Rust Brotli. Variant name kept pending orchestrator rename.
+                // TODO(orchestrator): rename Zstd variant → Brotli in src/config.rs.
+                brotli_decompress(&self.raw_data)
             }
         }
     }
@@ -169,9 +204,93 @@ fn tag_to_compression_type(tag: u8) -> Result<CompressionType> {
         0x01 => Ok(CompressionType::Lz4),
         0x02 => Ok(CompressionType::Zstd),
         _ => Err(GrafeoLoroError::Compression(format!(
-            "wire format: unknown codec tag {tag:#04x} (expected 0x00=None, 0x01=Lz4, 0x02=Zstd)"
+            "wire format: unknown codec tag {tag:#04x} (expected 0x00=None, 0x01=Lz4, 0x02=Zstd/Brotli)"
         ))),
     }
+}
+
+// ============================================================================
+// Issue #3 sub-issue 1 — pure-Rust codec helpers (Brotli + Deflate)
+// ============================================================================
+//
+// These standalone helpers let callers (and tests) exercise each pure-Rust
+// codec directly without going through `CompressionType` (which is currently
+// fixed at three variants by the orchestrator-owned `src/config.rs`). Both
+// `brotli` and `flate2` are pulled by the `compression` feature with their
+// pure-Rust backends (see `Cargo.toml`).
+
+/// Compress `input` using Brotli (pure-Rust, WASM-safe).
+///
+/// `quality` is the Brotli quality (0–11). Higher = better ratio + slower.
+/// Use [`crate::constants::DEFAULT_BROTLI_QUALITY`] (= 5) for the SSOT default.
+/// `lgwin` is fixed at 22 (the Brotli spec max for the standard 16 MiB window).
+///
+/// Errors are routed through [`GrafeoLoroError::Compression`] for symmetry with
+/// the LZ4 codec path.
+pub fn brotli_compress(input: &[u8], quality: u32) -> Result<Vec<u8>> {
+    // `brotli::CompressorWriter::new(writer, buffer_size, q, lgwin)` — verified
+    // at brotli-7.0.0/src/enc/writer.rs:84. `q` is quality (0–11), `lgwin` is
+    // the window size (10–24). We pin `lgwin = 22` (spec default max).
+    let mut writer = brotli::CompressorWriter::new(Vec::new(), 4096, quality, 22);
+    writer
+        .write_all(input)
+        .map_err(|e| GrafeoLoroError::Compression(format!("brotli compress: {e}")))?;
+    // Explicit flush before `into_inner` so any buffered compressed bytes are
+    // drained into the inner `Vec<u8>`. `into_inner` returns `W` directly (not
+    // `Result`) per brotli-7.0.0/src/enc/writer.rs:105 — the Drop impl would
+    // also flush, but errors raised in Drop are silently swallowed.
+    writer
+        .flush()
+        .map_err(|e| GrafeoLoroError::Compression(format!("brotli flush: {e}")))?;
+    Ok(writer.into_inner())
+}
+
+/// Decompress a Brotli stream produced by [`brotli_compress`].
+///
+/// Uses `brotli::Decompressor` (re-exported from `brotli_decompressor::reader`
+/// at `brotli-7.0.0/src/lib.rs:38`). Errors are routed via
+/// [`GrafeoLoroError::Compression`].
+pub fn brotli_decompress(input: &[u8]) -> Result<Vec<u8>> {
+    let mut reader = brotli::Decompressor::new(input, 4096);
+    let mut out = Vec::new();
+    reader
+        .read_to_end(&mut out)
+        .map_err(|e| GrafeoLoroError::Compression(format!("brotli decompress: {e}")))?;
+    Ok(out)
+}
+
+/// Compress `input` using raw DEFLATE (pure-Rust via `flate2`'s `rust_backend`).
+///
+/// `level` is 0–9 (0 = no compression, 9 = max). Use
+/// [`crate::constants::DEFAULT_DEFLATE_LEVEL`] (= 6) for the SSOT default.
+///
+/// Output is raw DEFLATE (no zlib or gzip header) so the bytes are interoperable
+/// with any RFC 1951 decoder (e.g. JS `pako.inflate`).
+pub fn deflate_compress(input: &[u8], level: u32) -> Result<Vec<u8>> {
+    // `flate2::Compression::new(level)` clamps to 0–10 internally; we cap at 9
+    // to match the DEFLATE spec. `flate2::write::DeflateEncoder` produces raw
+    // DEFLATE (no zlib header) per flate2-1.1.9/src/deflate/write.rs.
+    let level = level.min(9);
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(level));
+    encoder
+        .write_all(input)
+        .map_err(|e| GrafeoLoroError::Compression(format!("deflate compress: {e}")))?;
+    encoder
+        .finish()
+        .map_err(|e| GrafeoLoroError::Compression(format!("deflate finish: {e}")))
+}
+
+/// Decompress a raw DEFLATE stream produced by [`deflate_compress`].
+///
+/// Uses `flate2::read::DeflateDecoder` (re-exported at flate2-1.1.9/src/lib.rs:156).
+pub fn deflate_decompress(input: &[u8]) -> Result<Vec<u8>> {
+    let mut decoder = flate2::read::DeflateDecoder::new(input);
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| GrafeoLoroError::Compression(format!("deflate decompress: {e}")))?;
+    Ok(out)
 }
 
 /// Extension trait binding compression onto `LoroDoc` export/import.
