@@ -38,11 +38,14 @@ use crate::types::values::GraphValue;
 /// # Errors
 ///
 /// Same as `parallel_hydrate_grafeo` — see that function's docs.
-#[cfg_attr(feature = "telemetry", instrument(
-    skip(db, doc, maps, metrics, tracer),
-    name = "hydrate_grafeo",
-    level = "info"
-))]
+#[cfg_attr(
+    feature = "telemetry",
+    instrument(
+        skip(db, doc, maps, metrics, tracer),
+        name = "hydrate_grafeo",
+        level = "info"
+    )
+)]
 pub fn hydrate_grafeo(
     db: &Arc<GrafeoDB>,
     doc: &LoroDoc,
@@ -53,11 +56,7 @@ pub fn hydrate_grafeo(
     #[cfg(feature = "telemetry")]
     let _ = metrics;
     #[cfg(feature = "telemetry")]
-    let _serial_span = tracer.map(|t| {
-        t.as_ref()
-            .span_builder("hydrate_grafeo")
-            .start(t.as_ref())
-    });
+    let _serial_span = tracer.map(|t| t.as_ref().span_builder("hydrate_grafeo").start(t.as_ref()));
 
     let v_root = doc.get_map(ROOT_VERTICES);
     let keys: Vec<String> = v_root.keys().map(|s| s.to_string()).collect();

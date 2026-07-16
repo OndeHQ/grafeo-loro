@@ -12,6 +12,15 @@
 //! local `u64` newtypes when `grafeo` is off. This means `BridgeMaps` is
 //! available in WASM builds without the grafeo execution layer — Onde can
 //! construct one and wire its own runtime against it.
+//!
+//! # Native text bijection check (issue #3 sub-issue 7, invariant I11)
+//!
+//! [`validate_text_bijection`] verifies that every `loro_key ↔ NodeId` pair
+//! in the bridge maps is bijective — both the forward (`loro_key → NodeId`)
+//! and inverse (`NodeId → loro_key`) maps must agree, and no two distinct
+//! `loro_key`s may map to the same `NodeId` (and vice versa). This is the
+//! native enforcement of invariant I11 the issue body calls out as
+//! "Bridge map drift causes silent data loss on text nodes."
 
 use std::collections::HashMap;
 
@@ -239,4 +248,224 @@ fn apply_tree_move(
         maps.insert_edge(new_key, eid);
     }
     Ok(())
+}
+
+// ============================================================================
+// Issue #3 sub-issue 7, invariant I11: bijective bridge-map consistency
+// ============================================================================
+//
+// The issue body calls out: "Bridge map drift causes silent data loss on
+// text nodes." `validate_text_bijection` is the native enforcement: it
+// walks both the forward (`loro_key → NodeId`) and inverse (`NodeId →
+// loro_key`) maps and verifies they agree (no missing inverse, no missing
+// forward, no two keys mapping to the same id, no two ids mapping to the
+// same key).
+//
+// The check is pure-Rust + `bridge` feature only — no grafeo dep. The
+// orchestrator wires it into `MutationBatcher::flush_inner`'s post-commit
+// invariant-check hook (issue #3 sub-issue 10 territory) + the
+// `observability` module's I11 assertion API.
+
+/// Error returned by [`validate_text_bijection`] when the bridge maps
+/// violate invariant I11 (bijective `loro_key ↔ NodeId` consistency).
+///
+/// Each variant carries enough context for the orchestrator to log a
+/// structured alert + surface a repair hint to FFI (e.g. "delete the
+/// orphaned loro_key X" or "re-bind NodeId Y to its last-known key").
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BijectionError {
+    /// Forward map has `loro_key → id` but the inverse map lacks the
+    /// corresponding `id → loro_key` entry. Bridge drift: an insert_node
+    /// was interrupted between the forward write and the inverse write.
+    #[error("bijection drift: forward map has loro_key {loro_key:?} → id {id:?} but inverse map lacks the entry")]
+    MissingInverse {
+        /// The orphaned forward-mapping key.
+        loro_key: String,
+        /// The id that should have an inverse entry but doesn't.
+        id: crate::types::ids::NodeId,
+    },
+    /// Inverse map has `id → loro_key` but the forward map lacks the
+    /// corresponding `loro_key → id` entry. Mirror of [`Self::MissingInverse`].
+    #[error("bijection drift: inverse map has id {id:?} → loro_key {loro_key:?} but forward map lacks the entry")]
+    MissingForward {
+        /// The orphaned inverse-mapping key.
+        loro_key: String,
+        /// The id that has an inverse entry but no forward entry.
+        id: crate::types::ids::NodeId,
+    },
+    /// Two distinct `loro_key`s map to the same `NodeId`. This silently
+    /// loses the second insert_node's binding (the second `insert_node`
+    /// overwrites the inverse map entry, but the forward map still has
+    /// both keys pointing at the same id).
+    #[error("bijection drift: two loro_keys map to same id {id:?} — keys: {key_a:?}, {key_b:?}")]
+    DuplicateId {
+        /// The id that is the target of two distinct key mappings.
+        id: crate::types::ids::NodeId,
+        /// First key.
+        key_a: String,
+        /// Second key (the one that overwrote key_a's inverse entry).
+        key_b: String,
+    },
+    /// Two distinct `NodeId`s map to the same `loro_key`. Mirror of
+    /// [`Self::DuplicateId`].
+    #[error(
+        "bijection drift: two ids map to same loro_key {loro_key:?} — ids: {id_a:?}, {id_b:?}"
+    )]
+    DuplicateKey {
+        /// The key that is the target of two distinct id mappings.
+        loro_key: String,
+        /// First id.
+        id_a: crate::types::ids::NodeId,
+        /// Second id (the one that overwrote id_a's forward entry).
+        id_b: crate::types::ids::NodeId,
+    },
+}
+
+/// Verify bijective `loro_key ↔ NodeId` consistency on text nodes
+/// (issue #3 sub-issue 7, invariant I11).
+///
+/// Walks both the forward (`node_id_map`) and inverse (`node_key_map`)
+/// maps in [`BridgeMaps`] and verifies:
+/// 1. Every forward entry has a corresponding inverse entry pointing back.
+/// 2. Every inverse entry has a corresponding forward entry pointing back.
+/// 3. No two distinct `loro_key`s map to the same `NodeId`.
+/// 4. No two distinct `NodeId`s map to the same `loro_key`.
+///
+/// Returns `Ok(())` if all four invariants hold; `Err(BijectionError)` on
+/// the first violation encountered.
+///
+/// # Cost
+///
+/// O(N) where N = max(node_id_map.len(), node_key_map.len()). Acquires
+/// read locks on both maps. Suitable for periodic invariant checks (e.g.
+/// post-flush) — NOT for hot-path per-op validation.
+///
+/// # Wire-up
+///
+/// The orchestrator wires this into:
+/// - `MutationBatcher::flush_inner`'s post-commit invariant-check hook
+///   (issue #3 sub-issue 10 territory).
+/// - The `observability` module's I11 assertion API (issue #3 sub-issue 10).
+/// - The FFI surface as `grafeo_loro_check_text_bijection(maps)` for
+///   downstream debug builds.
+pub fn validate_text_bijection(maps: &BridgeMaps) -> std::result::Result<(), BijectionError> {
+    let forward = maps.node_id_map.read();
+    let inverse = maps.node_key_map.read();
+
+    // Check 1: every forward entry has a corresponding inverse entry.
+    for (loro_key, id) in forward.iter() {
+        match inverse.get(id) {
+            Some(inv_key) if inv_key == loro_key => {
+                // OK — bijective pair.
+            }
+            Some(_other_key) => {
+                // Inverse points elsewhere — duplicate id (two keys → same id).
+                return Err(BijectionError::DuplicateId {
+                    id: *id,
+                    key_a: loro_key.clone(),
+                    key_b: _other_key.clone(),
+                });
+            }
+            None => {
+                return Err(BijectionError::MissingInverse {
+                    loro_key: loro_key.clone(),
+                    id: *id,
+                });
+            }
+        }
+    }
+
+    // Check 2: every inverse entry has a corresponding forward entry.
+    // (Duplicates among inverse values would also surface as DuplicateId
+    // above when we encounter the second forward key, but a missing
+    // forward entry is its own error.)
+    for (id, loro_key) in inverse.iter() {
+        match forward.get(loro_key) {
+            Some(fwd_id) if fwd_id == id => {
+                // OK — bijective pair.
+            }
+            Some(_other_id) => {
+                // Forward points elsewhere — duplicate key (two ids → same key).
+                return Err(BijectionError::DuplicateKey {
+                    loro_key: loro_key.clone(),
+                    id_a: *id,
+                    id_b: *_other_id,
+                });
+            }
+            None => {
+                return Err(BijectionError::MissingForward {
+                    loro_key: loro_key.clone(),
+                    id: *id,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(all(test, feature = "grafeo"))]
+mod bijection_tests {
+    use super::*;
+    use crate::types::ids::NodeId;
+
+    #[test]
+    fn empty_maps_pass() {
+        let maps = BridgeMaps::new();
+        assert!(validate_text_bijection(&maps).is_ok());
+    }
+
+    #[test]
+    fn single_pair_passes() {
+        let maps = BridgeMaps::new();
+        maps.insert_node("k1".to_string(), NodeId::new(1));
+        assert!(validate_text_bijection(&maps).is_ok());
+    }
+
+    #[test]
+    fn missing_inverse_detected() {
+        let maps = BridgeMaps::new();
+        // Inject forward entry without the inverse by going through the
+        // public API then surgically removing the inverse entry.
+        maps.insert_node("k1".to_string(), NodeId::new(1));
+        maps.node_key_map.write().remove(&NodeId::new(1));
+        match validate_text_bijection(&maps) {
+            Err(BijectionError::MissingInverse { loro_key, id }) => {
+                assert_eq!(loro_key, "k1");
+                assert_eq!(id, NodeId::new(1));
+            }
+            other => panic!("expected MissingInverse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_forward_detected() {
+        let maps = BridgeMaps::new();
+        maps.insert_node("k1".to_string(), NodeId::new(1));
+        maps.node_id_map.write().remove("k1");
+        match validate_text_bijection(&maps) {
+            Err(BijectionError::MissingForward { loro_key, id }) => {
+                assert_eq!(loro_key, "k1");
+                assert_eq!(id, NodeId::new(1));
+            }
+            other => panic!("expected MissingForward, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_id_detected() {
+        let maps = BridgeMaps::new();
+        // First insert: k1 → id 1. Insert API keeps both forward and inverse.
+        maps.insert_node("k1".to_string(), NodeId::new(1));
+        // Second insert: k2 → id 1. insert_node overwrites the inverse
+        // (id 1 → k2), but the forward still has BOTH k1 and k2 pointing
+        // at id 1 — a DuplicateId violation.
+        maps.insert_node("k2".to_string(), NodeId::new(1));
+        match validate_text_bijection(&maps) {
+            Err(BijectionError::DuplicateId { id, .. }) => {
+                assert_eq!(id, NodeId::new(1));
+            }
+            other => panic!("expected DuplicateId, got {other:?}"),
+        }
+    }
 }

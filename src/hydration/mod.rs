@@ -6,12 +6,12 @@
 //!   available when `grafeo` is on, no rayon dep).
 //! - WASM builds use the serial path (`parallel` is off in WASM by default).
 
-pub mod serial;
 #[cfg(feature = "parallel")]
 pub mod parallel;
+pub mod serial;
 pub mod vector;
 
-pub use serial::hydrate_grafeo;
 #[cfg(feature = "parallel")]
 pub use parallel::parallel_hydrate_grafeo;
+pub use serial::hydrate_grafeo;
 pub use vector::VectorOffloadManager;

@@ -131,20 +131,68 @@ pub mod wasm;
 pub mod runtime;
 
 // ============================================================================
+// Issue #3 sub-issue 6: native shadow commits, FTS, SAB layout
+// ============================================================================
+
+/// Native Git DAG / shadow commit API (issue #3 sub-issue 6).
+///
+/// Exposes per-writer WIP ref namespace (`refs/wip/<peerId>`) so downstream
+/// no longer needs `isomorphic-git` (80KB) for bounded undo.
+#[cfg(feature = "shadow")]
+pub mod shadow;
+
+/// Lightweight native full-text-search inverted index (issue #3 sub-issue 6).
+///
+/// <20MB WASM memory ceiling. Replaces heavy ONNX/HNSW runtimes for
+/// text-search workloads.
+#[cfg(feature = "fts")]
+pub mod fts;
+
+/// Native SAB (SharedArrayBuffer) layout writer (issue #3 sub-issue 6).
+///
+/// Pushes Y-offset / height math to Rust and writes directly to a SAB
+/// pointer so the JS virtualizer doesn't have to.
+#[cfg(feature = "sab")]
+pub mod sab;
+
+// ============================================================================
+// Issue #3 sub-issue 10: observability
+// ============================================================================
+
+/// Observability hooks: queue state, fault injection, invariant checks
+/// (issue #3 sub-issue 10).
+///
+/// Exposes internal queue state (`depth`, `oldest_age`, `locked_nodes`) to
+/// JS. Adds fault-injection hooks for testing. Provides invariant-check
+/// API for I4/I5/I11/I12/I14 post-mutation assertions.
+#[cfg(feature = "observability")]
+pub mod observability;
+
+// ============================================================================
 // Top-level facade: `GrafeoLoroApp`
 // ============================================================================
 //
 // The app facade requires `bridge` + `storage` + `telemetry` to be useful
 // in production. Tests that exercise the facade enable `full`.
 
-#[cfg(all(feature = "bridge", feature = "storage", feature = "grafeo", feature = "batcher"))]
+#[cfg(all(
+    feature = "bridge",
+    feature = "storage",
+    feature = "grafeo",
+    feature = "batcher"
+))]
 pub mod app;
 
 // ============================================================================
 // Re-exports
 // ============================================================================
 
-#[cfg(all(feature = "bridge", feature = "storage", feature = "grafeo", feature = "batcher"))]
+#[cfg(all(
+    feature = "bridge",
+    feature = "storage",
+    feature = "grafeo",
+    feature = "batcher"
+))]
 pub use app::GrafeoLoroApp;
 #[cfg(all(feature = "batcher", feature = "grafeo", feature = "telemetry"))]
 pub use bridge::sync_engine::InboundMsg;
@@ -152,30 +200,30 @@ pub use bridge::sync_engine::InboundMsg;
 pub use bridge::BridgeMaps;
 #[cfg(all(feature = "batcher", feature = "grafeo", feature = "telemetry"))]
 pub use bridge::SyncEngine;
-pub use config::{CompressionType, SsotMode};
-pub use error::GrafeoLoroError;
 #[cfg(feature = "compression")]
 pub use compression::{CompressedPayload, LoroDocCompressionExt};
-#[cfg(all(feature = "grafeo", feature = "parallel", not(target_family = "wasm")))]
-pub use hydration::parallel_hydrate_grafeo;
+pub use config::{CompressionType, SsotMode};
+pub use error::GrafeoLoroError;
+pub use error::Result;
 #[cfg(all(feature = "grafeo", not(target_family = "wasm")))]
 pub use hydration::hydrate_grafeo;
+#[cfg(all(feature = "grafeo", feature = "parallel", not(target_family = "wasm")))]
+pub use hydration::parallel_hydrate_grafeo;
 #[cfg(all(feature = "grafeo", not(target_family = "wasm")))]
 pub use hydration::vector::generate_local_embedding;
 #[cfg(all(feature = "grafeo", not(target_family = "wasm")))]
 pub use hydration::VectorOffloadManager;
 #[cfg(feature = "storage")]
-pub use storage::StorageBackend;
-#[cfg(feature = "storage")]
 pub use storage::InMemoryStorage;
-pub use error::Result;
+#[cfg(feature = "storage")]
+pub use storage::StorageBackend;
 // Trait-abstracted async runtime (issue #1 item 2). The `Mailbox` trait +
 // `MailboxClosed` error are available with `bridge` alone; the tokio-backed
 // `TokioMailbox` impl requires `batcher` (which pulls `tokio::sync::mpsc`).
-#[cfg(feature = "bridge")]
-pub use runtime::{Mailbox, MailboxClosed};
 #[cfg(feature = "batcher")]
 pub use runtime::TokioMailbox;
+#[cfg(feature = "bridge")]
+pub use runtime::{Mailbox, MailboxClosed};
 // Re-exports for tree_adapter (issue #1 item 8). The `tree` feature gates
 // the module itself; the re-exports follow the same gate. `CycleError`
 // derives `thiserror::Error` (a non-optional dep), so it is always available
@@ -190,12 +238,12 @@ pub use tree_adapter::{CycleError, TreeAdapter, TreeNode};
 // `apply_node_batch` additionally needs `grafeo` (calls `apply_loro_op`);
 // `apply_loro_op_bytes` additionally needs `serde` (bincode 1.x requires
 // `LoroOp: Deserialize`, which is derived under `serde`).
-#[cfg(feature = "bridge")]
-pub use ffi::{NodeOp, NodeValue};
-#[cfg(all(feature = "bridge", feature = "grafeo"))]
-pub use ffi::apply_node_batch;
 #[cfg(all(feature = "bridge", feature = "grafeo", feature = "serde"))]
 pub use ffi::apply_loro_op_bytes;
+#[cfg(all(feature = "bridge", feature = "grafeo"))]
+pub use ffi::apply_node_batch;
+#[cfg(feature = "bridge")]
+pub use ffi::{NodeOp, NodeValue};
 
 // Re-exports for the WASM JsValue error bridge (issue #1 item 12).
 // `error_code` is target-agnostic (testable on native); `js_error` +

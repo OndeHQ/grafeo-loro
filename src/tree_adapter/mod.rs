@@ -117,9 +117,7 @@ impl<'a> TreeAdapter<'a> {
             let edge_id_map = self.maps.edge_id_map.read();
             edge_id_map
                 .keys()
-                .find(|(_, dst_key, label)| {
-                    label == TREE_EDGE_LABEL && dst_key == &node_key
-                })
+                .find(|(_, dst_key, label)| label == TREE_EDGE_LABEL && dst_key == &node_key)
                 .map(|(src_key, _, _)| src_key.clone())
         };
         match parent_key_opt {

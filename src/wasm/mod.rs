@@ -45,6 +45,28 @@
 
 #![cfg(feature = "wasm")]
 
+// ============================================================================
+// Issue #3 sub-issue 1 — `batcher` + WASM compile_error guard
+// ============================================================================
+//
+// The `batcher` feature pulls `tokio/sync` + `tokio/time`. `tokio::sync::mpsc`
+// cannot run in browser WASM (no multi-threaded runtime, no `mio`-backed I/O
+// reactor, no system clock). Fail fast with a clear `compile_error!` so the
+// user knows to leave `batcher` off and plug in a `Mailbox<T>` impl backed by
+// `wasm-bindgen-futures` + `web-sys::MessageChannel` instead.
+//
+// **Note:** This guard fires only when the `wasm` feature is also enabled
+// (because the surrounding `#![cfg(feature = "wasm")]` attribute above skips
+// the whole file otherwise). For the case where a user enables `batcher` on a
+// `wasm32-unknown-unknown` target WITHOUT the `wasm` feature, a sister guard
+// lives in `src/runtime/mod.rs` (which is always compiled when `batcher` is
+// on, since `batcher` requires `bridge` and `bridge` exposes `runtime`).
+#[cfg(all(feature = "batcher", target_family = "wasm"))]
+compile_error!(
+    "`batcher` feature pulls tokio::sync::mpsc which cannot run in browser WASM. \
+     Use the `Mailbox` trait with a wasm-bindgen-futures impl instead."
+);
+
 use crate::error::GrafeoLoroError;
 
 // JsValue glue is only compiled on actual WASM targets. The target-agnostic
@@ -75,7 +97,7 @@ use wasm_bindgen::prelude::*;
 /// ```
 pub fn error_code(err: &GrafeoLoroError) -> u32 {
     match err {
-        #[cfg(feature = "grafeo")]
+        // Loro always-on (issue #3 sub-issue 1: decoupled from grafeo)
         GrafeoLoroError::Loro(_) => 1001,
         #[cfg(feature = "grafeo")]
         GrafeoLoroError::Grafeo(_) => 1002,
@@ -117,8 +139,12 @@ pub fn js_error(err: GrafeoLoroError) -> JsValue {
     let obj = Object::new();
     js_sys::Reflect::set(&obj, &JsValue::from("code"), &JsValue::from(code))
         .expect("Reflect::set must succeed on a fresh Object");
-    js_sys::Reflect::set(&obj, &JsValue::from("message"), &JsValue::from_str(&message))
-        .expect("Reflect::set must succeed on a fresh Object");
+    js_sys::Reflect::set(
+        &obj,
+        &JsValue::from("message"),
+        &JsValue::from_str(&message),
+    )
+    .expect("Reflect::set must succeed on a fresh Object");
     JsValue::from(obj)
 }
 

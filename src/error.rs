@@ -9,7 +9,9 @@ use thiserror::Error;
 /// features are disabled).
 #[derive(Error, Debug)]
 pub enum GrafeoLoroError {
-    #[cfg(feature = "grafeo")]
+    /// `loro::LoroError` — always available because `loro` is an always-on dep
+    /// (issue #3 sub-issue 1: previously gated on `feature = "graeo"`, which
+    /// broke `compression`-only WASM builds that use `LoroDoc` but not grafeo).
     #[error("Loro CRDT error: {0}")]
     Loro(#[from] loro::LoroError),
 

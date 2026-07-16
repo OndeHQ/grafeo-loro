@@ -1,6 +1,6 @@
 [package]
 name = "grafeo-loro"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Local-first, in-process, dual-store graph database with CRDT consensus (Loro) + execution (Grafeo)."
@@ -26,7 +26,7 @@ rust-version = "1.80"
 #
 #   bridge       → lorosurgeon, parking_lot, async-trait, thiserror, tracing
 #   batcher      → bridge + tokio (sync, time)
-#   compression  → lz4_flex, zstd (C lib)
+#   compression  → lz4_flex, brotli, flate2 (all pure-Rust, WASM-safe)
 #   tree         → bridge
 #   storage      → async-trait
 #   grafeo       → bridge + grafeo + grafeo-common + grafeo-engine (native only)
@@ -51,7 +51,7 @@ default = []
 # so `LoroOp`/`GraphValue` get their `Serialize`/`Deserialize` derives.
 bridge = ["dep:bincode"]
 batcher = ["bridge", "tokio/sync", "tokio/time"]
-compression = ["dep:lz4_flex", "dep:zstd", "grafeo"]
+compression = ["dep:lz4_flex", "dep:brotli", "dep:flate2"]
 tree = ["bridge"]
 storage = []
 grafeo = ["bridge", "dep:grafeo", "dep:grafeo-common", "dep:grafeo-engine"]
@@ -61,7 +61,13 @@ telemetry = ["dep:opentelemetry"]
 wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys", "dep:console_error_panic_hook"]
 parallel = ["dep:rayon"]
 serde = ["dep:serde", "dep:serde_json"]
-full = ["grafeo", "batcher", "webrtc", "tree", "telemetry", "parallel", "compression", "storage", "serde"]
+# Issue #3 sub-issue 6: native FTS inverted index, SAB layout writer, shadow commits
+fts = ["bridge"]
+sab = ["bridge", "dep:js-sys", "dep:wasm-bindgen"]
+shadow = ["bridge"]
+# Issue #3 sub-issue 10: observability (queue state, fault injection, invariant checks)
+observability = ["bridge"]
+full = ["grafeo", "batcher", "webrtc", "tree", "telemetry", "parallel", "compression", "storage", "serde", "fts", "sab", "shadow", "observability"]
 
 # ============================================================================
 # Dependencies — every dep is `optional = true` unless it is required by
@@ -90,13 +96,11 @@ tokio = { version = "1", default-features = false, optional = true }
 rayon = { version = "1.8", optional = true }
 
 # --- Optional: compression codecs ------------------------------------------
+# Issue #3 sub-issue 1: drop zstd-sys (C dep, breaks WASM), replace with
+# pure-Rust brotli + flate2. Both compile cleanly on wasm32-unknown-unknown.
 lz4_flex = { version = "0.11", optional = true }
-# zstd: binds to C zstd (no pure-Rust encoder exists in the ecosystem —
-# `ruzstd` is decoder-only). `zstd-sys` always compiles the C library via
-# `cc`; this is acceptable on native but NOT in WASM. The `compression`
-# feature must NOT be enabled in WASM builds; document this in the migration
-# guide. Phase 6 may swap to a pure-Rust codec if one becomes available.
-zstd = { version = "0.13", optional = true }
+brotli = { version = "7", optional = true, default-features = false, features = ["std"] }
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 
 # --- Optional: serde-shaped admin APIs -------------------------------------
 # Hot paths (>10 Hz) MUST use bincode or `&str`-shaped FFI per issue #1 item 6.
@@ -135,7 +139,19 @@ console_error_panic_hook = { version = "0.1", optional = true }
 # --- Optional: bincode for hot-path FFI (issue #1 item 6) ------------------
 bincode = { version = "1", optional = true }
 
+# ============================================================================
+# Target-specific dependencies (issue #3 sub-issue 1)
+# ============================================================================
+# `getrandom` (transitive dep via `rand` / `loro` / `brotli`) does not support
+# `wasm32-unknown-unknown` by default. On WASM targets, enable the `wasm_js`
+# feature so it routes through `js_sys::Math::random()` / `crypto.getRandomValues`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
 [dev-dependencies]
+# Issue #3 sub-issue 1: keep `rt-multi-thread` for native dev/test only.
+# Production WASM consumers MUST NOT enable `batcher` (which is the only
+# path that pulls tokio into the library's dep graph).
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "sync", "time"] }
 tracing-subscriber = "0.3"
 tempfile = "3"
@@ -178,6 +194,21 @@ required-features = ["full"]
 [lib]
 name = "grafeo_loro"
 path = "src/lib.rs"
+
+# ============================================================================
+# WASM package metadata (issue #3 sub-issue 1)
+# ============================================================================
+# Binaryen 120 `wasm-opt` crashes on LLVM 19 features (`i64.trunc_sat_f64_*`,
+# bulk-memory) emitted by default in `wasm-pack` release profiles. Pin the
+# enabled features to the wasm-opt 120 subset so pre-optimized `.wasm` ships
+# without crashing downstream `wasm-opt` runs.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+  "-Oz",
+  "--enable-nontrapping-float-to-int",
+  "--enable-bulk-memory",
+  "--strip-debug",
+]
 
 # ============================================================================
 # CI matrix (issue #1 item 7) — what `cargo build` combinations must pass:

@@ -4,11 +4,11 @@
 //! crate's public vocabulary. The `events` module references `grafeo::cdc`
 //! types, so it is gated by `grafeo`.
 
+#[cfg(feature = "bridge")]
+pub mod events;
 pub mod ids;
 pub mod presence;
 pub mod values;
-#[cfg(feature = "bridge")]
-pub mod events;
 
 #[cfg(all(feature = "bridge", feature = "grafeo"))]
 pub use events::CdcEventWrapper;
