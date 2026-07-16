@@ -26,27 +26,131 @@
 //! it in WASM builds. Use `lz4_flex` only via a future `compression-lz4`
 //! sub-feature, or disable compression entirely in the browser.
 //!
+//! ### Issue #4: `OfflineOpQueue` + `EpochTracker` (WASM-accessible)
+//!
+//! Issue #4 factored `OfflineOpQueue`, `LineageEpoch`, `EpochMismatchError`,
+//! and the new standalone `EpochTracker` out of `src/bridge/sync_engine.rs`
+//! into `src/bridge/queue.rs`. The new module is gated **only** by
+//! `feature = "bridge"` — no `batcher` (tokio), no `grafeo` (native
+//! ONNX/ort), no `telemetry` (opentelemetry native). Browser consumers on
+//! `wasm32-unknown-unknown` can name these types directly via
+//! `grafeo_loro::OfflineOpQueue` / `grafeo_loro::EpochTracker`.
+//!
+//! ### `bridge` queue + epoch tracker sub-API
+//!
+//! | Type                 | Feature gate | Purpose                                  |
+//! |----------------------|--------------|------------------------------------------|
+//! | `OfflineOpQueue`     | `bridge`     | Cap-bounded FIFO of serialized LoroOps  |
+//! | `LineageEpoch`       | `bridge`     | `u64` type alias for the epoch counter   |
+//! | `EpochMismatchError` | `bridge`     | Error raised on remote/local epoch drift |
+//! | `EpochTracker`       | `bridge`     | Standalone `Arc<AtomicU64>` epoch store  |
+//!
 //! ## Onde's recommended feature set
 //!
 //! ```toml
-//! grafeo-loro = { version = "0.2", default-features = false, features = ["bridge", "batcher", "compression", "tree"] }
+//! grafeo-loro = { version = "0.4", default-features = false, features = ["bridge", "batcher", "compression", "tree"] }
 //! ```
 //!
 //! ## Minimal WASM smoke test
 //!
 //! ```toml
-//! grafeo-loro = { version = "0.2", default-features = false, features = ["bridge", "tree", "wasm"] }
+//! grafeo-loro = { version = "0.4", default-features = false, features = ["bridge", "tree", "wasm"] }
 //! ```
 //!
 //! ## MSRV
 //!
 //! Rust 1.80+ (verified via `cargo msrv` against the dep tree).
+//!
+//! ## Issue #3 sub-issue → feature mapping
+//!
+//! Issue #3 ("Browser WASM consumers Support") has 10 sub-issues. Their
+//! feature gates are:
+//!
+//! | Sub-issue | Topic                              | Feature gate                              |
+//! |-----------|------------------------------------|-------------------------------------------|
+//! | #1        | WASM target compile + binary size  | `wasm` + `bridge,tree,compression`        |
+//! | #2        | Trait-abstracted runtime (Mailbox) | `bridge` (trait); `batcher` (Tokio impl)  |
+//! | #3        | LoroDoc ownership API              | `bridge,storage,grafeo,batcher`           |
+//! | #4        | Merge semantics                    | (no feature — use `doc.import()`)         |
+//! | #5        | Offline op-queue + lineage epoch   | `bridge` (factored out in issue #4)       |
+//! | #6        | FTS + SAB + shadow commits         | `fts`, `sab`, `shadow`                    |
+//! | #7        | Graph invariants (cycle, root)     | `bridge,tree`                             |
+//! | #8        | Presence (ephemeral overlay)       | `bridge` (always available with bridge)   |
+//! | #9        | Storage backend trait              | `storage`                                 |
+//! | #10       | Observability hooks                | `observability`                           |
+//!
+//! ## No `merge` / `awareness` / `persistence` feature
+//!
+//! If you saw a feature flag named `merge`, `awareness`, or `persistence`
+//! in a downstream consumer's Cargo.toml, it was invented — grafeo-loro
+//! has never declared these. Enabling them now produces a `compile_error!`
+//! pointing at the correct alternative:
+//!
+//! | Invented name   | Correct alternative                                            |
+//! |-----------------|----------------------------------------------------------------|
+//! | `merge`         | `doc.import(other.export(loro::ExportFormat::Snapshot))`       |
+//! | `awareness`     | `presence` module (always available with `bridge`)             |
+//! | `persistence`   | `storage` feature (`StorageBackend` trait + `InMemoryStorage`) |
+//!
+//! ## WASM binary size
+//!
+//! With the full WASM-safe feature set (`bridge,tree,compression,wasm,serde,
+//! fts,sab,shadow,observability`) and `opt-level="z"` + `lto=true` +
+//! `codegen-units=1` + `strip=true`, the raw `.wasm` (before `wasm-opt -Oz`)
+//! is approximately **2.26 MB**. After `wasm-opt -Oz` (configured in
+//! `[package.metadata.wasm-pack.profile.release]`), it shrinks ~15-20%.
+//!
+//! For size-constrained consumers (e.g. <1.8 MB budget), drop `fts` (inverted
+//! index) and `shadow` (Git DAG shadow commits) first — they together add
+//! ~400 KB. The minimal smoke feature set `bridge,tree,wasm` produces a
+//! ~800 KB `.wasm` after `wasm-opt -Oz`.
 
 // ============================================================================
 // Always-on core: error, constants, config, types
 // ============================================================================
 // These modules have no heavy deps; they form the shared vocabulary of the
 // crate and are always available regardless of feature selection.
+
+// ============================================================================
+// Issue #4 secondary finding #2: fail-loud on invented feature names
+// ============================================================================
+//
+// Issue #4 reports that downstream consumers have been observed inventing
+// feature names like `merge`, `awareness`, `persistence` in their Cargo.toml
+// and shipping stubs referencing them. The crate has never declared these
+// features — older Cargo silently accepted unknown `--features` flags (no-op),
+// newer Cargo warns but does not error.
+//
+// To fail loud and clear, we declare them as empty feature stubs in
+// Cargo.toml and emit a `compile_error!` here pointing the consumer at the
+// correct alternative. This is a breaking change (consumers who relied on
+// the silent no-op behavior will now get a hard error) — intentional per
+// issue #4's "no backward compat" mandate.
+
+#[cfg(feature = "merge")]
+compile_error!(
+    "grafeo-loro has no `merge` feature. To merge two LoroDocs, call \
+     `doc.import(other_doc.export(loro::ExportFormat::Snapshot))` — see \
+     the Loro CRDT docs. The `merge` feature name was invented by a \
+     downstream consumer stub; remove it from your Cargo.toml."
+);
+
+#[cfg(feature = "awareness")]
+compile_error!(
+    "grafeo-loro has no `awareness` feature. Presence/awareness is provided \
+     by the `presence` module, which is always available when the `bridge` \
+     feature is enabled — no separate feature flag needed. The `awareness` \
+     feature name was invented by a downstream consumer stub; remove it \
+     from your Cargo.toml."
+);
+
+#[cfg(feature = "persistence")]
+compile_error!(
+    "grafeo-loro has no `persistence` feature. Persistence is provided by \
+     the `storage` feature (StorageBackend trait + InMemoryStorage reference \
+     impl). Enable `storage` in your Cargo.toml. The `persistence` feature \
+     name was invented by a downstream consumer stub; remove it."
+);
 
 pub mod config;
 pub mod constants;
@@ -200,6 +304,21 @@ pub use bridge::sync_engine::InboundMsg;
 pub use bridge::BridgeMaps;
 #[cfg(all(feature = "batcher", feature = "grafeo", feature = "telemetry"))]
 pub use bridge::SyncEngine;
+
+// Issue #4: OfflineOpQueue + EpochTracker are reachable from WASM with
+// `feature = "bridge"` only (no batcher/grafeo/telemetry needed).
+// Factored out of `src/bridge/sync_engine.rs` in issue #4 so browser
+// consumers on `wasm32-unknown-unknown` can name these types directly
+// from the crate root.
+#[cfg(feature = "bridge")]
+pub use bridge::queue::{EpochMismatchError, EpochTracker, LineageEpoch, OfflineOpQueue};
+
+// Issue #4: #[wasm_bindgen] JS-facing wrappers. Available only on actual
+// WASM targets (the wrappers themselves are `#![cfg(target_family = "wasm")]`
+// inside src/wasm/queue.rs).
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub use wasm::queue::{WasmEpochTracker, WasmOfflineOpQueue};
+
 #[cfg(feature = "compression")]
 pub use compression::{CompressedPayload, LoroDocCompressionExt};
 pub use config::{CompressionType, SsotMode};

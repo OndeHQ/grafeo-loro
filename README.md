@@ -278,6 +278,67 @@ cargo run --bin gen_corpus --manifest-path fuzz/Cargo.toml
 
 ---
 
+## WASM Browser Consumer Usage
+
+Browser consumers on `wasm32-unknown-unknown` can use the offline op-queue
+and lineage epoch tracker directly without enabling `batcher` (tokio) or
+`grafeo` (native ONNX/ort) — both are WASM-incompatible.
+
+### Cargo.toml
+
+```toml
+grafeo-loro = { version = "0.4", default-features = false, features = ["bridge", "tree", "wasm"] }
+```
+
+### JavaScript
+
+```js
+import init, { WasmOfflineOpQueue, WasmEpochTracker } from "grafeo-loro";
+
+await init();  // one-time wasm bootstrap
+
+// Offline op-queue: serialize LoroOps and replay on reconnect
+const queue = new WasmOfflineOpQueue();
+queue.enqueue(new Uint8Array([1, 2, 3]));  // serialized LoroOp bytes
+queue.enqueue(new Uint8Array([4, 5, 6]));
+console.log(queue.depth);        // 2
+console.log(queue.bytesUsed);    // 6
+console.log(queue.capBytes);     // 10485760 (10 MB default)
+
+// On reconnect: drain + flush
+const ops = queue.drain();        // Array<Uint8Array>
+for (const op of ops) {
+  await sendToRemote(op);
+}
+queue.resetRetry();
+
+// Lineage epoch: validate sync handshake
+const epoch = new WasmEpochTracker();
+console.log(epoch.current);      // 0
+const newEpoch = epoch.bump();   // 1
+try {
+  epoch.checkMatch(remoteEpoch); // throws on mismatch
+  // ... proceed with sync
+} catch (err) {
+  if (err.code === 1013) {
+    // EpochMismatchError — wipe local cache before retrying
+    epoch.wipe();
+    await wipeLocalCache();
+  }
+}
+```
+
+### No `merge` / `awareness` / `persistence` feature
+
+If you saw these feature names in a downstream Cargo.toml, they were invented.
+Enabling them now produces a `compile_error!`:
+
+- `merge` → use `doc.import(other.export(loro::ExportFormat::Snapshot))`
+- `awareness` → use the `presence` module (always available with `bridge`)
+- `persistence` → use the `storage` feature (`StorageBackend` trait)
+
+---
+
 ## License
 
 MIT OR Apache-2.0

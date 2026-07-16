@@ -67,6 +67,23 @@ sab = ["bridge", "dep:js-sys", "dep:wasm-bindgen"]
 shadow = ["bridge"]
 # Issue #3 sub-issue 10: observability (queue state, fault injection, invariant checks)
 observability = ["bridge"]
+# ============================================================================
+# Issue #4 secondary finding #2: fail-loud stubs for invented feature names
+# ============================================================================
+#
+# Downstream consumers have been observed inventing `merge` / `awareness` /
+# `persistence` feature names in their Cargo.toml. Older Cargo silently
+# accepted unknown `--features` flags (no-op); newer Cargo warns but does
+# not error. To fail loud and clear, we declare them as empty stubs here
+# and emit a `compile_error!` in src/lib.rs pointing at the correct
+# alternative.
+#
+# This is a breaking change (issue #4 "no backward compat" mandate).
+# Consumers who relied on the silent no-op behavior will now get a hard
+# compile error with a helpful message.
+merge = []
+awareness = []
+persistence = []
 full = ["grafeo", "batcher", "webrtc", "tree", "telemetry", "parallel", "compression", "storage", "serde", "fts", "sab", "shadow", "observability"]
 
 # ============================================================================
@@ -164,6 +181,19 @@ criterion = { version = "0.5", default-features = false, features = ["plotters",
 # line above for:
 # criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support", "wasm-bindgen"] }
 # See `benches/README.md` for the full WASM bench runbook + known limitations.
+# Issue #4: wasm-bindgen-test runner for `cargo test --target wasm32-unknown-unknown`.
+# Only needed on wasm32 targets; gated via
+# [target.'cfg(target_arch = "wasm32")'.dev-dependencies] below so it does
+# not bloat native builds.
+
+# ============================================================================
+# Target-specific dev-dependencies (issue #4: WASM test runner)
+# ============================================================================
+# `wasm-bindgen-test` is the standard test runner for `#[wasm_bindgen_test]`
+# macros on `wasm32-unknown-unknown`. It is gated on `target_arch = "wasm32"`
+# so native `cargo test` does not pull it in.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 # ============================================================================
 # Benchmarks (issue #1 item 11)
