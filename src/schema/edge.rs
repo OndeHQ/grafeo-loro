@@ -112,7 +112,9 @@ pub fn validate_acyclic(edges: &[EdgeSpec]) -> Result<(), CycleError> {
                 new_parent: e.src.clone(),
             });
         }
-        adj.entry(e.src.as_str()).or_default().insert(e.dst.as_str());
+        adj.entry(e.src.as_str())
+            .or_default()
+            .insert(e.dst.as_str());
         nodes.insert(e.src.as_str());
         nodes.insert(e.dst.as_str());
     }
@@ -128,9 +130,13 @@ pub fn validate_acyclic(edges: &[EdgeSpec]) -> Result<(), CycleError> {
         // Explicit stack: (node, neighbors_iter). Using `Vec<(&str, Vec<&str>)>`
         // — we materialize neighbor lists to avoid borrowing issues with the
         // HashMap iterator inside the DFS loop.
-        let neighbors: Vec<&str> = adj.get(root).cloned().unwrap_or_default().into_iter().collect();
-        let mut stack: Vec<(&str, std::vec::IntoIter<&str>)> =
-            vec![(root, neighbors.into_iter())];
+        let neighbors: Vec<&str> = adj
+            .get(root)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let mut stack: Vec<(&str, std::vec::IntoIter<&str>)> = vec![(root, neighbors.into_iter())];
         color.insert(root, 1);
         while let Some((cur, mut iter)) = stack.pop() {
             if let Some(next) = iter.next() {
@@ -140,8 +146,12 @@ pub fn validate_acyclic(edges: &[EdgeSpec]) -> Result<(), CycleError> {
                     0 => {
                         // White — descend.
                         color.insert(next, 1);
-                        let next_neighbors: Vec<&str> =
-                            adj.get(next).cloned().unwrap_or_default().into_iter().collect();
+                        let next_neighbors: Vec<&str> = adj
+                            .get(next)
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect();
                         stack.push((next, next_neighbors.into_iter()));
                     }
                     1 => {

@@ -28,7 +28,11 @@ pub struct NodePresenceRegistry {
 impl NodePresenceRegistry {
     /// Construct with a custom stale timeout (in milliseconds).
     pub fn new(stale_timeout_ms: u64) -> Self {
-        Self { states: HashMap::new(), stale_timeout_ms, on_change: None }
+        Self {
+            states: HashMap::new(),
+            stale_timeout_ms,
+            on_change: None,
+        }
     }
 
     /// Insert or replace a presence entry. The `on_change` callback (if
@@ -36,17 +40,23 @@ impl NodePresenceRegistry {
     pub fn upsert(&mut self, presence: NodePresence) {
         let key = (presence.peer_id.clone(), presence.vertex_id.clone());
         self.states.insert(key, presence.clone());
-        if let Some(cb) = &self.on_change { cb(&presence); }
+        if let Some(cb) = &self.on_change {
+            cb(&presence);
+        }
     }
 
     /// Remove the presence entry for `(peer_id, vertex_id)`. Idempotent.
     pub fn remove(&mut self, peer_id: &str, vertex_id: &str) {
-        self.states.remove(&(peer_id.to_string(), vertex_id.to_string()));
+        self.states
+            .remove(&(peer_id.to_string(), vertex_id.to_string()));
     }
 
     /// Return all presence entries bound to `vertex_id` (borrowed refs).
     pub fn for_node(&self, vertex_id: &str) -> Vec<&NodePresence> {
-        self.states.values().filter(|p| p.vertex_id == vertex_id).collect()
+        self.states
+            .values()
+            .filter(|p| p.vertex_id == vertex_id)
+            .collect()
     }
 
     /// Drop presence entries whose `last_seen_ms` is older than
@@ -64,17 +74,25 @@ impl NodePresenceRegistry {
     }
 
     /// Read-only accessor for the configured stale timeout.
-    pub fn stale_timeout_ms(&self) -> u64 { self.stale_timeout_ms }
+    pub fn stale_timeout_ms(&self) -> u64 {
+        self.stale_timeout_ms
+    }
 
     /// Total number of presence entries.
-    pub fn len(&self) -> usize { self.states.len() }
+    pub fn len(&self) -> usize {
+        self.states.len()
+    }
 
     /// True iff `len() == 0`.
-    pub fn is_empty(&self) -> bool { self.states.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
+    }
 }
 
 impl Default for NodePresenceRegistry {
-    fn default() -> Self { Self::new(DEFAULT_NODE_PRESENCE_STALE_TIMEOUT_MS) }
+    fn default() -> Self {
+        Self::new(DEFAULT_NODE_PRESENCE_STALE_TIMEOUT_MS)
+    }
 }
 
 /// Register a C-ABI callback fired on every presence change (issue #3
@@ -101,13 +119,21 @@ mod tests {
     fn smoke_upsert_query_remove() {
         let mut reg = NodePresenceRegistry::new(1_000);
         reg.upsert(NodePresence {
-            peer_id: "p1".into(), vertex_id: "v1".into(),
-            cursor: Some(CursorPos { offset: 1, line: 0, col: 1 }),
-            selection: None, last_seen_ms: 100,
+            peer_id: "p1".into(),
+            vertex_id: "v1".into(),
+            cursor: Some(CursorPos {
+                offset: 1,
+                line: 0,
+                col: 1,
+            }),
+            selection: None,
+            last_seen_ms: 100,
         });
         reg.upsert(NodePresence {
-            peer_id: "p2".into(), vertex_id: "v1".into(),
-            cursor: None, selection: Some(SelectionRange { start: 0, end: 5 }),
+            peer_id: "p2".into(),
+            vertex_id: "v1".into(),
+            cursor: None,
+            selection: Some(SelectionRange { start: 0, end: 5 }),
             last_seen_ms: 100,
         });
         assert_eq!(reg.for_node("v1").len(), 2);
@@ -120,12 +146,18 @@ mod tests {
     fn smoke_gc_stale() {
         let mut reg = NodePresenceRegistry::new(500);
         reg.upsert(NodePresence {
-            peer_id: "fresh".into(), vertex_id: "v".into(),
-            cursor: None, selection: None, last_seen_ms: 1_000,
+            peer_id: "fresh".into(),
+            vertex_id: "v".into(),
+            cursor: None,
+            selection: None,
+            last_seen_ms: 1_000,
         });
         reg.upsert(NodePresence {
-            peer_id: "stale".into(), vertex_id: "v".into(),
-            cursor: None, selection: None, last_seen_ms: 100,
+            peer_id: "stale".into(),
+            vertex_id: "v".into(),
+            cursor: None,
+            selection: None,
+            last_seen_ms: 100,
         });
         let removed = reg.gc_stale(1_200);
         assert_eq!(removed, 1);
@@ -139,10 +171,15 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
         let mut reg = NodePresenceRegistry::new(1_000);
-        reg.on_change(move |_p| { counter_clone.fetch_add(1, Ordering::SeqCst); });
+        reg.on_change(move |_p| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
         reg.upsert(NodePresence {
-            peer_id: "p".into(), vertex_id: "v".into(),
-            cursor: None, selection: None, last_seen_ms: 0,
+            peer_id: "p".into(),
+            vertex_id: "v".into(),
+            cursor: None,
+            selection: None,
+            last_seen_ms: 0,
         });
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -157,8 +194,11 @@ mod tests {
         let mut reg = NodePresenceRegistry::new(1_000);
         presence_register_callback(&mut reg, cb);
         reg.upsert(NodePresence {
-            peer_id: "p".into(), vertex_id: "v".into(),
-            cursor: None, selection: None, last_seen_ms: 0,
+            peer_id: "p".into(),
+            vertex_id: "v".into(),
+            cursor: None,
+            selection: None,
+            last_seen_ms: 0,
         });
         assert_eq!(FIRES.load(Ordering::SeqCst), 1);
     }

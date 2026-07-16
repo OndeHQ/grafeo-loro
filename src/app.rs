@@ -7,9 +7,7 @@ use tracing::instrument;
 use crate::bridge::{BridgeMaps, SyncEngine};
 use crate::compression::wrapper::CompressedPayload;
 use crate::config::{CompressionType, SsotMode};
-use crate::constants::{
-    ORIGIN_LORO_BRIDGE, STORAGE_KEY_BASE_LORO, STORAGE_KEY_DELTA_PREFIX,
-};
+use crate::constants::{ORIGIN_LORO_BRIDGE, STORAGE_KEY_BASE_LORO, STORAGE_KEY_DELTA_PREFIX};
 use crate::error::{GrafeoLoroError, Result};
 use crate::hydration::parallel_hydrate_grafeo;
 use crate::storage::StorageBackend;

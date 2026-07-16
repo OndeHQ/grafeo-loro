@@ -308,7 +308,9 @@ pub enum BijectionError {
     },
     /// Two distinct `NodeId`s map to the same `loro_key`. Mirror of
     /// [`Self::DuplicateId`].
-    #[error("bijection drift: two ids map to same loro_key {loro_key:?} — ids: {id_a:?}, {id_b:?}")]
+    #[error(
+        "bijection drift: two ids map to same loro_key {loro_key:?} — ids: {id_a:?}, {id_b:?}"
+    )]
     DuplicateKey {
         /// The key that is the target of two distinct id mappings.
         loro_key: String,

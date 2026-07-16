@@ -97,7 +97,7 @@ use wasm_bindgen::prelude::*;
 /// ```
 pub fn error_code(err: &GrafeoLoroError) -> u32 {
     match err {
-        #[cfg(feature = "grafeo")]
+        // Loro always-on (issue #3 sub-issue 1: decoupled from grafeo)
         GrafeoLoroError::Loro(_) => 1001,
         #[cfg(feature = "grafeo")]
         GrafeoLoroError::Grafeo(_) => 1002,
@@ -139,8 +139,12 @@ pub fn js_error(err: GrafeoLoroError) -> JsValue {
     let obj = Object::new();
     js_sys::Reflect::set(&obj, &JsValue::from("code"), &JsValue::from(code))
         .expect("Reflect::set must succeed on a fresh Object");
-    js_sys::Reflect::set(&obj, &JsValue::from("message"), &JsValue::from_str(&message))
-        .expect("Reflect::set must succeed on a fresh Object");
+    js_sys::Reflect::set(
+        &obj,
+        &JsValue::from("message"),
+        &JsValue::from_str(&message),
+    )
+    .expect("Reflect::set must succeed on a fresh Object");
     JsValue::from(obj)
 }
 

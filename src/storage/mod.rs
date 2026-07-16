@@ -3,8 +3,8 @@
 //! Issue #1 item 9: browser-friendly storage trait.
 //! Issue #3 sub-issue 9: `SnapshotStreamer` + `SnapshotDiff`.
 
-pub mod traits;
 pub mod memory;
+pub mod traits;
 
 pub use memory::InMemoryStorage;
 pub use traits::{SnapshotDiff, StorageBackend};
@@ -21,12 +21,16 @@ pub struct SnapshotStreamer {
 
 impl SnapshotStreamer {
     pub fn new(chunk_size: usize) -> Self {
-        Self { chunk_size: chunk_size.max(1) }
+        Self {
+            chunk_size: chunk_size.max(1),
+        }
     }
 
     /// Stream `data` to `sink` in chunks. Returns chunk count.
     pub fn stream<F: FnMut(&[u8]) -> Result<()>>(&self, data: &[u8], mut sink: F) -> Result<usize> {
-        if data.is_empty() { return Ok(0); }
+        if data.is_empty() {
+            return Ok(0);
+        }
         let mut n = 0;
         for chunk in data.chunks(self.chunk_size) {
             sink(chunk)?;
@@ -35,11 +39,15 @@ impl SnapshotStreamer {
         Ok(n)
     }
 
-    pub fn chunk_size(&self) -> usize { self.chunk_size }
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
+    }
 }
 
 impl Default for SnapshotStreamer {
-    fn default() -> Self { Self::new(DEFAULT_SNAPSHOT_CHUNK_SIZE) }
+    fn default() -> Self {
+        Self::new(DEFAULT_SNAPSHOT_CHUNK_SIZE)
+    }
 }
 
 #[cfg(test)]
@@ -50,7 +58,14 @@ mod tests {
     fn stream_empty_input_no_calls() {
         let s = SnapshotStreamer::new(64);
         let mut calls = 0;
-        assert_eq!(s.stream(&[], |_| { calls += 1; Ok(()) }).unwrap(), 0);
+        assert_eq!(
+            s.stream(&[], |_| {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap(),
+            0
+        );
         assert_eq!(calls, 0);
     }
 
@@ -59,7 +74,12 @@ mod tests {
         let s = SnapshotStreamer::new(4);
         let data = vec![0u8; 16];
         let mut sizes = Vec::new();
-        let n = s.stream(&data, |c| { sizes.push(c.len()); Ok(()) }).unwrap();
+        let n = s
+            .stream(&data, |c| {
+                sizes.push(c.len());
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(n, 4);
         assert_eq!(sizes, vec![4, 4, 4, 4]);
     }
@@ -69,7 +89,12 @@ mod tests {
         let s = SnapshotStreamer::new(8);
         let data = vec![0u8; 20];
         let mut sizes = Vec::new();
-        let n = s.stream(&data, |c| { sizes.push(c.len()); Ok(()) }).unwrap();
+        let n = s
+            .stream(&data, |c| {
+                sizes.push(c.len());
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(n, 3);
         assert_eq!(sizes, vec![8, 8, 4]);
     }
@@ -78,7 +103,11 @@ mod tests {
     fn stream_propagates_error() {
         let s = SnapshotStreamer::new(4);
         let data = vec![0u8; 16];
-        assert!(s.stream(&data, |_| Err(crate::error::GrafeoLoroError::Config("x".into()))).is_err());
+        assert!(s
+            .stream(&data, |_| Err(crate::error::GrafeoLoroError::Config(
+                "x".into()
+            )))
+            .is_err());
     }
 
     #[test]
@@ -87,7 +116,12 @@ mod tests {
         assert_eq!(s.chunk_size(), 1);
         let data = vec![0u8; 3];
         let mut sizes = Vec::new();
-        let n = s.stream(&data, |c| { sizes.push(c.len()); Ok(()) }).unwrap();
+        let n = s
+            .stream(&data, |c| {
+                sizes.push(c.len());
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(n, 3);
     }
 }

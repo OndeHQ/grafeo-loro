@@ -120,6 +120,29 @@ impl StorageBackend for InMemoryStorage {
             .remove(key);
         Ok(())
     }
+
+    // Issue #3 sub-issue 9 — stub impls for the storage trait extensions.
+    // The hydrate-checkpoint tests do not exercise incremental snapshots,
+    // streaming OPFS writes, or snapshot diffing; empty/Ok is sufficient.
+    async fn export_incremental_snapshot(
+        &self,
+        _since: &[u8],
+    ) -> grafeo_loro::error::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+    async fn stream_snapshot_to_opfs(
+        &self,
+        _cb: &(dyn for<'a> Fn(&'a [u8]) -> grafeo_loro::error::Result<()> + Send + Sync),
+    ) -> grafeo_loro::error::Result<()> {
+        Ok(())
+    }
+    async fn diff_snapshots(
+        &self,
+        _base: &[u8],
+        _head: &[u8],
+    ) -> grafeo_loro::error::Result<grafeo_loro::storage::SnapshotDiff> {
+        Ok(grafeo_loro::storage::SnapshotDiff::empty())
+    }
 }
 
 /// Build a fresh `GrafeoLoroApp` over an in-memory `GrafeoDB` + `LoroDoc`,
@@ -185,10 +208,7 @@ async fn cold_boot_roundtrip_loro_mode() {
 
     let loro_key = "V/0".to_string();
     let mut props = HashMap::new();
-    props.insert(
-        "name".to_string(),
-        LoroProperty::String("Alix".into()),
-    );
+    props.insert("name".to_string(), LoroProperty::String("Alix".into()));
     write_vertex_to_loro(&app, &loro_key, vec!["Person".into()], props);
 
     // The checkpoint task writes the base snapshot through compress_to_wire.
@@ -316,10 +336,7 @@ async fn checkpoint_idempotent_double_call() {
 
     // Write a vertex to Loro (raw handle) so the snapshot is non-empty.
     let mut props = HashMap::new();
-    props.insert(
-        "name".to_string(),
-        LoroProperty::String("Bob".into()),
-    );
+    props.insert("name".to_string(), LoroProperty::String("Bob".into()));
     write_vertex_to_loro(&app, "V/0", vec!["Person".into()], props);
 
     app.checkpoint("g").await.expect("first checkpoint");

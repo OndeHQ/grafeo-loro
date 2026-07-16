@@ -197,7 +197,8 @@ impl MemoryCeiling {
 
     /// Current bytes tracked as allocated. Lock-free atomic load.
     pub fn current_usage(&self) -> usize {
-        self.current_bytes.load(std::sync::atomic::Ordering::Relaxed)
+        self.current_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Try to allocate `bytes` against the ceiling.
@@ -318,10 +319,9 @@ impl MemoryCeiling {
         let mut freed = 0usize;
         while !idle.is_empty() && self.current_usage() + bytes > self.budget_bytes {
             let evicted = idle.remove(0);
-            let prev = self.current_bytes.fetch_sub(
-                evicted.size_bytes,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            let prev = self
+                .current_bytes
+                .fetch_sub(evicted.size_bytes, std::sync::atomic::Ordering::Relaxed);
             let actually_freed = prev.min(evicted.size_bytes);
             freed += actually_freed;
         }
@@ -642,11 +642,17 @@ mod tests {
         }
         #[cfg(all(target_family = "wasm", feature = "wasm"))]
         {
-            assert!(t > 0, "wasm with wasm feature: now_ms must be non-zero; got {t}");
+            assert!(
+                t > 0,
+                "wasm with wasm feature: now_ms must be non-zero; got {t}"
+            );
         }
         #[cfg(all(target_family = "wasm", not(feature = "wasm")))]
         {
-            assert_eq!(t, 0, "wasm without wasm feature: now_ms must fall back to 0");
+            assert_eq!(
+                t, 0,
+                "wasm without wasm feature: now_ms must fall back to 0"
+            );
         }
     }
 
@@ -666,7 +672,11 @@ mod tests {
 
         // Over-budget alloc must fail (no idle docs to evict).
         assert!(!ceiling.try_alloc(1));
-        assert_eq!(ceiling.current_usage(), 1024, "failed alloc must not mutate state");
+        assert_eq!(
+            ceiling.current_usage(),
+            1024,
+            "failed alloc must not mutate state"
+        );
 
         ceiling.release(512);
         assert_eq!(ceiling.current_usage(), 512);
@@ -689,9 +699,15 @@ mod tests {
 
         // Register them as idle with distinct last-access timestamps.
         // Doc 1 is oldest (LRU candidate), doc 3 is newest.
-        ceiling.register_idle(/*key=*/ 1, /*size=*/ 300, /*last_access=*/ 1_000);
-        ceiling.register_idle(/*key=*/ 2, /*size=*/ 300, /*last_access=*/ 2_000);
-        ceiling.register_idle(/*key=*/ 3, /*size=*/ 300, /*last_access=*/ 3_000);
+        ceiling.register_idle(
+            /*key=*/ 1, /*size=*/ 300, /*last_access=*/ 1_000,
+        );
+        ceiling.register_idle(
+            /*key=*/ 2, /*size=*/ 300, /*last_access=*/ 2_000,
+        );
+        ceiling.register_idle(
+            /*key=*/ 3, /*size=*/ 300, /*last_access=*/ 3_000,
+        );
 
         // Now try to alloc 200 more — total would be 1100 > 1000 budget.
         // Eviction must remove doc 1 (LRU, 300 bytes) → 900-300=600 → 600+200=800 ≤ 1000. OK.
@@ -800,7 +816,11 @@ mod tests {
             !ceiling.try_alloc(1100),
             "try_alloc(>budget) must fail even after eviction"
         );
-        assert_eq!(ceiling.current_usage(), 600, "failed alloc must not mutate state");
+        assert_eq!(
+            ceiling.current_usage(),
+            600,
+            "failed alloc must not mutate state"
+        );
     }
 
     /// Issue #3 sub-issue 3: RefCell borrow trap fix demonstration.

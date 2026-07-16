@@ -80,7 +80,7 @@ impl InvertedIndex {
             // zero length.
             self.doc_lengths.insert(doc_id, 0);
             self.indexed_docs.insert(doc_id, Vec::new());
-            self.total_docs = self.total_docs + 1;
+            self.total_docs += 1;
             self.recompute_avg();
             return;
         }
@@ -97,7 +97,7 @@ impl InvertedIndex {
         terms_for_doc.dedup();
 
         for term in &terms_for_doc {
-            let postings_vec = self.postings.entry(term.clone()).or_insert_with(Vec::new);
+            let postings_vec = self.postings.entry(term.clone()).or_default();
             // Insert doc_id in sorted position (Vec is kept sorted).
             let pos = postings_vec.binary_search(&doc_id).unwrap_or_else(|e| e);
             if pos == postings_vec.len() || postings_vec[pos] != doc_id {
@@ -216,7 +216,7 @@ impl InvertedIndex {
     /// - `avg_doc_length`, `total_docs`: 8 + 4 bytes (constant).
     pub fn memory_usage_bytes(&self) -> usize {
         let mut bytes: usize = 8 + 4; // avg_doc_length + total_docs
-        // postings
+                                      // postings
         for (term, docs) in &self.postings {
             bytes += term.capacity() + std::mem::size_of::<Vec<u32>>() + docs.capacity() * 4;
         }
@@ -227,7 +227,7 @@ impl InvertedIndex {
         // doc_lengths
         bytes += self.doc_lengths.capacity() * (4 + 4);
         // indexed_docs
-        for (_doc_id, terms) in &self.indexed_docs {
+        for terms in self.indexed_docs.values() {
             bytes += 4; // doc_id
             bytes += std::mem::size_of::<Vec<String>>();
             for t in terms {
@@ -277,17 +277,21 @@ impl Default for InvertedIndex {
 /// "café" → ["café"]  // non-ASCII preserved
 /// ```
 pub fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| {
-        c.is_whitespace() || (c.is_ascii() && !c.is_ascii_alphanumeric())
-    })
-    .filter(|s| !s.is_empty())
-    .map(|s| {
-        // Lowercase ASCII chars only — preserves non-ASCII bytes as-is.
-        s.chars()
-            .map(|c| if c.is_ascii() { c.to_ascii_lowercase() } else { c })
-            .collect::<String>()
-    })
-    .collect()
+    text.split(|c: char| c.is_whitespace() || (c.is_ascii() && !c.is_ascii_alphanumeric()))
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            // Lowercase ASCII chars only — preserves non-ASCII bytes as-is.
+            s.chars()
+                .map(|c| {
+                    if c.is_ascii() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        c
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect()
 }
 
 #[cfg(test)]

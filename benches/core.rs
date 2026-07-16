@@ -98,7 +98,10 @@ fn reconcile_vertex(doc: &LoroDoc, loro_key: &str, entity: &VertexEntity) {
 /// description (the Loro-only field, kept empty to match the hydrate path).
 fn sample_vertex(idx: usize) -> VertexEntity {
     let mut props = HashMap::new();
-    props.insert("name".to_string(), LoroProperty::String(format!("node-{idx}")));
+    props.insert(
+        "name".to_string(),
+        LoroProperty::String(format!("node-{idx}")),
+    );
     props.insert("age".to_string(), LoroProperty::Integer(idx as i64));
     props.insert("active".to_string(), LoroProperty::Bool(idx % 2 == 0));
     VertexEntity {
@@ -175,11 +178,9 @@ fn bench_batch_flush(c: &mut Criterion) {
                         // is bounded by the iteration count, not the op
                         // count. Keeps `NodeOp` borrows `'static` so the
                         // measurement closure can move them by value.
-                        let key: &'static str = Box::leak(
-                            format!("bench-node-{i}").into_boxed_str(),
-                        );
-                        let vals: Vec<NodeValue<'static>> =
-                            vec![NodeValue::Integer(i as i64)];
+                        let key: &'static str =
+                            Box::leak(format!("bench-node-{i}").into_boxed_str());
+                        let vals: Vec<NodeValue<'static>> = vec![NodeValue::Integer(i as i64)];
                         NodeOp {
                             loro_key: key,
                             labels: labels_static,
@@ -285,7 +286,9 @@ fn bench_tree_ops(c: &mut Criterion) {
                 // `node_id_map`).
                 {
                     let mut session = db.session_with_cdc(false);
-                    session.begin_transaction().expect("begin_transaction (setup)");
+                    session
+                        .begin_transaction()
+                        .expect("begin_transaction (setup)");
                     for root_key in &["root1", "root2"] {
                         let op = LoroOp::UpsertNode {
                             loro_key: root_key.to_string(),
@@ -312,8 +315,7 @@ fn bench_tree_ops(c: &mut Criterion) {
                         labels: vec!["Node".to_string()],
                         properties: HashMap::new(),
                     };
-                    grafeo_loro::bridge::apply_loro_op(&session, &op, &maps)
-                        .expect("create node");
+                    grafeo_loro::bridge::apply_loro_op(&session, &op, &maps).expect("create node");
                 }
 
                 // 100 attaches — link each node under `root1`. This is the

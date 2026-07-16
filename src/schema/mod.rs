@@ -19,7 +19,7 @@ pub mod edge;
 pub mod tree;
 pub mod vertex;
 
-pub use edge::{EdgeEntity, EdgeSpec, validate_acyclic};
+pub use edge::{validate_acyclic, EdgeEntity, EdgeSpec};
 pub use tree::{CycleError, CycleGuard, OrderedCollection, TreeNode};
 pub use vertex::VertexEntity;
 

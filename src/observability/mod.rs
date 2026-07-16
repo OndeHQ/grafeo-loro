@@ -293,10 +293,8 @@ pub fn check_invariants(state: &InvariantCheckInput<'_>) -> Result<(), Invariant
     }
 
     // I14: tree acyclicity. Build adjacency + run DFS cycle-detect.
-    if !state.parent_child_pairs.is_empty() {
-        if has_cycle(state.parent_child_pairs) {
-            return Err(InvariantViolation::I14TreeAcyclicity);
-        }
+    if !state.parent_child_pairs.is_empty() && has_cycle(state.parent_child_pairs) {
+        return Err(InvariantViolation::I14TreeAcyclicity);
     }
 
     Ok(())
@@ -404,7 +402,10 @@ mod tests {
             node_keys: &keys,
             ..Default::default()
         };
-        assert_eq!(check_invariants(&input), Err(InvariantViolation::I4Uniqueness));
+        assert_eq!(
+            check_invariants(&input),
+            Err(InvariantViolation::I4Uniqueness)
+        );
     }
 
     #[test]
@@ -439,7 +440,10 @@ mod tests {
             epochs: &epochs,
             ..Default::default()
         };
-        assert_eq!(check_invariants(&input), Err(InvariantViolation::I5Monotonicity));
+        assert_eq!(
+            check_invariants(&input),
+            Err(InvariantViolation::I5Monotonicity)
+        );
     }
 
     #[test]

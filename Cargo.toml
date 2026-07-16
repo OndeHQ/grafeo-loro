@@ -51,7 +51,7 @@ default = []
 # so `LoroOp`/`GraphValue` get their `Serialize`/`Deserialize` derives.
 bridge = ["dep:bincode"]
 batcher = ["bridge", "tokio/sync", "tokio/time"]
-compression = ["dep:lz4_flex", "dep:brotli", "dep:flate2", "grafeo"]
+compression = ["dep:lz4_flex", "dep:brotli", "dep:flate2"]
 tree = ["bridge"]
 storage = []
 grafeo = ["bridge", "dep:grafeo", "dep:grafeo-common", "dep:grafeo-engine"]
@@ -138,6 +138,15 @@ console_error_panic_hook = { version = "0.1", optional = true }
 
 # --- Optional: bincode for hot-path FFI (issue #1 item 6) ------------------
 bincode = { version = "1", optional = true }
+
+# ============================================================================
+# Target-specific dependencies (issue #3 sub-issue 1)
+# ============================================================================
+# `getrandom` (transitive dep via `rand` / `loro` / `brotli`) does not support
+# `wasm32-unknown-unknown` by default. On WASM targets, enable the `wasm_js`
+# feature so it routes through `js_sys::Math::random()` / `crypto.getRandomValues`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 # Issue #3 sub-issue 1: keep `rt-multi-thread` for native dev/test only.

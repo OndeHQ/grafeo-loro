@@ -301,8 +301,8 @@ pub fn batcher_register() -> BatcherHandle {
 /// Requires `bridge` (bincode) + `serde` (`LoroOp: Deserialize` derive).
 #[cfg(feature = "serde")]
 pub fn batcher_enqueue(handle: BatcherHandle, op_bytes: &[u8]) -> std::result::Result<(), String> {
-    let op: LoroOp = bincode::deserialize(op_bytes)
-        .map_err(|e| format!("bincode decode LoroOp: {e}"))?;
+    let op: LoroOp =
+        bincode::deserialize(op_bytes).map_err(|e| format!("bincode decode LoroOp: {e}"))?;
     let guard = BATCHER_REGISTRY.lock().expect("BATCHER_REGISTRY poisoned");
     let map = guard
         .as_ref()
@@ -531,11 +531,8 @@ pub fn semantic_text_merge(base: &str, ours: &str, theirs: &str) -> (String, Con
         if b_idx < base_lines.len() {
             let our_match = our_match_at[b_idx];
             let their_match = their_match_at[b_idx];
-            match (our_match, their_match) {
-                (Some(_), Some(_)) => {
-                    result.push(base_lines[b_idx].to_string());
-                }
-                _ => {}
+            if let (Some(_), Some(_)) = (our_match, their_match) {
+                result.push(base_lines[b_idx].to_string());
             }
         }
     }
@@ -555,7 +552,8 @@ pub fn semantic_text_merge(base: &str, ours: &str, theirs: &str) -> (String, Con
     (result.join("\n"), resolution)
 }
 
-static CONFLICT_CALLBACKS: Mutex<Vec<extern "C" fn(*const ConflictDetected)>> = Mutex::new(Vec::new());
+static CONFLICT_CALLBACKS: Mutex<Vec<extern "C" fn(*const ConflictDetected)>> =
+    Mutex::new(Vec::new());
 
 /// Register a conflict-detected callback (issue #3 sub-issue 4 FFI entry
 /// point).
@@ -564,7 +562,9 @@ static CONFLICT_CALLBACKS: Mutex<Vec<extern "C" fn(*const ConflictDetected)>> = 
 /// the duration of the callback ONLY — callers MUST NOT retain it after
 /// the callback returns.
 pub fn on_conflict_detected(callback: extern "C" fn(*const ConflictDetected)) {
-    let mut cbs = CONFLICT_CALLBACKS.lock().expect("CONFLICT_CALLBACKS poisoned");
+    let mut cbs = CONFLICT_CALLBACKS
+        .lock()
+        .expect("CONFLICT_CALLBACKS poisoned");
     cbs.push(callback);
 }
 
@@ -575,7 +575,9 @@ pub fn on_conflict_detected(callback: extern "C" fn(*const ConflictDetected)) {
 /// Loro→Grafeo merge path lives) to call this helper on every conflicting
 /// text-field merge.
 pub fn dispatch_conflict_detected(event: &ConflictDetected) {
-    let cbs = CONFLICT_CALLBACKS.lock().expect("CONFLICT_CALLBACKS poisoned");
+    let cbs = CONFLICT_CALLBACKS
+        .lock()
+        .expect("CONFLICT_CALLBACKS poisoned");
     for cb in cbs.iter() {
         cb(event as *const ConflictDetected);
     }
@@ -750,8 +752,7 @@ mod tests {
             std::mem::size_of::<usize>() * 2,
             "&[&str] is (ptr, len) — 2 words"
         );
-        let expected_max =
-            std::mem::size_of::<&str>() * 4    // loro_key, labels, property_keys, property_values
+        let expected_max = std::mem::size_of::<&str>() * 4    // loro_key, labels, property_keys, property_values
             + std::mem::size_of::<usize>()     // property_count
             + 3 * std::mem::align_of::<usize>(); // worst-case padding
         assert!(
@@ -770,8 +771,7 @@ mod tests {
         // Expected: tag (4 bytes, rounded to 8 by alignment) + payload.
         // Largest payload is `&str` (16 bytes) or `f64`/`i64` (8 bytes).
         // So 24 bytes is the typical size on 64-bit.
-        let expected_max =
-            std::mem::size_of::<u64>() // tag (rounded)
+        let expected_max = std::mem::size_of::<u64>() // tag (rounded)
             + std::mem::size_of::<&str>() // largest payload
             + std::mem::align_of::<&str>(); // padding
         assert!(

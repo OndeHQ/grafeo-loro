@@ -54,7 +54,10 @@ fn now_ms_returns_nonzero_on_native() {
     }
     #[cfg(all(target_family = "wasm", feature = "wasm"))]
     {
-        assert!(t > 0, "wasm with wasm feature: now_ms must be non-zero; got {t}");
+        assert!(
+            t > 0,
+            "wasm with wasm feature: now_ms must be non-zero; got {t}"
+        );
     }
     #[cfg(all(target_family = "wasm", not(feature = "wasm")))]
     {

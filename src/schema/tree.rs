@@ -31,9 +31,9 @@
 //! whenever `bridge` is on (no grafeo dep); the `sync_tree_move_to_grafeo`
 //! function is gated by `grafeo`.
 
-use std::collections::{HashMap, HashSet};
 #[cfg(feature = "grafeo")]
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 
 use lorosurgeon::{Hydrate, Reconcile};
 #[cfg(feature = "grafeo")]
@@ -144,7 +144,8 @@ impl CycleGuard {
                 new_parent: new_parent.to_string(),
             });
         }
-        self.parent_of.insert(node.to_string(), new_parent.to_string());
+        self.parent_of
+            .insert(node.to_string(), new_parent.to_string());
         Ok(())
     }
 

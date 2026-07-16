@@ -48,8 +48,9 @@ const INPUT: &[u8] = b"hello compression world hello compression world hello com
 /// assert the compressed bytes differ from the input.
 #[test]
 fn lz4_roundtrip_via_compressed_payload() {
-    let payload = grafeo_loro::compression::CompressedPayload::compress(INPUT, CompressionType::Lz4)
-        .expect("LZ4 compress is infallible (lz4_flex)");
+    let payload =
+        grafeo_loro::compression::CompressedPayload::compress(INPUT, CompressionType::Lz4)
+            .expect("LZ4 compress is infallible (lz4_flex)");
     assert_eq!(payload.compression, CompressionType::Lz4);
     assert_ne!(
         payload.raw_data.as_slice(),
@@ -140,7 +141,10 @@ fn brotli_roundtrip_via_compressed_payload() {
 fn brotli_empty_input_roundtrip() {
     let compressed = brotli_compress(b"", DEFAULT_BROTLI_QUALITY).expect("brotli compress empty");
     // Brotli emits a small frame even for empty input.
-    assert!(!compressed.is_empty(), "Brotli empty-input emits non-empty frame");
+    assert!(
+        !compressed.is_empty(),
+        "Brotli empty-input emits non-empty frame"
+    );
     let recovered = brotli_decompress(&compressed).expect("brotli decompress empty");
     assert_eq!(recovered, b"");
 }
@@ -280,8 +284,8 @@ fn wire_roundtrip_lz4_unchanged() {
         .expect("compress_to_wire via Lz4 arm");
     assert_eq!(wire[0], 1, "wire version byte");
     assert_eq!(wire[1], 0x01, "wire codec tag for Lz4");
-    let recovered = CompressedPayload::decompress_from_wire(&wire)
-        .expect("decompress_from_wire via Lz4 arm");
+    let recovered =
+        CompressedPayload::decompress_from_wire(&wire).expect("decompress_from_wire via Lz4 arm");
     assert_eq!(recovered.as_slice(), INPUT);
 }
 
@@ -295,7 +299,7 @@ fn wire_roundtrip_none_passthrough() {
     assert_eq!(wire[1], 0x00, "wire codec tag for None");
     // None arm stores raw bytes verbatim after the 2-byte header.
     assert_eq!(&wire[2..], INPUT);
-    let recovered = CompressedPayload::decompress_from_wire(&wire)
-        .expect("decompress_from_wire via None arm");
+    let recovered =
+        CompressedPayload::decompress_from_wire(&wire).expect("decompress_from_wire via None arm");
     assert_eq!(recovered.as_slice(), INPUT);
 }

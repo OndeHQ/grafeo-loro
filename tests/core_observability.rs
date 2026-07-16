@@ -107,7 +107,13 @@ fn fts_index_search() {
     let hits2 = idx.search("lazy dog", 10);
     let _ = hits2;
     // Smoke-check the SearchHit Debug impl is usable.
-    let _dbg = format!("{:?}", SearchHit { doc_id: 1, score: 1.5 });
+    let _dbg = format!(
+        "{:?}",
+        SearchHit {
+            doc_id: 1,
+            score: 1.5
+        }
+    );
 }
 
 #[test]
@@ -117,7 +123,9 @@ fn fts_memory_under_20mb() {
     // Generate 10k docs of ~1KB text each. Use a small vocabulary so the
     // inverted index doesn't bloat to the full 10MB raw text size — real
     // corpora have heavy term repetition.
-    let words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
+    let words = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+    ];
     let mut s = String::with_capacity(1024);
     for doc_id in 0..10_000u32 {
         s.clear();

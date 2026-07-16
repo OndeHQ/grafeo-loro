@@ -174,11 +174,11 @@ fn text_bijection_drift_detected() {
 
 #[cfg(all(feature = "batcher", feature = "grafeo", feature = "telemetry"))]
 mod sync_engine_tests {
+    use grafeo::GrafeoDB;
     use grafeo_loro::bridge::sync_engine::{
         EpochMismatchError, LineageEpoch, OfflineOpQueue, SyncEngine,
     };
     use grafeo_loro::error::GrafeoLoroError;
-    use grafeo::GrafeoDB;
     use loro::LoroDoc;
     use parking_lot::RwLock;
     use std::sync::Arc;

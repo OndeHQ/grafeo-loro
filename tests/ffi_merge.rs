@@ -69,8 +69,7 @@ fn externally_tagged_loro_op_bincode_roundtrip() {
 
     // Decode — must not panic. This is the line that would panic if
     // `LoroOp` had `#[serde(tag = "type", content = "payload")]`.
-    let decoded: LoroOp =
-        bincode::deserialize(&bytes).expect("deserialize LoroOp::UpsertNode");
+    let decoded: LoroOp = bincode::deserialize(&bytes).expect("deserialize LoroOp::UpsertNode");
 
     assert_eq!(decoded, op);
 }
@@ -409,7 +408,10 @@ fn batcher_enqueue_flush_roundtrip() {
 fn batcher_flush_unknown_handle_errors() {
     let bogus = BatcherHandle::unknown();
     let result = batcher_flush(bogus);
-    assert!(result.is_err(), "flush with unknown handle should return Err");
+    assert!(
+        result.is_err(),
+        "flush with unknown handle should return Err"
+    );
 }
 
 #[test]
@@ -490,9 +492,7 @@ fn dispatch_conflict_detected_fires_callbacks() {
     let captures = CONFLICT_CAPTURE.lock().unwrap();
     let new_captures = &captures[pre_count..];
     assert!(
-        new_captures
-            .iter()
-            .any(|c| c.node_key == "V/dispatch-test"),
+        new_captures.iter().any(|c| c.node_key == "V/dispatch-test"),
         "expected the dispatched event to reach the callback; captures={:?}",
         new_captures
     );

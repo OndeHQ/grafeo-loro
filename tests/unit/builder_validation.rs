@@ -93,6 +93,28 @@ impl StorageBackend for InMemoryStorage {
             .remove(key);
         Ok(())
     }
+    // Issue #3 sub-issue 9 — stub impls for the storage trait extensions.
+    // The builder-validation tests do not exercise incremental snapshots,
+    // streaming OPFS writes, or snapshot diffing; empty/Ok is sufficient.
+    async fn export_incremental_snapshot(
+        &self,
+        _since: &[u8],
+    ) -> grafeo_loro::error::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+    async fn stream_snapshot_to_opfs(
+        &self,
+        _cb: &(dyn for<'a> Fn(&'a [u8]) -> grafeo_loro::error::Result<()> + Send + Sync),
+    ) -> grafeo_loro::error::Result<()> {
+        Ok(())
+    }
+    async fn diff_snapshots(
+        &self,
+        _base: &[u8],
+        _head: &[u8],
+    ) -> grafeo_loro::error::Result<grafeo_loro::storage::SnapshotDiff> {
+        Ok(grafeo_loro::storage::SnapshotDiff::empty())
+    }
 }
 
 /// Assert `result` is `Err(Config(msg))` where `msg` contains `needle`.

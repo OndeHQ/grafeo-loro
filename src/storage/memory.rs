@@ -24,7 +24,9 @@ pub struct InMemoryStorage {
 }
 
 impl InMemoryStorage {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 #[async_trait(?Send)]
@@ -32,7 +34,10 @@ impl StorageBackend for InMemoryStorage {
     async fn load(&self, key: &str) -> std::result::Result<Vec<u8>, std::io::Error> {
         let inner = self.inner.lock().unwrap();
         inner.get(key).cloned().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, format!("key not found: {key}"))
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("key not found: {key}"),
+            )
         })
     }
     async fn save(&self, key: &str, bytes: Vec<u8>) -> std::result::Result<(), std::io::Error> {
@@ -41,7 +46,11 @@ impl StorageBackend for InMemoryStorage {
     }
     async fn list(&self, prefix: &str) -> std::result::Result<Vec<String>, std::io::Error> {
         let inner = self.inner.lock().unwrap();
-        let mut keys: Vec<String> = inner.keys().filter(|k| k.starts_with(prefix)).cloned().collect();
+        let mut keys: Vec<String> = inner
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect();
         keys.sort();
         Ok(keys)
     }
@@ -52,8 +61,12 @@ impl StorageBackend for InMemoryStorage {
 
     async fn export_incremental_snapshot(&self, since_state_vector: &[u8]) -> Result<Vec<u8>> {
         let inner = self.inner.lock().unwrap();
-        let Some(current) = inner.get(SNAPSHOT_KEY) else { return Ok(Vec::new()); };
-        if since_state_vector == current.as_slice() { return Ok(Vec::new()); }
+        let Some(current) = inner.get(SNAPSHOT_KEY) else {
+            return Ok(Vec::new());
+        };
+        if since_state_vector == current.as_slice() {
+            return Ok(Vec::new());
+        }
         Ok(current.clone())
     }
 
@@ -73,14 +86,17 @@ impl StorageBackend for InMemoryStorage {
     }
 
     async fn diff_snapshots(&self, base: &[u8], head: &[u8]) -> Result<SnapshotDiff> {
-        if base == head { return Ok(SnapshotDiff::empty()); }
+        if base == head {
+            return Ok(SnapshotDiff::empty());
+        }
         let base_ops = (base.len() as u64) / OP_BYTES_HEURISTIC;
         let head_ops = (head.len() as u64) / OP_BYTES_HEURISTIC;
         let added = head_ops.saturating_sub(base_ops);
         let removed = base_ops.saturating_sub(head_ops);
         let signed_delta = head_ops as i64 - base_ops as i64;
         Ok(SnapshotDiff {
-            added_ops: added, removed_ops: removed,
+            added_ops: added,
+            removed_ops: removed,
             state_vector_delta: signed_delta.to_le_bytes().to_vec(),
         })
     }
@@ -95,7 +111,9 @@ mod tests {
         let s = InMemoryStorage::new();
         s.save("k", vec![1, 2, 3]).await.unwrap();
         assert_eq!(s.load("k").await.unwrap(), vec![1, 2, 3]);
-        assert!(matches!(s.load("missing").await, Err(e) if e.kind() == std::io::ErrorKind::NotFound));
+        assert!(
+            matches!(s.load("missing").await, Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        );
         s.delete("k").await.unwrap();
         assert!(matches!(s.load("k").await, Err(e) if e.kind() == std::io::ErrorKind::NotFound));
     }
@@ -115,13 +133,21 @@ mod tests {
         let s = InMemoryStorage::new();
         let snap = b"hello-snapshot".to_vec();
         s.save(SNAPSHOT_KEY, snap.clone()).await.unwrap();
-        assert!(s.export_incremental_snapshot(&snap).await.unwrap().is_empty());
+        assert!(s
+            .export_incremental_snapshot(&snap)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
     async fn incremental_snapshot_no_snapshot_returns_empty() {
         let s = InMemoryStorage::new();
-        assert!(s.export_incremental_snapshot(b"whatever").await.unwrap().is_empty());
+        assert!(s
+            .export_incremental_snapshot(b"whatever")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -129,20 +155,29 @@ mod tests {
         let s = InMemoryStorage::new();
         let snap = b"hello-snapshot".to_vec();
         s.save(SNAPSHOT_KEY, snap.clone()).await.unwrap();
-        assert_eq!(s.export_incremental_snapshot(b"stale-sv").await.unwrap(), snap);
+        assert_eq!(
+            s.export_incremental_snapshot(b"stale-sv").await.unwrap(),
+            snap
+        );
     }
 
     #[tokio::test]
     async fn diff_snapshots_identical_is_empty() {
         let s = InMemoryStorage::new();
         let bytes = vec![1u8; 16];
-        assert_eq!(s.diff_snapshots(&bytes, &bytes).await.unwrap(), SnapshotDiff::empty());
+        assert_eq!(
+            s.diff_snapshots(&bytes, &bytes).await.unwrap(),
+            SnapshotDiff::empty()
+        );
     }
 
     #[tokio::test]
     async fn diff_snapshots_growth() {
         let s = InMemoryStorage::new();
-        let diff = s.diff_snapshots(&vec![0u8; 8], &vec![0u8; 24]).await.unwrap();
+        let diff = s
+            .diff_snapshots(&vec![0u8; 8], &vec![0u8; 24])
+            .await
+            .unwrap();
         assert_eq!(diff.added_ops, 2);
         assert_eq!(diff.removed_ops, 0);
     }

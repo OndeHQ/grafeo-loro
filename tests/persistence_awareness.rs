@@ -18,10 +18,9 @@
 //! precedent set by Agent W's `tests/wasm_runtime.rs` +
 //! `tests/compression_pure_rust.rs`).
 
-use grafeo_loro::presence::{NodePresenceRegistry, presence_register_callback};
+use grafeo_loro::presence::{presence_register_callback, NodePresenceRegistry};
 use grafeo_loro::storage::{
-    InMemoryStorage, SnapshotDiff, SnapshotStreamer, StorageBackend,
-    DEFAULT_SNAPSHOT_CHUNK_SIZE,
+    InMemoryStorage, SnapshotDiff, SnapshotStreamer, StorageBackend, DEFAULT_SNAPSHOT_CHUNK_SIZE,
 };
 use grafeo_loro::types::presence::{CursorPos, NodePresence, SelectionRange};
 
@@ -225,7 +224,10 @@ async fn incremental_snapshot_returns_full_when_changed() {
     let snapshot = b"current-snapshot".to_vec();
     s.save("snapshot", snapshot.clone()).await.unwrap();
 
-    let delta = s.export_incremental_snapshot(b"stale-state-vector").await.unwrap();
+    let delta = s
+        .export_incremental_snapshot(b"stale-state-vector")
+        .await
+        .unwrap();
     assert_eq!(
         delta, snapshot,
         "naive in-memory backend returns full snapshot when SV differs"
@@ -312,7 +314,10 @@ async fn stream_snapshot_to_opfs_via_in_memory_backend() {
         s.stream_snapshot_to_opfs(&chunk_callback).await.unwrap();
     }
     let collected: Vec<u8> = collected.lock().unwrap().clone();
-    assert_eq!(collected, snapshot, "streamed bytes must equal stored snapshot");
+    assert_eq!(
+        collected, snapshot,
+        "streamed bytes must equal stored snapshot"
+    );
 }
 
 #[tokio::test]
@@ -337,7 +342,10 @@ async fn snapshot_diff_basic() {
             .try_into()
             .expect("state_vector_delta has at least 8 bytes"),
     );
-    assert_eq!(signed_delta, 2, "signed delta = head_ops - base_ops = 3 - 1");
+    assert_eq!(
+        signed_delta, 2,
+        "signed delta = head_ops - base_ops = 3 - 1"
+    );
 }
 
 #[tokio::test]

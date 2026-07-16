@@ -48,7 +48,11 @@ pub struct SnapshotDiff {
 
 impl SnapshotDiff {
     pub fn empty() -> Self {
-        Self { added_ops: 0, removed_ops: 0, state_vector_delta: Vec::new() }
+        Self {
+            added_ops: 0,
+            removed_ops: 0,
+            state_vector_delta: Vec::new(),
+        }
     }
     pub fn is_empty(&self) -> bool {
         self.added_ops == 0 && self.removed_ops == 0
@@ -56,5 +60,7 @@ impl SnapshotDiff {
 }
 
 impl Default for SnapshotDiff {
-    fn default() -> Self { Self::empty() }
+    fn default() -> Self {
+        Self::empty()
+    }
 }

@@ -577,7 +577,10 @@ impl SyncEngine {
     /// mismatch. On `Err`, the client MUST wipe its cache before retrying
     /// the handshake (the issue body calls this "split-brain resurrection
     /// prevention").
-    pub fn check_epoch_match(&self, remote_epoch: LineageEpoch) -> std::result::Result<(), EpochMismatchError> {
+    pub fn check_epoch_match(
+        &self,
+        remote_epoch: LineageEpoch,
+    ) -> std::result::Result<(), EpochMismatchError> {
         let local = self.lineage_epoch.load(Ordering::Relaxed);
         if local == remote_epoch {
             Ok(())
