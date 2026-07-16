@@ -56,7 +56,7 @@ use grafeo_common::types::EpochId;
 use loro::LoroDoc;
 use opentelemetry::trace::Tracer;
 use opentelemetry::KeyValue;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tracing::instrument;
@@ -67,10 +67,196 @@ use crate::constants::EPOCH_RETENTION;
 use crate::constants::{
     ORIGIN_GRAFEO_BRIDGE, ORIGIN_LORO_BRIDGE, OUTBOUND_POLL_MS, ROOT_EDGES, ROOT_VERTICES,
 };
-use crate::error::Result;
+use crate::error::{GrafeoLoroError, Result};
 use crate::telemetry::{HealthProbe, MetricsRegistry, SharedTracer};
 use crate::types::events::{CdcEventWrapper, LoroOp};
 use crate::types::values::{grafeo_value_to_lval, lval_to_gval};
+
+// ============================================================================
+// Issue #3 sub-issue 5: lineage epochs + native offline op-queue
+// ============================================================================
+//
+// The issue body calls out: "Client resurrects stale IDB ops as phantom
+// nodes" (split-brain resurrection after server wipe). The fix is a
+// `LineageEpoch` key exchanged at sync handshake: if local != remote, the
+// client MUST wipe its cache before syncing. We expose `check_epoch_match`
+// so the orchestrator's handshake plumbing can return `EpochMismatchError`
+// to FFI verbatim (the JS side then wipes IDB + bumps its own epoch).
+//
+// The offline op-queue replaces downstream's custom IDB queue + exponential
+// backoff (10 MB cap, retry hooks, depth accessor). It lives natively in
+// the bridge so the orchestrator can expose `offline_queue_depth` /
+// `offline_queue_bytes` to FFI without a downstream wrapper.
+
+/// Lineage epoch key — bumped on every "cache wipe" event (server reset,
+/// manual `wipe_cache()` call, or any lineage break the orchestrator
+/// detects). Exchanged at sync handshake: if `local != remote`, the client
+/// MUST wipe its cache before syncing.
+///
+/// Issue #3 sub-issue 5.
+pub type LineageEpoch = u64;
+
+/// Error returned by [`SyncEngine::check_epoch_match`] when the local and
+/// remote lineage epochs differ. The error is fatal-by-design — the client
+/// MUST wipe its cache before retrying the handshake.
+///
+/// Issue #3 sub-issue 5.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("lineage epoch mismatch: local={local} remote={remote}; client cache wipe required")]
+pub struct EpochMismatchError {
+    /// Local lineage epoch at handshake time.
+    pub local: u64,
+    /// Remote lineage epoch at handshake time.
+    pub remote: u64,
+}
+
+/// Native offline op-queue with 10 MB cap (issue #3 sub-issue 5).
+///
+/// State-vector delta sync on reconnect. Exposes queue depth + retry hooks
+/// to FFI so downstream no longer needs to build a custom IDB queue +
+/// exponential backoff wrapper.
+///
+/// # Cap policy
+///
+/// The 10 MB default cap ([`Self::DEFAULT_CAP`]) is the issue-mandated
+/// ceiling. On enqueue past cap, returns `Err(GrafeoLoroError::Bridge)`
+/// with a descriptive message — the orchestrator's FFI layer surfaces this
+/// as a backpressure signal so the JS side can flush the queue (or drop
+/// oldest) before enqueuing more.
+///
+/// # Retry hooks
+///
+/// `retry_bump` increments the internal counter; `reset_retry` zeroes it.
+/// The orchestrator wires these to its exponential-backoff scheduler —
+/// the queue itself does NOT implement backoff (it's a pure data structure).
+pub struct OfflineOpQueue {
+    /// Serialized LoroOps (bytes) pending sync.
+    ops: Vec<Vec<u8>>,
+    /// Total bytes currently held (sum of `ops[i].len()`).
+    total_bytes: usize,
+    /// Cap in bytes. Default 10 MB. Configurable per-instance.
+    cap_bytes: usize,
+    /// Retry counter — bumped by `retry_bump`, zeroed by `reset_retry`.
+    /// The queue itself does NOT implement backoff; the orchestrator's
+    /// scheduler reads this counter to decide the next retry delay.
+    retry_count: u32,
+}
+
+impl OfflineOpQueue {
+    /// Default cap: 10 MB (issue #3 sub-issue 5 mandate).
+    pub const DEFAULT_CAP: usize = 10 * 1024 * 1024;
+
+    /// Construct a fresh empty queue with the default 10 MB cap.
+    pub fn new() -> Self {
+        Self {
+            ops: Vec::new(),
+            total_bytes: 0,
+            cap_bytes: Self::DEFAULT_CAP,
+            retry_count: 0,
+        }
+    }
+
+    /// Construct a fresh empty queue with a custom cap.
+    pub fn with_cap(cap_bytes: usize) -> Self {
+        Self {
+            ops: Vec::new(),
+            total_bytes: 0,
+            cap_bytes,
+            retry_count: 0,
+        }
+    }
+
+    /// Enqueue a serialized LoroOp. Returns `Err(GrafeoLoroError::Bridge)`
+    /// if adding `op_bytes` would exceed the cap.
+    pub fn enqueue(&mut self, op_bytes: Vec<u8>) -> Result<()> {
+        let new_total = self
+            .total_bytes
+            .checked_add(op_bytes.len())
+            .ok_or_else(|| {
+                GrafeoLoroError::Bridge(format!(
+                    "offline queue overflow: byte count overflow (current={}, adding={})",
+                    self.total_bytes,
+                    op_bytes.len()
+                ))
+            })?;
+        if new_total > self.cap_bytes {
+            return Err(GrafeoLoroError::Bridge(format!(
+                "offline queue overflow: cap={} bytes, current={}, adding={} bytes",
+                self.cap_bytes,
+                self.total_bytes,
+                op_bytes.len()
+            )));
+        }
+        self.total_bytes = new_total;
+        self.ops.push(op_bytes);
+        Ok(())
+    }
+
+    /// Drain all queued ops, returning them in FIFO order. Resets
+    /// `total_bytes` to 0 but does NOT reset `retry_count` (the orchestrator
+    /// calls `reset_retry` separately after a successful flush).
+    pub fn drain(&mut self) -> Vec<Vec<u8>> {
+        let drained = std::mem::take(&mut self.ops);
+        self.total_bytes = 0;
+        drained
+    }
+
+    /// Number of ops currently queued.
+    pub fn depth(&self) -> usize {
+        self.ops.len()
+    }
+
+    /// Total bytes currently held (sum of `ops[i].len()`).
+    pub fn bytes_used(&self) -> usize {
+        self.total_bytes
+    }
+
+    /// Cap in bytes (10 MB default).
+    pub fn cap_bytes(&self) -> usize {
+        self.cap_bytes
+    }
+
+    /// Bump the retry counter, returning the new value. The orchestrator's
+    /// exponential-backoff scheduler reads this to compute the next retry
+    /// delay (e.g. `2^retry_count * 100ms`).
+    pub fn retry_bump(&mut self) -> u32 {
+        self.retry_count = self.retry_count.saturating_add(1);
+        self.retry_count
+    }
+
+    /// Reset the retry counter to 0. Called by the orchestrator after a
+    /// successful flush.
+    pub fn reset_retry(&mut self) {
+        self.retry_count = 0;
+    }
+
+    /// Current retry count (read accessor).
+    pub fn retry_count(&self) -> u32 {
+        self.retry_count
+    }
+
+    /// Whether the queue is empty.
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+}
+
+impl Default for OfflineOpQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for OfflineOpQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OfflineOpQueue")
+            .field("depth", &self.ops.len())
+            .field("bytes_used", &self.total_bytes)
+            .field("cap_bytes", &self.cap_bytes)
+            .field("retry_count", &self.retry_count)
+            .finish()
+    }
+}
 
 /// Inbound channel payload: a Loro subscriber event translated to a graph op.
 pub enum InboundMsg {
@@ -158,6 +344,17 @@ pub struct SyncEngine {
     ///   flush. Architecture §23.3 says "last sync" = both inbound flush AND
     ///   outbound commit, so both paths stamp the same `last_sync_ts`.
     pub(crate) health: Option<Arc<HealthProbe>>,
+    /// Lineage epoch key (issue #3 sub-issue 5). Bumped on every "cache
+    /// wipe" event — `wipe_cache()`, server reset signal from orchestrator,
+    /// or any lineage break detected at sync handshake. Exchanged at sync
+    /// handshake: if `local != remote`, the client MUST wipe its cache
+    /// before syncing (see [`Self::check_epoch_match`]).
+    pub(crate) lineage_epoch: Arc<AtomicU64>,
+    /// Native offline op-queue (issue #3 sub-issue 5). Replaces downstream's
+    /// custom IDB queue + exponential backoff. 10 MB cap. Exposed via
+    /// [`Self::offline_queue_depth`] + [`Self::offline_queue_bytes`] for
+    /// FFI access.
+    pub(crate) offline_queue: Arc<Mutex<OfflineOpQueue>>,
 }
 
 impl SyncEngine {
@@ -323,6 +520,8 @@ impl SyncEngine {
             metrics,
             tracer,
             health,
+            lineage_epoch: Arc::new(AtomicU64::new(0)),
+            offline_queue: Arc::new(Mutex::new(OfflineOpQueue::new())),
         };
         (engine, inbound_rx, outbound_rx)
     }
@@ -358,6 +557,117 @@ impl SyncEngine {
     /// flush AND outbound commit).
     pub fn health(&self) -> Option<&Arc<HealthProbe>> {
         self.health.as_ref()
+    }
+
+    // ========================================================================
+    // Issue #3 sub-issue 5: lineage epoch + offline op-queue
+    // ========================================================================
+
+    /// Current lineage epoch (issue #3 sub-issue 5). Bumped by
+    /// [`Self::wipe_cache`] on every "cache wipe" event. Exchanged at sync
+    /// handshake — the orchestrator's handshake plumbing calls
+    /// [`Self::check_epoch_match`] with the remote's advertised epoch and
+    /// returns [`EpochMismatchError`] verbatim to FFI on mismatch.
+    pub fn lineage_epoch(&self) -> LineageEpoch {
+        self.lineage_epoch.load(Ordering::Relaxed)
+    }
+
+    /// Check whether the remote's advertised lineage epoch matches the
+    /// local one. Returns `Ok(())` on match, `Err(EpochMismatchError)` on
+    /// mismatch. On `Err`, the client MUST wipe its cache before retrying
+    /// the handshake (the issue body calls this "split-brain resurrection
+    /// prevention").
+    pub fn check_epoch_match(&self, remote_epoch: LineageEpoch) -> std::result::Result<(), EpochMismatchError> {
+        let local = self.lineage_epoch.load(Ordering::Relaxed);
+        if local == remote_epoch {
+            Ok(())
+        } else {
+            Err(EpochMismatchError {
+                local,
+                remote: remote_epoch,
+            })
+        }
+    }
+
+    /// Wipe the engine's local cache state (issue #3 sub-issue 5).
+    ///
+    /// Bumps the lineage epoch atomically and clears the offline op-queue.
+    /// The orchestrator wires this to:
+    /// - manual `wipe_cache()` FFI calls (admin-triggered reset),
+    /// - server reset signal detected at sync handshake (after
+    ///   [`Self::check_epoch_match`] returns `Err`),
+    /// - any lineage break the orchestrator detects.
+    ///
+    /// Does NOT touch the underlying `GrafeoDB` / `LoroDoc` — the
+    /// orchestrator is responsible for re-hydrating those stores from
+    /// storage after a wipe. This method only resets the bridge's
+    /// in-memory lineage state.
+    ///
+    /// Returns the new (post-bump) lineage epoch.
+    pub fn wipe_cache(&self) -> LineageEpoch {
+        let new_epoch = self.lineage_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        // Drain the offline queue (stale ops from the wiped lineage must
+        // not be replayed against the fresh state).
+        let _ = self.offline_queue.lock().drain();
+        self.offline_queue.lock().reset_retry();
+        tracing::info!(
+            new_epoch,
+            "lineage epoch bumped — offline queue drained, retry counter reset"
+        );
+        new_epoch
+    }
+
+    /// Enqueue a serialized LoroOp into the offline op-queue (issue #3
+    /// sub-issue 5). Returns `Err(GrafeoLoroError::Bridge)` if adding the
+    /// op would exceed the 10 MB cap. The orchestrator's FFI exposes this
+    /// as the native replacement for downstream's custom IDB queue.
+    pub fn enqueue_offline_op(&self, op_bytes: Vec<u8>) -> Result<()> {
+        self.offline_queue.lock().enqueue(op_bytes)
+    }
+
+    /// Drain all queued offline ops in FIFO order (issue #3 sub-issue 5).
+    /// Used by the orchestrator's reconnect handler to state-vector-delta-
+    /// sync against the remote (issue body: "State-vector delta sync on
+    /// reconnect"). Does NOT reset the retry counter — the orchestrator
+    /// calls [`Self::reset_offline_retry`] after a successful flush.
+    pub fn drain_offline_queue(&self) -> Vec<Vec<u8>> {
+        self.offline_queue.lock().drain()
+    }
+
+    /// Current offline op-queue depth (number of ops pending sync).
+    /// Exposed to FFI as the native replacement for downstream's IDB
+    /// queue depth probe (issue #3 sub-issue 5).
+    pub fn offline_queue_depth(&self) -> usize {
+        self.offline_queue.lock().depth()
+    }
+
+    /// Current offline op-queue size in bytes (sum of `op_bytes.len()`).
+    /// Exposed to FFI for backpressure signaling (issue #3 sub-issue 5).
+    pub fn offline_queue_bytes(&self) -> usize {
+        self.offline_queue.lock().bytes_used()
+    }
+
+    /// Offline op-queue byte cap (default 10 MB, issue #3 sub-issue 5).
+    pub fn offline_queue_cap(&self) -> usize {
+        self.offline_queue.lock().cap_bytes()
+    }
+
+    /// Bump the offline queue's retry counter (issue #3 sub-issue 5).
+    /// Returns the new count. The orchestrator reads this to compute the
+    /// next exponential-backoff delay (e.g. `2^count * 100ms`).
+    pub fn offline_retry_bump(&self) -> u32 {
+        self.offline_queue.lock().retry_bump()
+    }
+
+    /// Reset the offline queue's retry counter to 0 (issue #3 sub-issue 5).
+    /// Called by the orchestrator after a successful flush.
+    pub fn reset_offline_retry(&self) {
+        self.offline_queue.lock().reset_retry();
+    }
+
+    /// Current offline queue retry count (read accessor for FFI).
+    pub fn offline_retry_count(&self) -> u32 {
+        self.offline_queue.lock().retry_count()
     }
 
     /// Wire `loro_doc.subscribe_root` → origin filter → translate to `LoroOp`

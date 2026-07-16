@@ -1,4 +1,16 @@
-//! Loro → Grafeo tree reparenting bridge.
+//! Loro → Grafeo tree reparenting bridge + native cycle guard (issue #3
+//! sub-issue 7).
+//!
+//! # Native cycle guard (issue #3 sub-issue 7, invariant I14)
+//!
+//! [`CycleGuard`] maintains a `parent_of` map keyed by node-key strings so
+//! edge inserts can reject cycles in O(depth) worst-case before commit. This
+//! is the native enforcement of invariant I14 (tree acyclicity) that the
+//! issue body calls for — the prior bridge-only `would_create_cycle_in_tx`
+//! BFS walked grafeo's neighbor index at insert time (O(N) per move, killed
+//! 60fps). The new guard lives entirely in the schema layer (no `grafeo`
+//! feature dep) and is consulted pre-commit by `bridge::grafeo_tx::apply_*`
+//! once the orchestrator wires it into the inbound apply path.
 //!
 //! # Known Limitation (P2T2-DEVIL Q7/R7)
 //!
@@ -10,22 +22,253 @@
 //! (no phase in `docs/implementation-plan.md` covers it). The function is
 //! exercised only by `tests/unit/tree_move.rs` and
 //! `tests/integration/tree_move_concurrency.rs` until bridge wiring lands.
-
-//! Loro → Grafeo tree reparenting bridge.
 //!
-//! Issue #1: requires `grafeo` feature (calls `GrafeoDB::session` etc.).
-//! The `OrderedCollection` / `TreeNode` types at the top of this file are
-//! available whenever `bridge` is on (no grafeo dep); the
-//! `sync_tree_move_to_grafeo` function is gated by `grafeo`.
+//! # Feature gating
+//!
+//! Issue #1: `sync_tree_move_to_grafeo` requires `grafeo` feature (calls
+//! `GrafeoDB::session` etc.). The `OrderedCollection` / `TreeNode` types +
+//! [`CycleGuard`] / [`CycleError`] at the top of this file are available
+//! whenever `bridge` is on (no grafeo dep); the `sync_tree_move_to_grafeo`
+//! function is gated by `grafeo`.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
+#[cfg(feature = "grafeo")]
+use std::collections::VecDeque;
 
 use lorosurgeon::{Hydrate, Reconcile};
+#[cfg(feature = "grafeo")]
 use tracing::{debug, instrument};
 
+#[cfg(feature = "grafeo")]
 use crate::constants::{ORIGIN_LORO_BRIDGE, TREE_EDGE_LABEL};
+#[cfg(feature = "grafeo")]
 use crate::error::GrafeoLoroError;
+#[cfg(feature = "grafeo")]
 use crate::types::ids::NodeId;
+
+// ============================================================================
+// Native cycle guard (issue #3 sub-issue 7, invariant I14)
+// ============================================================================
+//
+// `CycleGuard` is a pure-Rust parent-pointer map. Insert-time cycle detection
+// is O(depth) worst-case (follow parent pointers from `new_parent` upward
+// until hitting `node` or a root). This is the native enforcement of
+// invariant I14 that the issue body calls for — replacing the bridge-only
+// `would_create_cycle_in_tx` BFS (which walked grafeo's neighbor index at
+// O(N) per move).
+//
+// The guard is intentionally decoupled from grafeo: it operates on string
+// node-keys (the Loro-side identity), so it works in pure-WASM builds where
+// the `grafeo` execution layer is absent. The orchestrator wires it into
+// `bridge::grafeo_tx::apply_tree_move` + the inbound batcher's pre-commit
+// hook in a follow-up.
+
+/// Error returned by [`CycleGuard::apply_move`] when the proposed move
+/// would create a cycle (invariant I14 violation).
+///
+/// Distinct from `tree_adapter::CycleError` (which carries `NodeId`s and is
+/// used by the `tree` feature's adapter layer). This schema-layer error uses
+/// string keys so it works in builds without `grafeo`/`tree` features.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("cycle: node {node:?} cannot be reparented under {new_parent:?}")]
+pub struct CycleError {
+    /// Key of the node being reparented.
+    pub node: String,
+    /// Proposed new parent key.
+    pub new_parent: String,
+}
+
+/// Native parent-pointer map for O(depth) cycle detection on edge insert
+/// (issue #3 sub-issue 7, invariant I14).
+///
+/// The guard tracks one parent per node (enforces tree-ness, not just
+/// acyclicity). Multi-parent graphs (DAGs) are NOT supported by this guard
+/// — use [`crate::schema::edge::validate_acyclic`] for batch DAG validation.
+///
+/// # Cost model
+///
+/// - `apply_move`: O(depth) worst-case (walks parent chain to check for
+///   cycle before mutating the map).
+/// - `would_create_cycle`: O(depth) worst-case (same walk, read-only).
+/// - `roots`: O(N) — iterates all entries. Cached root set is the
+///   responsibility of [`crate::schema::RootTracker`].
+///
+/// # Persistence story
+///
+/// The guard is in-memory only. Re-hydration from a Loro snapshot must
+/// replay tree moves through `apply_move` to rebuild the parent map. The
+/// orchestrator's hydration path (`src/hydration/*`) is the wiring point.
+#[derive(Debug, Clone, Default)]
+pub struct CycleGuard {
+    /// `node_key → parent_key`. Absent entry = root.
+    parent_of: HashMap<String, String>,
+}
+
+impl CycleGuard {
+    /// Construct a fresh empty guard.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns `true` if reparenting `node` under `new_parent` would close a
+    /// cycle. O(depth) worst-case: walks the parent chain from `new_parent`
+    /// upward looking for `node`. Self-loops (`node == new_parent`) return
+    /// `true` immediately.
+    pub fn would_create_cycle(&self, node: &str, new_parent: &str) -> bool {
+        if node == new_parent {
+            return true;
+        }
+        // Walk parent chain from `new_parent` upward. If we hit `node`, the
+        // proposed move closes a cycle. If we hit a root (no parent entry),
+        // no cycle.
+        let mut cur = new_parent.to_string();
+        loop {
+            if cur == node {
+                return true;
+            }
+            match self.parent_of.get(&cur) {
+                Some(p) => cur = p.clone(),
+                None => return false,
+            }
+        }
+    }
+
+    /// Apply a reparent move: update the parent pointer for `node` to
+    /// `new_parent`. Returns `Err(CycleError)` if the move would create a
+    /// cycle (pre-checked via [`Self::would_create_cycle`]). O(depth)
+    /// worst-case.
+    pub fn apply_move(&mut self, node: &str, new_parent: &str) -> Result<(), CycleError> {
+        if self.would_create_cycle(node, new_parent) {
+            return Err(CycleError {
+                node: node.to_string(),
+                new_parent: new_parent.to_string(),
+            });
+        }
+        self.parent_of.insert(node.to_string(), new_parent.to_string());
+        Ok(())
+    }
+
+    /// Record an initial parent binding (no cycle check — used during
+    /// hydration replay when the caller guarantees the source graph was
+    /// already acyclic). O(1).
+    ///
+    /// # Safety (logical)
+    ///
+    /// Calling this with a binding that creates a cycle leaves the guard in
+    /// an inconsistent state — `would_create_cycle` will still detect the
+    /// cycle on subsequent moves, but `roots()` may return a stale set. Use
+    /// [`Self::apply_move`] for any binding whose acyclicity is not
+    /// pre-validated.
+    pub fn record_parent_unchecked(&mut self, node: &str, parent: &str) {
+        self.parent_of.insert(node.to_string(), parent.to_string());
+    }
+
+    /// Remove a node's parent binding (turns it back into a root). O(1).
+    /// No-op if the node was a root or absent.
+    pub fn detach(&mut self, node: &str) {
+        self.parent_of.remove(node);
+    }
+
+    /// Returns the parent of `node` if one is recorded, else `None` (root
+    /// or unknown node). O(1).
+    pub fn parent_of(&self, node: &str) -> Option<&str> {
+        self.parent_of.get(node).map(String::as_str)
+    }
+
+    /// Returns all node keys known to the guard (whether root or non-root).
+    /// O(N).
+    pub fn known_nodes(&self) -> impl Iterator<Item = &str> {
+        self.parent_of.keys().map(String::as_str)
+    }
+
+    /// Returns the set of root node keys (nodes with no recorded parent).
+    /// O(N) — iterates all entries. For incremental O(1) root membership
+    /// queries, use [`crate::schema::RootTracker`] instead.
+    ///
+    /// Note: this returns only nodes the guard knows about. A node that has
+    /// never been registered via `apply_move` / `record_parent_unchecked`
+    /// is unknown to the guard and will NOT appear in `roots()`.
+    pub fn roots(&self) -> Vec<String> {
+        // A node is a root iff it appears as a parent target somewhere OR
+        // has an entry with no parent of its own. We need both: nodes that
+        // are pointed-to but don't point anywhere (pure roots) + nodes that
+        // are roots because they were never reparented.
+        let mut all_nodes: HashSet<&str> = HashSet::new();
+        for (child, parent) in self.parent_of.iter() {
+            all_nodes.insert(child.as_str());
+            all_nodes.insert(parent.as_str());
+        }
+        all_nodes
+            .into_iter()
+            .filter(|n| !self.parent_of.contains_key(*n))
+            .map(String::from)
+            .collect()
+    }
+
+    /// Number of nodes the guard has parent info for. O(1).
+    pub fn len(&self) -> usize {
+        self.parent_of.len()
+    }
+
+    /// Whether the guard is empty. O(1).
+    pub fn is_empty(&self) -> bool {
+        self.parent_of.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod cycle_guard_tests {
+    use super::*;
+
+    #[test]
+    fn self_loop_rejected() {
+        let mut g = CycleGuard::new();
+        assert!(g.apply_move("a", "a").is_err());
+    }
+
+    #[test]
+    fn direct_cycle_rejected() {
+        // A→B then B→A must fail.
+        let mut g = CycleGuard::new();
+        g.apply_move("b", "a").unwrap();
+        assert!(g.apply_move("a", "b").is_err());
+    }
+
+    #[test]
+    fn deep_cycle_rejected() {
+        // A→B→C then C→A must fail.
+        let mut g = CycleGuard::new();
+        g.apply_move("b", "a").unwrap();
+        g.apply_move("c", "b").unwrap();
+        assert!(g.apply_move("a", "c").is_err());
+    }
+
+    #[test]
+    fn non_cycle_move_accepted() {
+        let mut g = CycleGuard::new();
+        g.apply_move("b", "a").unwrap();
+        assert!(g.apply_move("c", "a").is_ok());
+        assert_eq!(g.parent_of("c"), Some("a"));
+    }
+
+    #[test]
+    fn roots_correct_after_moves() {
+        let mut g = CycleGuard::new();
+        g.apply_move("b", "a").unwrap();
+        g.apply_move("c", "b").unwrap();
+        let mut roots = g.roots();
+        roots.sort();
+        assert_eq!(roots, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn detach_makes_root_again() {
+        let mut g = CycleGuard::new();
+        g.apply_move("b", "a").unwrap();
+        g.detach("b");
+        assert!(g.parent_of("b").is_none());
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Hydrate, Reconcile)]
 pub struct OrderedCollection {
