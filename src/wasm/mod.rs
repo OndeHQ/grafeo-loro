@@ -69,6 +69,10 @@ compile_error!(
 
 use crate::error::GrafeoLoroError;
 
+/// `#[wasm_bindgen]` wrappers for the offline op-queue + lineage epoch
+/// tracker (issue #4). Browser consumers use these JS classes directly.
+pub mod queue;
+
 // JsValue glue is only compiled on actual WASM targets. The target-agnostic
 // `error_code` (and the test module) compile on any target so the mapping
 // can be unit-tested without a JS runtime.
@@ -76,6 +80,14 @@ use crate::error::GrafeoLoroError;
 use js_sys::Object;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
+
+// Re-export the JS-facing wrapper types so callers can write
+// `use grafeo_loro::wasm::{WasmOfflineOpQueue, WasmEpochTracker}` (and so
+// the eventual `src/lib.rs` `pub use wasm::{...}` re-export resolves).
+// Only available on actual WASM targets — the wrappers themselves are
+// `#![cfg(target_family = "wasm")]` inside `queue.rs`.
+#[cfg(target_family = "wasm")]
+pub use queue::{WasmEpochTracker, WasmOfflineOpQueue};
 
 /// Stable error code for each `GrafeoLoroError` variant. JS callers branch
 /// on this; the `.message` field is for humans.
