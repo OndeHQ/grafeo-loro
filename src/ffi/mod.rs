@@ -23,8 +23,10 @@
 //! codec. This is the binary-codec path ADR-010 explicitly permits.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
-use crate::types::events::LoroOp;
+use crate::bridge::origin::{self, OriginKind};
+use crate::types::events::{ConflictDetected, ConflictResolution, LoroOp};
 use crate::types::values::GraphValue;
 
 // `Result` and `BridgeMaps` are only used in the `apply_node_batch` /
