@@ -1,6 +1,6 @@
 [package]
 name = "grafeo-loro"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Local-first, in-process, dual-store graph database with CRDT consensus (Loro) + execution (Grafeo)."
@@ -166,12 +166,15 @@ bincode = { version = "1", optional = true }
 getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
-# Issue #3 sub-issue 1: keep `rt-multi-thread` for native dev/test only.
+# Issue #3 sub-issue 1 + issue #4: keep `rt-multi-thread` for native dev/test
+# only. The `tokio` dev-dep itself (with `rt-multi-thread`) does NOT compile
+# on `wasm32-unknown-unknown` — tokio emits a `compile_error!` if you try.
+# So we gate the native-flavored tokio dev-dep behind a target cfg and let
+# the wasm32-only dev-deps (see below) pull in `wasm-bindgen-test` instead.
+#
 # Production WASM consumers MUST NOT enable `batcher` (which is the only
 # path that pulls tokio into the library's dep graph).
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "sync", "time"] }
 tracing-subscriber = "0.3"
-tempfile = "3"
 # Criterion for `cargo bench` (issue #1 item 11). `default-features = false`
 # drops `rayon` (which does not compile on `wasm32-unknown-unknown`) so the
 # same dev-dep line works for both native and WASM bench targets.
@@ -181,10 +184,18 @@ criterion = { version = "0.5", default-features = false, features = ["plotters",
 # line above for:
 # criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support", "wasm-bindgen"] }
 # See `benches/README.md` for the full WASM bench runbook + known limitations.
-# Issue #4: wasm-bindgen-test runner for `cargo test --target wasm32-unknown-unknown`.
-# Only needed on wasm32 targets; gated via
-# [target.'cfg(target_arch = "wasm32")'.dev-dependencies] below so it does
-# not bloat native builds.
+
+# ============================================================================
+# Target-specific dev-dependencies — native only (issue #4)
+# ============================================================================
+# `tokio` with `rt-multi-thread` does NOT compile on `wasm32-unknown-unknown`
+# (tokio emits a `compile_error!("Only features sync,macros,io-util,rt,time
+# are supported on wasm.")`). Gate it on `not(target_arch = "wasm32")` so
+# `cargo test --target wasm32-unknown-unknown --test queue_wasm` works.
+# `tempfile` uses std::fs APIs that are not available on wasm32 either.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "sync", "time"] }
+tempfile = "3"
 
 # ============================================================================
 # Target-specific dev-dependencies (issue #4: WASM test runner)
@@ -224,6 +235,12 @@ required-features = ["full"]
 [lib]
 name = "grafeo_loro"
 path = "src/lib.rs"
+# Issue #4: `crate-type = ["cdylib", "rlib"]` so `wasm-pack build` works
+# directly on the main crate (previously only the `examples/wasm-offline-
+# queue` sub-crate declared `cdylib`). The `rlib` is still produced for
+# ordinary `cargo build` / `cargo test` consumers; `cdylib` is what
+# `wasm-pack` consumes to produce the `.wasm` + JS bindings.
+crate-type = ["cdylib", "rlib"]
 
 # ============================================================================
 # WASM package metadata (issue #3 sub-issue 1)
