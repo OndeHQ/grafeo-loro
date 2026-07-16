@@ -1,56 +1,60 @@
-//! Storage backend trait — issue #1 item 9.
+//! Storage backend trait — issue #1 item 9 + issue #3 sub-issue 9.
 //!
-//! Browser-friendly: `&self` not `&mut self` (matters for `Rc<RefCell<>>`
-//! wrapping in WASM), `async_trait` (works in WASM via
-//! `wasm-bindgen-futures`), no `tokio::fs` in default impls.
+//! Browser-friendly: `&self` not `&mut self`, `async_trait`, no `tokio::fs`.
 //!
-//! Onde will write its own IDB/OPFS adapter implementing this trait. We do
-//! NOT ship browser storage — Onde owns it (reciprocal commitment per
-//! issue #1).
+//! Issue #3 sub-issue 9 additions:
+//! - `export_incremental_snapshot` — delta since a state vector.
+//! - `stream_snapshot_to_opfs` — chunked streaming for OPFS.
+//! - `diff_snapshots` — state-vector delta between two snapshots.
 
 use async_trait::async_trait;
 
+use crate::error::Result;
+
 /// Persistent storage backend for cold-snapshot persistence.
-///
-/// All methods take `&self` (not `&mut self`) so the trait can be wrapped
-/// in `Rc<RefCell<dyn StorageBackend>>` or `Arc<dyn StorageBackend>` in
-/// both native and WASM environments. Methods are `async` via
-/// [`async_trait`] — works in WASM via `wasm-bindgen-futures`.
-///
-/// # Implementor notes
-///
-/// - **No `tokio::fs`** in default impls — that would pull `tokio`'s
-///   runtime, which is unavailable in browser WASM. Use
-///   `wasm-bindgen-futures` + `web-sys` for IDB/OPFS in browser impls.
-/// - **No `Send` bound required** — WASM futures are single-threaded.
-///   Native impls that need `Send` can add it locally; the trait itself
-///   stays WASM-compatible.
-/// - **`'static` bound** retained so the trait object can be stored in
-///   `Arc<dyn StorageBackend>` (the production GrafeoLoroApp shape).
-///
-/// # Errors
-///
-/// Implementations return `std::io::Error` to keep the trait signature
-/// simple. Wrapping backend-specific errors into `io::Error` via
-/// `io::Error::new(io::ErrorKind::Other, ...)` is the expected pattern.
 #[async_trait(?Send)]
 pub trait StorageBackend: 'static {
-    /// Load the bytes previously saved under `key`.
-    ///
-    /// Returns `io::ErrorKind::NotFound` when the key is absent — this is
-    /// the "fresh graph" cold-boot signal consumed by `GrafeoLoroApp::hydrate`.
     async fn load(&self, key: &str) -> std::result::Result<Vec<u8>, std::io::Error>;
-
-    /// Persist `bytes` under `key`. Subsequent `load(key)` MUST return the
-    /// same bytes (modulo in-place mutation by a concurrent writer — backends
-    /// with weaker guarantees should document that).
     async fn save(&self, key: &str, bytes: Vec<u8>) -> std::result::Result<(), std::io::Error>;
-
-    /// Enumerate all stored keys beginning with `prefix`. Used by
-    /// `GrafeoLoroApp::hydrate` to enumerate delta snapshots during
-    /// cold-boot replay.
     async fn list(&self, prefix: &str) -> std::result::Result<Vec<String>, std::io::Error>;
-
-    /// Remove the entry at `key`. Idempotent: deleting a missing key is OK.
     async fn delete(&self, key: &str) -> std::result::Result<(), std::io::Error>;
+
+    /// Incremental snapshot export (issue #3 sub-issue 9). Returns only
+    /// the delta since `since_state_vector`. Empty vec if no changes.
+    async fn export_incremental_snapshot(&self, since_state_vector: &[u8]) -> Result<Vec<u8>>;
+
+    /// Streaming snapshot write for OPFS (issue #3 sub-issue 9). Calls
+    /// `chunk_callback` for each chunk (~64KB).
+    ///
+    /// The callback is `for<'a> Fn(&'a [u8])` (HRTB) — explicit because
+    /// `async_trait`'s desugaring would otherwise tie the `&[u8]` argument
+    /// lifetime to the `&self` borrow.
+    async fn stream_snapshot_to_opfs(
+        &self,
+        chunk_callback: &(dyn for<'a> Fn(&'a [u8]) -> Result<()> + Send + Sync),
+    ) -> Result<()>;
+
+    /// Snapshot diffing API (issue #3 sub-issue 9).
+    async fn diff_snapshots(&self, base: &[u8], head: &[u8]) -> Result<SnapshotDiff>;
+}
+
+/// Snapshot diff result (issue #3 sub-issue 9).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotDiff {
+    pub added_ops: u64,
+    pub removed_ops: u64,
+    pub state_vector_delta: Vec<u8>,
+}
+
+impl SnapshotDiff {
+    pub fn empty() -> Self {
+        Self { added_ops: 0, removed_ops: 0, state_vector_delta: Vec::new() }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.added_ops == 0 && self.removed_ops == 0
+    }
+}
+
+impl Default for SnapshotDiff {
+    fn default() -> Self { Self::empty() }
 }
