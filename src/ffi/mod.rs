@@ -300,7 +300,7 @@ pub fn batcher_register() -> BatcherHandle {
 ///
 /// Requires `bridge` (bincode) + `serde` (`LoroOp: Deserialize` derive).
 #[cfg(feature = "serde")]
-pub fn batcher_enqueue(handle: BatcherHandle, op_bytes: &[u8]) -> Result<(), String> {
+pub fn batcher_enqueue(handle: BatcherHandle, op_bytes: &[u8]) -> std::result::Result<(), String> {
     let op: LoroOp = bincode::deserialize(op_bytes)
         .map_err(|e| format!("bincode decode LoroOp: {e}"))?;
     let guard = BATCHER_REGISTRY.lock().expect("BATCHER_REGISTRY poisoned");
@@ -333,7 +333,7 @@ pub fn batcher_enqueue(handle: BatcherHandle, op_bytes: &[u8]) -> Result<(), Str
 /// # Errors
 ///
 /// Returns `Err(String)` if `handle` is not in the registry.
-pub fn batcher_flush(handle: BatcherHandle) -> Result<(), String> {
+pub fn batcher_flush(handle: BatcherHandle) -> std::result::Result<(), String> {
     let drained: Vec<LoroOp> = {
         let guard = BATCHER_REGISTRY.lock().expect("BATCHER_REGISTRY poisoned");
         let map = guard
@@ -393,7 +393,7 @@ pub fn dispatch_flush_callbacks(epoch: grafeo_common::types::EpochId, op_count: 
 pub fn set_next_commit_origin(
     origin_kind: OriginKind,
     node_id: Option<&str>,
-) -> Result<(), String> {
+) -> std::result::Result<(), String> {
     origin::set_next_commit_origin(origin_kind, node_id);
     Ok(())
 }
