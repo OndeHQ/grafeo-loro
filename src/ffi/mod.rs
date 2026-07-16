@@ -229,6 +229,357 @@ pub fn apply_loro_op_bytes(
 }
 
 // ============================================================================
+// Issue #3 sub-issue 2 — FFI batcher + origin entry points
+// ============================================================================
+
+/// Opaque handle to a registered batcher slot (issue #3 sub-issue 2).
+///
+/// `Copy` so it can be passed by value across the FFI boundary (matches
+/// the C ABI sketch: `typedef struct { size_t id; } batcher_handle_t;`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BatcherHandle(pub(crate) usize);
+
+impl BatcherHandle {
+    /// Construct a handle guaranteed to NOT match any registered slot.
+    /// For testing error paths only — production callers use [`batcher_register`].
+    pub fn unknown() -> Self {
+        BatcherHandle(usize::MAX)
+    }
+
+    /// Raw id accessor (for diagnostic logging in FFI shims).
+    pub fn id(&self) -> usize {
+        self.0
+    }
+}
+
+struct BatcherSlot {
+    pending: Mutex<Vec<LoroOp>>,
+}
+
+impl BatcherSlot {
+    fn new() -> Self {
+        Self {
+            pending: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+static BATCHER_REGISTRY: Mutex<Option<HashMap<usize, BatcherSlot>>> = Mutex::new(None);
+
+static FLUSH_CALLBACKS: Mutex<Vec<extern "C" fn(*const u8, usize)>> = Mutex::new(Vec::new());
+
+static NEXT_HANDLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Register a new batcher slot in the global registry and return its handle.
+///
+/// TODO(orchestrator): call this from `SyncEngine::new_inner` (or
+/// `GrafeoLoroAppBuilder::build`) and stash the returned handle on the
+/// `SyncEngine` struct so the WASM layer can fetch it via a future
+/// `sync_engine_batcher_handle()` FFI entry point.
+pub fn batcher_register() -> BatcherHandle {
+    let id = NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut guard = BATCHER_REGISTRY.lock().expect("BATCHER_REGISTRY poisoned");
+    if guard.is_none() {
+        *guard = Some(HashMap::new());
+    }
+    guard.as_mut().unwrap().insert(id, BatcherSlot::new());
+    BatcherHandle(id)
+}
+
+/// Enqueue a bincode-encoded `LoroOp` into the batcher's pending buffer
+/// (issue #3 sub-issue 2 FFI entry point).
+///
+/// # Errors
+///
+/// Returns `Err(String)` if `handle` is not in the registry or bincode
+/// decode of `op_bytes` fails.
+///
+/// # Feature gating
+///
+/// Requires `bridge` (bincode) + `serde` (`LoroOp: Deserialize` derive).
+#[cfg(feature = "serde")]
+pub fn batcher_enqueue(handle: BatcherHandle, op_bytes: &[u8]) -> Result<(), String> {
+    let op: LoroOp = bincode::deserialize(op_bytes)
+        .map_err(|e| format!("bincode decode LoroOp: {e}"))?;
+    let guard = BATCHER_REGISTRY.lock().expect("BATCHER_REGISTRY poisoned");
+    let map = guard
+        .as_ref()
+        .ok_or_else(|| "batcher registry not initialised".to_string())?;
+    let slot = map
+        .get(&handle.0)
+        .ok_or_else(|| format!("unknown BatcherHandle: {}", handle.0))?;
+    slot.pending
+        .lock()
+        .expect("pending buffer poisoned")
+        .push(op);
+    Ok(())
+}
+
+/// Force an immediate flush of the batcher's pending buffer (issue #3
+/// sub-issue 2 FFI entry point).
+///
+/// Drains all pending `LoroOp`s from the slot's buffer and fires every
+/// registered flush callback with a 16-byte payload:
+/// `[u64 epoch_be, u64 op_count_be]` (big-endian).
+///
+/// **Epoch value:** the FFI surface does NOT have access to the grafeo
+/// `EpochId` (that requires `grafeo` feature + a live `GrafeoDB`). For
+/// `bridge`-only builds the epoch field is set to `0` — the orchestrator's
+/// `MutationBatcher::flush_inner` overrides this with the real `EpochId`
+/// via [`dispatch_flush_callbacks`].
+///
+/// # Errors
+///
+/// Returns `Err(String)` if `handle` is not in the registry.
+pub fn batcher_flush(handle: BatcherHandle) -> Result<(), String> {
+    let drained: Vec<LoroOp> = {
+        let guard = BATCHER_REGISTRY.lock().expect("BATCHER_REGISTRY poisoned");
+        let map = guard
+            .as_ref()
+            .ok_or_else(|| "batcher registry not initialised".to_string())?;
+        let slot = map
+            .get(&handle.0)
+            .ok_or_else(|| format!("unknown BatcherHandle: {}", handle.0))?;
+        let mut pending = slot.pending.lock().expect("pending buffer poisoned");
+        std::mem::take(&mut *pending)
+    };
+    let op_count = drained.len() as u64;
+
+    let mut payload = [0u8; 16];
+    payload[0..8].copy_from_slice(&0u64.to_be_bytes());
+    payload[8..16].copy_from_slice(&op_count.to_be_bytes());
+
+    let cbs = FLUSH_CALLBACKS.lock().expect("FLUSH_CALLBACKS poisoned");
+    for cb in cbs.iter() {
+        cb(payload.as_ptr(), payload.len());
+    }
+    Ok(())
+}
+
+/// Register a flush callback fired by [`batcher_flush`] (issue #3
+/// sub-issue 2 FFI entry point).
+///
+/// The callback receives `(ptr: *const u8, len: usize)` where `ptr` points
+/// to a 16-byte payload: `[u64 epoch_be, u64 op_count_be]`. Callers MUST
+/// NOT retain the pointer after the callback returns.
+pub fn batcher_on_flush(callback: extern "C" fn(*const u8, usize)) {
+    let mut cbs = FLUSH_CALLBACKS.lock().expect("FLUSH_CALLBACKS poisoned");
+    cbs.push(callback);
+}
+
+/// Dispatch flush callbacks with a real `EpochId` (orchestrator-facing
+/// helper, NOT a public FFI entry point).
+///
+/// TODO(orchestrator): wire `MutationBatcher::flush_inner` to call this
+/// after `prepared.commit()` returns the `EpochId`.
+#[cfg(feature = "grafeo")]
+pub fn dispatch_flush_callbacks(epoch: grafeo_common::types::EpochId, op_count: u64) {
+    let mut payload = [0u8; 16];
+    payload[0..8].copy_from_slice(&(epoch.as_u64()).to_be_bytes());
+    payload[8..16].copy_from_slice(&op_count.to_be_bytes());
+    let cbs = FLUSH_CALLBACKS.lock().expect("FLUSH_CALLBACKS poisoned");
+    for cb in cbs.iter() {
+        cb(payload.as_ptr(), payload.len());
+    }
+}
+
+/// Set the next commit's origin (issue #3 sub-issue 2 FFI entry point).
+///
+/// Thin wrapper around [`crate::bridge::origin::set_next_commit_origin`]
+/// that takes the C-FFI-friendly [`OriginKind`] enum + optional node id.
+/// Always returns `Ok(())` — the `Result` signature is for FFI uniformity.
+pub fn set_next_commit_origin(
+    origin_kind: OriginKind,
+    node_id: Option<&str>,
+) -> Result<(), String> {
+    origin::set_next_commit_origin(origin_kind, node_id);
+    Ok(())
+}
+
+// ============================================================================
+// Issue #3 sub-issue 4 — semantic text merge + ConflictDetected dispatch
+// ============================================================================
+
+/// Compute the LCS match pairs between two line slices (used by
+/// [`semantic_text_merge`]). O(m·n) DP; fine for typical text-field sizes.
+fn lcs_matches(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
+    let m = a.len();
+    let n = b.len();
+    if m == 0 || n == 0 {
+        return Vec::new();
+    }
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in (0..m).rev() {
+        for j in (0..n).rev() {
+            if a[i] == b[j] {
+                dp[i][j] = dp[i + 1][j + 1] + 1;
+            } else {
+                dp[i][j] = dp[i + 1][j].max(dp[i][j + 1]);
+            }
+        }
+    }
+    let mut result = Vec::with_capacity(dp[0][0]);
+    let mut i = 0;
+    let mut j = 0;
+    while i < m && j < n {
+        if a[i] == b[j] {
+            result.push((i, j));
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    result
+}
+
+/// Line-level 3-way semantic text merge (issue #3 sub-issue 4).
+///
+/// Pure-Rust diff3 — does NOT pull an external diff crate. Char-level
+/// merge is a future enhancement; for now, line-level granularity matches
+/// the typical text-field edit pattern in grafeo-loro.
+///
+/// # Algorithm
+///
+/// 1. Compute LCS-based `match_at` arrays for (base, ours) and (base, theirs).
+/// 2. Compute `insertions_before[i] = (lo, hi)` ranges.
+/// 3. Walk `i` from `0` to `base_len`, emitting insertions + base lines.
+///    If both sides inserted different content at the same slot, emit
+///    conflict markers and mark `ManualRequired`.
+///
+/// # Resolution rules
+///
+/// - `ManualRequired`: at least one conflicting insertion.
+/// - `OursWins`: no conflicts AND `theirs == base`.
+/// - `TheirsWins`: no conflicts AND `ours == base`.
+/// - `Merged`: no conflicts AND both sides made non-overlapping changes.
+pub fn semantic_text_merge(base: &str, ours: &str, theirs: &str) -> (String, ConflictResolution) {
+    let base_lines: Vec<&str> = base.split('\n').collect();
+    let our_lines: Vec<&str> = ours.split('\n').collect();
+    let their_lines: Vec<&str> = theirs.split('\n').collect();
+
+    let our_matches = lcs_matches(&base_lines, &our_lines);
+    let their_matches = lcs_matches(&base_lines, &their_lines);
+
+    let mut our_match_at = vec![None; base_lines.len()];
+    for (b, o) in &our_matches {
+        our_match_at[*b] = Some(*o);
+    }
+    let mut their_match_at = vec![None; base_lines.len()];
+    for (b, t) in &their_matches {
+        their_match_at[*b] = Some(*t);
+    }
+
+    let mut our_insertions_before: Vec<(usize, usize)> = vec![(0, 0); base_lines.len() + 1];
+    let mut prev_o = 0;
+    for b_idx in 0..base_lines.len() {
+        if let Some(o) = our_match_at[b_idx] {
+            our_insertions_before[b_idx] = (prev_o, o);
+            prev_o = o + 1;
+        }
+    }
+    our_insertions_before[base_lines.len()] = (prev_o, our_lines.len());
+
+    let mut their_insertions_before: Vec<(usize, usize)> = vec![(0, 0); base_lines.len() + 1];
+    let mut prev_t = 0;
+    for b_idx in 0..base_lines.len() {
+        if let Some(t) = their_match_at[b_idx] {
+            their_insertions_before[b_idx] = (prev_t, t);
+            prev_t = t + 1;
+        }
+    }
+    their_insertions_before[base_lines.len()] = (prev_t, their_lines.len());
+
+    let mut result: Vec<String> = Vec::new();
+    let mut conflict = false;
+
+    for b_idx in 0..=base_lines.len() {
+        let (our_lo, our_hi) = our_insertions_before[b_idx];
+        let (their_lo, their_hi) = their_insertions_before[b_idx];
+        let our_ins = &our_lines[our_lo..our_hi];
+        let their_ins = &their_lines[their_lo..their_hi];
+
+        if our_ins.is_empty() {
+            for line in their_ins {
+                result.push((*line).to_string());
+            }
+        } else if their_ins.is_empty() {
+            for line in our_ins {
+                result.push((*line).to_string());
+            }
+        } else if our_ins == their_ins {
+            for line in our_ins {
+                result.push((*line).to_string());
+            }
+        } else {
+            conflict = true;
+            result.push("<<<<<<< ours".to_string());
+            for line in our_ins {
+                result.push((*line).to_string());
+            }
+            result.push("=======".to_string());
+            for line in their_ins {
+                result.push((*line).to_string());
+            }
+            result.push(">>>>>>> theirs".to_string());
+        }
+
+        if b_idx < base_lines.len() {
+            let our_match = our_match_at[b_idx];
+            let their_match = their_match_at[b_idx];
+            match (our_match, their_match) {
+                (Some(_), Some(_)) => {
+                    result.push(base_lines[b_idx].to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let resolution = if conflict {
+        ConflictResolution::ManualRequired
+    } else if our_lines == their_lines {
+        ConflictResolution::Merged
+    } else if base_lines == our_lines {
+        ConflictResolution::TheirsWins
+    } else if base_lines == their_lines {
+        ConflictResolution::OursWins
+    } else {
+        ConflictResolution::Merged
+    };
+
+    (result.join("\n"), resolution)
+}
+
+static CONFLICT_CALLBACKS: Mutex<Vec<extern "C" fn(*const ConflictDetected)>> = Mutex::new(Vec::new());
+
+/// Register a conflict-detected callback (issue #3 sub-issue 4 FFI entry
+/// point).
+///
+/// The callback receives a raw `*const ConflictDetected` pointer valid for
+/// the duration of the callback ONLY — callers MUST NOT retain it after
+/// the callback returns.
+pub fn on_conflict_detected(callback: extern "C" fn(*const ConflictDetected)) {
+    let mut cbs = CONFLICT_CALLBACKS.lock().expect("CONFLICT_CALLBACKS poisoned");
+    cbs.push(callback);
+}
+
+/// Dispatch a `ConflictDetected` event to all registered callbacks
+/// (orchestrator-facing helper, NOT a public FFI entry point).
+///
+/// TODO(orchestrator): wire `src/bridge/sync_engine.rs` (or wherever the
+/// Loro→Grafeo merge path lives) to call this helper on every conflicting
+/// text-field merge.
+pub fn dispatch_conflict_detected(event: &ConflictDetected) {
+    let cbs = CONFLICT_CALLBACKS.lock().expect("CONFLICT_CALLBACKS poisoned");
+    for cb in cbs.iter() {
+        cb(event as *const ConflictDetected);
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 //
