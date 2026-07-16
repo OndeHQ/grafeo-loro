@@ -27,10 +27,13 @@ use std::collections::HashMap;
 use parking_lot::RwLock;
 use tracing::instrument;
 
-use crate::constants::TREE_EDGE_LABEL;
-use crate::error::{GrafeoLoroError, Result};
-use crate::types::events::LoroOp;
 use crate::types::ids::{EdgeId, NodeId};
+#[cfg(feature = "grafeo")]
+use crate::constants::TREE_EDGE_LABEL;
+#[cfg(feature = "grafeo")]
+use crate::error::{GrafeoLoroError, Result};
+#[cfg(feature = "grafeo")]
+use crate::types::events::LoroOp;
 #[cfg(feature = "grafeo")]
 use crate::types::values::gval_to_grafeo_value;
 

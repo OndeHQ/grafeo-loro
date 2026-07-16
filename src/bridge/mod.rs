@@ -12,6 +12,14 @@
 
 pub mod grafeo_tx;
 pub mod origin;
+// Issue #4: `queue` is gated by `feature = "bridge"` only (inherited from
+// the parent `bridge` module's gate in `src/lib.rs`). It holds the
+// WASM-accessible `OfflineOpQueue` + `EpochTracker` + `LineageEpoch` +
+// `EpochMismatchError` types — no tokio, no grafeo, no telemetry deps.
+// Browser consumers on `wasm32-unknown-unknown` use this directly without
+// enabling `batcher` (tokio mpsc) + `grafeo` (native ONNX/ort) +
+// `telemetry` (opentelemetry native).
+pub mod queue;
 
 // `batcher` + `sync_engine` modules pull `grafeo` (GrafeoDB, Session API),
 // `telemetry` (HealthProbe, MetricsRegistry, SharedTracer), and the full
@@ -33,5 +41,11 @@ pub mod sync_engine;
 #[cfg(feature = "grafeo")]
 pub use grafeo_tx::apply_loro_op;
 pub use grafeo_tx::BridgeMaps;
+// Issue #4: re-export the WASM-accessible queue types from `bridge::queue`
+// so callers can `use grafeo_loro::bridge::{OfflineOpQueue, EpochTracker,
+// ...}` without reaching into the submodule. Reachable whenever `bridge`
+// is on — no `batcher`/`grafeo`/`telemetry` gate (that's the whole point
+// of issue #4).
+pub use queue::{EpochMismatchError, EpochTracker, LineageEpoch, OfflineOpQueue};
 #[cfg(all(feature = "batcher", feature = "grafeo", feature = "telemetry"))]
 pub use sync_engine::SyncEngine;
