@@ -22,6 +22,7 @@ pub const DEFAULT_NODE_PRESENCE_STALE_TIMEOUT_MS: u64 = 30_000;
 pub struct NodePresenceRegistry {
     states: HashMap<(String, String), NodePresence>,
     stale_timeout_ms: u64,
+    #[allow(clippy::type_complexity)]
     on_change: Option<Box<dyn Fn(&NodePresence) + Send + Sync>>,
 }
 

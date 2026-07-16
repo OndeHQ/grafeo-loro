@@ -3,9 +3,11 @@ use crate::types::presence::PresencePayload;
 use tracing::instrument;
 
 /// `%EPH` magic bytes (architecture §12).
+#[cfg(feature = "serde")]
 const EPH_MAGIC: &[u8; 4] = b"%EPH";
 
 /// Message type for presence payloads (architecture §12; future msg_types reserved).
+#[cfg(feature = "serde")]
 const EPH_MSG_TYPE_PRESENCE: u8 = 0x01;
 
 /// Decoded `%EPH` envelope (architecture §12).

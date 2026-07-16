@@ -457,6 +457,7 @@ fn lcs_matches(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
 /// - `OursWins`: no conflicts AND `theirs == base`.
 /// - `TheirsWins`: no conflicts AND `ours == base`.
 /// - `Merged`: no conflicts AND both sides made non-overlapping changes.
+#[allow(clippy::if_same_then_else)] // two branches intentionally produce the same output for different semantic reasons ("theirs made no insertion" vs "both sides made the same insertion")
 pub fn semantic_text_merge(base: &str, ours: &str, theirs: &str) -> (String, ConflictResolution) {
     let base_lines: Vec<&str> = base.split('\n').collect();
     let our_lines: Vec<&str> = ours.split('\n').collect();

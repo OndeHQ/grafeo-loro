@@ -18,3 +18,5 @@ repomix.md
 
 # repomix
 repomix-output*
+examples/wasm-offline-queue/target/
+examples/*/Cargo.lock
