@@ -131,6 +131,44 @@ pub mod wasm;
 pub mod runtime;
 
 // ============================================================================
+// Issue #3 sub-issue 6: native shadow commits, FTS, SAB layout
+// ============================================================================
+
+/// Native Git DAG / shadow commit API (issue #3 sub-issue 6).
+///
+/// Exposes per-writer WIP ref namespace (`refs/wip/<peerId>`) so downstream
+/// no longer needs `isomorphic-git` (80KB) for bounded undo.
+#[cfg(feature = "shadow")]
+pub mod shadow;
+
+/// Lightweight native full-text-search inverted index (issue #3 sub-issue 6).
+///
+/// <20MB WASM memory ceiling. Replaces heavy ONNX/HNSW runtimes for
+/// text-search workloads.
+#[cfg(feature = "fts")]
+pub mod fts;
+
+/// Native SAB (SharedArrayBuffer) layout writer (issue #3 sub-issue 6).
+///
+/// Pushes Y-offset / height math to Rust and writes directly to a SAB
+/// pointer so the JS virtualizer doesn't have to.
+#[cfg(feature = "sab")]
+pub mod sab;
+
+// ============================================================================
+// Issue #3 sub-issue 10: observability
+// ============================================================================
+
+/// Observability hooks: queue state, fault injection, invariant checks
+/// (issue #3 sub-issue 10).
+///
+/// Exposes internal queue state (`depth`, `oldest_age`, `locked_nodes`) to
+/// JS. Adds fault-injection hooks for testing. Provides invariant-check
+/// API for I4/I5/I11/I12/I14 post-mutation assertions.
+#[cfg(feature = "observability")]
+pub mod observability;
+
+// ============================================================================
 // Top-level facade: `GrafeoLoroApp`
 // ============================================================================
 //
